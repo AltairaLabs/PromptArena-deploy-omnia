@@ -1,4 +1,4 @@
-.PHONY: fmt lint test build check
+.PHONY: fmt lint test build check install-hooks
 
 # Format code with goimports
 fmt:
@@ -18,3 +18,7 @@ build:
 
 # Run all quality checks
 check: fmt lint test build
+
+# Install git hooks
+install-hooks:
+	git config core.hooksPath .githooks

@@ -35,8 +35,14 @@ const testDeployConfig = `{
 	"providers": {"default": "claude-prod"}
 }`
 
+func newPlanTestProvider() (*Provider, *simulatedClient) {
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	return &Provider{clientFunc: newSimulatedClientFactory(sim)}, sim
+}
+
 func TestPlan_SingleAgent(t *testing.T) {
-	p := NewProvider()
+	p, _ := newPlanTestProvider()
 	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
 		PackJSON:     testPackJSON,
 		DeployConfig: testDeployConfig,
@@ -68,6 +74,68 @@ func TestPlan_SingleAgent(t *testing.T) {
 	}
 }
 
+func TestPlan_ValidatesProviders(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: testDeployConfig,
+	})
+	if err != nil {
+		t.Fatalf("expected plan to succeed with valid provider, got: %v", err)
+	}
+	if len(resp.Changes) == 0 {
+		t.Error("expected non-empty changes")
+	}
+}
+
+func TestPlan_InvalidProvider(t *testing.T) {
+	sim := newSimulatedClient()
+	// Do NOT add "claude-prod" to validProviders — it should fail.
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	_, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: testDeployConfig,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid provider, got nil")
+	}
+	if !strings.Contains(err.Error(), "provider validation failed") {
+		t.Errorf("expected provider validation error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "claude-prod") {
+		t.Errorf("expected error to mention provider name, got: %v", err)
+	}
+}
+
+func TestPlan_SkipsProviderValidationOnDryRun(t *testing.T) {
+	sim := newSimulatedClient()
+	// Do NOT add any valid providers — dry-run should skip validation.
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	dryRunConfig := `{
+		"api_endpoint": "https://omnia.test.com",
+		"workspace": "test-ws",
+		"api_token": "test-token",
+		"providers": {"default": "nonexistent-provider"},
+		"dry_run": true
+	}`
+
+	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: dryRunConfig,
+	})
+	if err != nil {
+		t.Fatalf("expected dry-run plan to succeed, got: %v", err)
+	}
+	if len(resp.Changes) == 0 {
+		t.Error("expected non-empty changes")
+	}
+}
+
 func TestPlan_WithPriorState(t *testing.T) {
 	priorState := AdapterState{
 		Resources: []ResourceState{
@@ -81,7 +149,7 @@ func TestPlan_WithPriorState(t *testing.T) {
 	}
 	priorJSON, _ := json.Marshal(priorState)
 
-	p := NewProvider()
+	p, _ := newPlanTestProvider()
 	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
 		PackJSON:     testPackJSON,
 		DeployConfig: testDeployConfig,
@@ -113,7 +181,7 @@ func TestPlan_WithDeletion(t *testing.T) {
 	}
 	priorJSON, _ := json.Marshal(priorState)
 
-	p := NewProvider()
+	p, _ := newPlanTestProvider()
 	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
 		PackJSON:     testPackJSON,
 		DeployConfig: testDeployConfig,

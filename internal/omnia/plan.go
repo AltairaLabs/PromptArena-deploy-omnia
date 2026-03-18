@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
 	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
@@ -12,7 +13,7 @@ import (
 )
 
 // Plan generates a deployment plan for the given pack and config.
-func (p *Provider) Plan(_ context.Context, req *deploy.PlanRequest) (*deploy.PlanResponse, error) {
+func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.PlanResponse, error) {
 	pack, err := adaptersdk.ParsePack([]byte(req.PackJSON))
 	if err != nil {
 		return nil, fmt.Errorf("omnia: failed to parse pack: %w", err)
@@ -24,6 +25,13 @@ func (p *Provider) Plan(_ context.Context, req *deploy.PlanRequest) (*deploy.Pla
 	}
 	if errs := cfg.validate(); len(errs) > 0 {
 		return nil, fmt.Errorf("omnia: config validation failed: %s", errs[0])
+	}
+
+	// Validate that referenced providers exist (skip in dry-run mode).
+	if !cfg.DryRun {
+		if err := p.validateProviders(ctx, cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	var prior *AdapterState
@@ -163,4 +171,32 @@ func buildSummary(changes []deploy.ResourceChange) string {
 		}
 	}
 	return fmt.Sprintf("Plan: %d to create, %d to update, %d to delete", create, update, del)
+}
+
+// validateProviders creates a client and checks that every unique provider
+// referenced in cfg.Providers exists in the Omnia workspace.
+func (p *Provider) validateProviders(ctx context.Context, cfg *Config) error {
+	client, err := p.clientFunc(cfg)
+	if err != nil {
+		return fmt.Errorf("omnia: failed to create client for provider validation: %w", err)
+	}
+
+	// Deduplicate provider names.
+	seen := make(map[string]bool, len(cfg.Providers))
+	var errs []string
+	for _, providerName := range cfg.Providers {
+		if seen[providerName] {
+			continue
+		}
+		seen[providerName] = true
+
+		if err := client.ValidateProvider(ctx, providerName); err != nil {
+			errs = append(errs, fmt.Sprintf("provider %q not found in workspace", providerName))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("omnia: provider validation failed: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
