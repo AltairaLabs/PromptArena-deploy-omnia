@@ -1,0 +1,116 @@
+name: Update PromptKit Dependency
+
+on:
+  repository_dispatch:
+    types: [promptkit-release]
+
+permissions:
+  contents: write
+  pull-requests: write
+  workflows: write
+
+jobs:
+  update:
+    name: Update PromptKit to ${{ github.event.client_payload.version }}
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+    - name: Set up Go
+      uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+      with:
+        go-version: '1.25.1'
+
+    - name: Update go.mod
+      env:
+        VERSION: ${{ github.event.client_payload.version }}
+      run: |
+        echo "Updating PromptKit runtime to $VERSION..."
+
+        # Update required versions for PromptKit modules
+        go mod edit -require="github.com/AltairaLabs/PromptKit/runtime@$VERSION"
+        go mod edit -require="github.com/AltairaLabs/PromptKit/pkg@$VERSION"
+
+        # Drop all replace directives — the published modules are now available
+        go mod edit -dropreplace=github.com/AltairaLabs/PromptKit/runtime
+        go mod edit -dropreplace=github.com/AltairaLabs/PromptKit/pkg
+
+        # Tidy to resolve dependencies
+        go mod tidy
+
+        echo "✓ Updated go.mod"
+
+    - name: Remove sibling checkout from CI
+      env:
+        VERSION: ${{ github.event.client_payload.version }}
+      run: |
+        # Check if CI still has the sibling checkout step
+        if grep -q 'Checkout PromptKit' .github/workflows/ci.yml; then
+          echo "Removing sibling PromptKit checkout from CI..."
+
+          # Use sed to remove the checkout step from ci.yml
+          # Remove the 3-line block: "- name: Checkout PromptKit (sibling)\n      run: git clone..."
+          sed -i '/- name: Checkout PromptKit (sibling)/,/\.\.\/promptkit/d' .github/workflows/ci.yml
+
+          echo "✓ Removed sibling checkout from ci.yml"
+        fi
+
+        if grep -q 'Checkout PromptKit' .github/workflows/release.yml; then
+          echo "Removing sibling PromptKit checkout from release.yml..."
+          sed -i '/- name: Checkout PromptKit (sibling)/,/\.\.\/promptkit/d' .github/workflows/release.yml
+          echo "✓ Removed sibling checkout from release.yml"
+        fi
+
+    - name: Verify build
+      run: |
+        echo "Verifying build without replace directives..."
+        go build -o promptarena-deploy-omnia .
+        echo "✓ Build succeeded"
+
+    - name: Verify tests
+      run: |
+        echo "Running tests..."
+        go test ./... -v -race -count=1
+        echo "✓ Tests passed"
+
+    - name: Create pull request
+      env:
+        VERSION: ${{ github.event.client_payload.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        BRANCH="deps/promptkit-$VERSION"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        git checkout -b "$BRANCH"
+        git add -A
+        git commit -m "deps: update PromptKit runtime to $VERSION
+
+        Drop replace directives — published module is now available on
+        the Go proxy. Remove sibling PromptKit checkout from CI workflows."
+
+        git push origin "$BRANCH"
+
+        gh pr create \
+          --title "deps: update PromptKit runtime to $VERSION" \
+          --body "$(cat <<'PREOF'
+        ## Summary
+
+        - Update `github.com/AltairaLabs/PromptKit/runtime` to $VERSION
+        - Drop `replace` directives from `go.mod` (published module available)
+        - Remove sibling PromptKit checkout from CI workflows
+
+        Triggered automatically by PromptKit release $VERSION.
+
+        ## Verification
+
+        - [x] `go build` passes without replace directives
+        - [x] `go test ./... -race` passes
+
+        🤖 Generated automatically by the update-deps workflow
+        PREOF
+        )"
+
+        echo "✓ Created PR for $BRANCH"

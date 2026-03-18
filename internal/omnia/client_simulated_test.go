@@ -1,0 +1,196 @@
+package omnia
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// simulatedClient is a fake omniaClient for testing that stores resources
+// in memory and supports error injection.
+type simulatedClient struct {
+	mu             sync.Mutex
+	resources      map[string]*ResourceResponse
+	failOn         map[string]error
+	validProviders map[string]bool
+	healthy        bool
+}
+
+// newSimulatedClient creates a simulatedClient with default healthy state.
+func newSimulatedClient() *simulatedClient {
+	return &simulatedClient{
+		resources:      make(map[string]*ResourceResponse),
+		failOn:         make(map[string]error),
+		validProviders: make(map[string]bool),
+		healthy:        true,
+	}
+}
+
+func simKey(resType, name string) string {
+	return resType + "/" + name
+}
+
+func (s *simulatedClient) injectedError(resType, name string) error {
+	if err, ok := s.failOn[simKey(resType, name)]; ok {
+		return err
+	}
+	return nil
+}
+
+func (s *simulatedClient) CreateResource(
+	ctx context.Context, resType, name string, body json.RawMessage,
+) (*ResourceResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.injectedError(resType, name); err != nil {
+		return nil, err
+	}
+
+	key := simKey(resType, name)
+	if _, exists := s.resources[key]; exists {
+		return nil, fmt.Errorf("resource %s already exists", key)
+	}
+
+	resp := &ResourceResponse{
+		Kind: resType,
+		Metadata: ResourceMetadata{
+			Name:            name,
+			UID:             "uid-" + name,
+			ResourceVersion: "1",
+		},
+		Spec: body,
+	}
+	s.resources[key] = resp
+	return resp, nil
+}
+
+func (s *simulatedClient) GetResource(
+	ctx context.Context, resType, name string,
+) (*ResourceResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.injectedError(resType, name); err != nil {
+		return nil, err
+	}
+
+	key := simKey(resType, name)
+	res, ok := s.resources[key]
+	if !ok {
+		return nil, fmt.Errorf("resource %s not found", key)
+	}
+	return res, nil
+}
+
+func (s *simulatedClient) UpdateResource(
+	ctx context.Context, resType, name string, body json.RawMessage,
+) (*ResourceResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.injectedError(resType, name); err != nil {
+		return nil, err
+	}
+
+	key := simKey(resType, name)
+	existing, ok := s.resources[key]
+	if !ok {
+		return nil, fmt.Errorf("resource %s not found", key)
+	}
+
+	// Increment resource version.
+	ver, _ := strconv.Atoi(existing.Metadata.ResourceVersion)
+	existing.Metadata.ResourceVersion = strconv.Itoa(ver + 1)
+	existing.Spec = body
+	return existing, nil
+}
+
+func (s *simulatedClient) DeleteResource(
+	ctx context.Context, resType, name string,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.injectedError(resType, name); err != nil {
+		return err
+	}
+
+	key := simKey(resType, name)
+	if _, ok := s.resources[key]; !ok {
+		return fmt.Errorf("resource %s not found", key)
+	}
+	delete(s.resources, key)
+	return nil
+}
+
+func (s *simulatedClient) ListResources(
+	ctx context.Context, resType, labelSelector string,
+) ([]ResourceResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.injectedError(resType, ""); err != nil {
+		return nil, err
+	}
+
+	var results []ResourceResponse
+	prefix := resType + "/"
+	for key, res := range s.resources {
+		if strings.HasPrefix(key, prefix) {
+			if labelSelector == "" || matchesSelector(res.Metadata.Labels, labelSelector) {
+				results = append(results, *res)
+			}
+		}
+	}
+	return results, nil
+}
+
+func (s *simulatedClient) ValidateProvider(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.validProviders[name] {
+		return nil
+	}
+	return fmt.Errorf("provider %q not found", name)
+}
+
+func (s *simulatedClient) Health(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.healthy {
+		return nil
+	}
+	return fmt.Errorf("health check failed")
+}
+
+// matchesSelector is a simplified label selector matcher for testing.
+// It supports comma-separated key=value pairs.
+func matchesSelector(labels map[string]string, selector string) bool {
+	if selector == "" {
+		return true
+	}
+	for _, part := range strings.Split(selector, ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		if labels[kv[0]] != kv[1] {
+			return false
+		}
+	}
+	return true
+}
+
+// newSimulatedClientFactory returns an omniaClientFactory that always
+// returns the provided simulatedClient.
+func newSimulatedClientFactory(client *simulatedClient) omniaClientFactory {
+	return func(cfg *Config) (omniaClient, error) {
+		return client, nil
+	}
+}

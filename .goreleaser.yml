@@ -1,0 +1,60 @@
+# GoReleaser configuration for promptarena-deploy-omnia
+# See: https://goreleaser.com
+
+version: 2
+
+builds:
+  - id: promptarena-deploy-omnia
+    binary: promptarena-deploy-omnia
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/AltairaLabs/promptarena-deploy-omnia/internal/omnia.Version={{.Version}}
+      - -X github.com/AltairaLabs/promptarena-deploy-omnia/internal/omnia.Commit={{.Commit}}
+      - -X github.com/AltairaLabs/promptarena-deploy-omnia/internal/omnia.Date={{.Date}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+
+release:
+  github:
+    owner: AltairaLabs
+    name: promptarena-deploy-omnia
+  draft: true
+  name_template: "promptarena-deploy-omnia {{.Version}}"
