@@ -39,7 +39,7 @@ type ResourceMetadata struct {
 	Name            string            `json:"name"`
 	Namespace       string            `json:"namespace,omitempty"`
 	UID             string            `json:"uid,omitempty"`
-	ResourceVersion string            `json:"resource_version,omitempty"`
+	ResourceVersion string            `json:"resourceVersion,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 }
 
@@ -58,12 +58,10 @@ type ResourceCondition struct {
 // resourceTypePath maps adapter resource type constants to API URL path segments.
 func resourceTypePath(resType string) string {
 	switch resType {
-	case ResTypeConfigMap:
-		return "configmaps"
 	case ResTypePromptPack:
 		return "promptpacks"
 	case ResTypeAgentRuntime:
-		return "agentruntimes"
+		return "agents"
 	case ResTypeToolRegistry:
 		return "toolregistries"
 	case ResTypeAgentPolicy:

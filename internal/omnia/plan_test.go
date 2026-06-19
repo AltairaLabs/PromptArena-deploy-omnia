@@ -52,7 +52,6 @@ func TestPlan_SingleAgent(t *testing.T) {
 	}
 
 	expectedTypes := map[string]bool{
-		ResTypeConfigMap:    false,
 		ResTypePromptPack:   false,
 		ResTypeToolRegistry: false,
 		ResTypeAgentRuntime: false,
@@ -139,7 +138,6 @@ func TestPlan_SkipsProviderValidationOnDryRun(t *testing.T) {
 func TestPlan_WithPriorState(t *testing.T) {
 	priorState := AdapterState{
 		Resources: []ResourceState{
-			{Type: ResTypeConfigMap, Name: "test-pack-packdata"},
 			{Type: ResTypePromptPack, Name: "test-pack"},
 			{Type: ResTypeToolRegistry, Name: "test-pack-tools"},
 			{Type: ResTypeAgentRuntime, Name: "test-pack"},
@@ -170,7 +168,6 @@ func TestPlan_WithDeletion(t *testing.T) {
 	// Prior state has an extra resource not in the desired set.
 	priorState := AdapterState{
 		Resources: []ResourceState{
-			{Type: ResTypeConfigMap, Name: "test-pack-packdata"},
 			{Type: ResTypePromptPack, Name: "test-pack"},
 			{Type: ResTypeToolRegistry, Name: "test-pack-tools"},
 			{Type: ResTypeAgentRuntime, Name: "test-pack"},

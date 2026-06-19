@@ -11,18 +11,17 @@ import (
 )
 
 // numApplyPhases is the total number of apply phases for progress tracking.
-const numApplyPhases = 5
+const numApplyPhases = 4
 
 // progressStepSize is the fraction of the progress bar each phase occupies.
 const progressStepSize = 1.0 / numApplyPhases
 
 // Apply phase step indices.
 const (
-	stepConfigMap    = 0
-	stepPromptPack   = 1
-	stepToolRegistry = 2
-	stepAgentPolicy  = 3
-	stepAgentRuntime = 4
+	stepPromptPack   = 0
+	stepToolRegistry = 1
+	stepAgentPolicy  = 2
+	stepAgentRuntime = 3
 )
 
 // applyContext holds parsed inputs for the Apply method.
@@ -86,21 +85,14 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	var resources []ResourceState
 	var applyErr error
 
-	// Phase 0: ConfigMap
-	res, err := applyResourcePhase(ctx, ac, stepConfigMap, ResTypeConfigMap,
-		sanitizeName(ac.pack.ID+"-packdata"),
-		func() (json.RawMessage, error) { return buildConfigMapRequest(ac.pack, ac.cfg) })
-	resources = append(resources, res...)
-	applyErr = combineErrors(applyErr, err)
-
-	// Phase 1: PromptPack
-	res, err = applyResourcePhase(ctx, ac, stepPromptPack, ResTypePromptPack,
+	// Phase 0: PromptPack (dashboard folds pack content into a managed ConfigMap)
+	res, err := applyResourcePhase(ctx, ac, stepPromptPack, ResTypePromptPack,
 		sanitizeName(ac.pack.ID),
 		func() (json.RawMessage, error) { return buildPromptPackRequest(ac.pack, ac.cfg) })
 	resources = append(resources, res...)
 	applyErr = combineErrors(applyErr, err)
 
-	// Phase 2: ToolRegistry (if pack has tools)
+	// Phase 1: ToolRegistry (if pack has tools)
 	if len(ac.pack.Tools) > 0 {
 		res, err = applyResourcePhase(ctx, ac, stepToolRegistry, ResTypeToolRegistry,
 			sanitizeName(ac.pack.ID+"-tools"),
@@ -109,7 +101,7 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 		applyErr = combineErrors(applyErr, err)
 	}
 
-	// Phase 3: AgentPolicy (if pack has tool policy)
+	// Phase 2: AgentPolicy (if pack has tool policy)
 	if hasToolPolicy(ac.pack) {
 		res, err = applyResourcePhase(ctx, ac, stepAgentPolicy, ResTypeAgentPolicy,
 			sanitizeName(ac.pack.ID+"-policy"),
@@ -118,7 +110,7 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 		applyErr = combineErrors(applyErr, err)
 	}
 
-	// Phase 4: AgentRuntime(s)
+	// Phase 3: AgentRuntime(s)
 	names := agentRuntimeNames(ac.pack)
 	for i, name := range names {
 		agentName := name // capture for closure

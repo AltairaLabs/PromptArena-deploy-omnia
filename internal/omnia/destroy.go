@@ -8,13 +8,17 @@ import (
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
 )
 
-// destroyOrder defines the reverse dependency order for teardown.
+// destroyEventResource is the DestroyEvent.Type for per-resource deletion events.
+const destroyEventResource = "resource"
+
+// destroyOrder defines the reverse dependency order for teardown. The
+// PromptPack's managed content ConfigMap is cleaned up dashboard-side on
+// PromptPack delete, so the adapter does not track or delete it.
 var destroyOrder = []string{
 	ResTypeAgentRuntime,
 	ResTypeAgentPolicy,
 	ResTypeToolRegistry,
 	ResTypePromptPack,
-	ResTypeConfigMap,
 }
 
 // Destroy tears down deployed resources in reverse dependency order.
@@ -77,18 +81,18 @@ func destroyResourceGroup(
 				Message: deployErr.Error(),
 				Resource: &deploy.ResourceResult{
 					Type: res.Type, Name: res.Name,
-					Action: deploy.ActionDelete, Status: "failed",
+					Action: deploy.ActionDelete, Status: ResStatusFailed,
 					Detail: deployErr.Error(),
 				},
 			})
 			continue
 		}
 		_ = callback(&deploy.DestroyEvent{
-			Type:    "resource",
+			Type:    destroyEventResource,
 			Message: fmt.Sprintf("Deleted %s %q", res.Type, res.Name),
 			Resource: &deploy.ResourceResult{
 				Type: res.Type, Name: res.Name,
-				Action: deploy.ActionDelete, Status: "deleted",
+				Action: deploy.ActionDelete, Status: ResStatusDeleted,
 			},
 		})
 	}
@@ -104,12 +108,12 @@ func destroyUnorderedResources(
 			continue
 		}
 		err := client.DeleteResource(ctx, res.Type, res.Name)
-		status := "deleted"
+		status := ResStatusDeleted
 		if err != nil {
-			status = "failed"
+			status = ResStatusFailed
 		}
 		_ = callback(&deploy.DestroyEvent{
-			Type:    "resource",
+			Type:    destroyEventResource,
 			Message: fmt.Sprintf("Deleted %s %q", res.Type, res.Name),
 			Resource: &deploy.ResourceResult{
 				Type: res.Type, Name: res.Name,

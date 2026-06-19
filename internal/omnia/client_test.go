@@ -15,6 +15,7 @@ func newTestHTTPClient(t *testing.T, handler http.Handler) *httpClient {
 	t.Cleanup(server.Close)
 	return &httpClient{
 		baseURL:    server.URL,
+		endpoint:   server.URL,
 		token:      "test-token",
 		httpClient: server.Client(),
 	}
@@ -64,7 +65,7 @@ func TestHTTPClient_GetResource(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
-		if !strings.HasSuffix(r.URL.Path, "/agentruntimes/test-runtime") {
+		if !strings.HasSuffix(r.URL.Path, "/agents/test-runtime") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 
@@ -99,7 +100,7 @@ func TestHTTPClient_DeleteResource(t *testing.T) {
 		if r.Method != http.MethodDelete {
 			t.Errorf("expected DELETE, got %s", r.Method)
 		}
-		if !strings.HasSuffix(r.URL.Path, "/configmaps/test-cm") {
+		if !strings.HasSuffix(r.URL.Path, "/toolregistries/test-tools") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
@@ -107,7 +108,7 @@ func TestHTTPClient_DeleteResource(t *testing.T) {
 
 	client := newTestHTTPClient(t, handler)
 
-	err := client.DeleteResource(context.Background(), ResTypeConfigMap, "test-cm")
+	err := client.DeleteResource(context.Background(), ResTypeToolRegistry, "test-tools")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestHTTPClient_Health(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
-		if !strings.HasSuffix(r.URL.Path, "/health") {
+		if !strings.HasSuffix(r.URL.Path, "/api/health") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
@@ -147,5 +148,110 @@ func TestHTTPClient_ErrorResponse(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected error to contain status code 403, got: %q", err.Error())
+	}
+}
+
+func TestHTTPClient_UpdateResource(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("expected PUT, got %s", r.Method)
+		}
+		if !strings.HasSuffix(r.URL.Path, "/agents/test-agent") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(ResourceResponse{
+			Kind:     "AgentRuntime",
+			Metadata: ResourceMetadata{Name: "test-agent", ResourceVersion: "2"},
+		})
+	})
+
+	client := newTestHTTPClient(t, handler)
+	resp, err := client.UpdateResource(
+		context.Background(), ResTypeAgentRuntime, "test-agent",
+		json.RawMessage(`{"spec":{}}`),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Metadata.ResourceVersion != "2" {
+		t.Errorf("expected resourceVersion 2, got %q", resp.Metadata.ResourceVersion)
+	}
+}
+
+func TestHTTPClient_ListResources(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/promptpacks") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("labelSelector"); got != "app=x" {
+			t.Errorf("expected labelSelector app=x, got %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode([]ResourceResponse{
+			{Kind: "PromptPack", Metadata: ResourceMetadata{Name: "p1"}},
+		})
+	})
+
+	client := newTestHTTPClient(t, handler)
+	items, err := client.ListResources(context.Background(), ResTypePromptPack, "app=x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items) != 1 || items[0].Metadata.Name != "p1" {
+		t.Errorf("unexpected list result: %v", items)
+	}
+}
+
+func TestHTTPClient_ValidateProvider(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/providers/claude-prod") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	client := newTestHTTPClient(t, handler)
+	if err := client.ValidateProvider(context.Background(), "claude-prod"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHTTPClient_ValidateProvider_NotFound(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	client := newTestHTTPClient(t, handler)
+	if err := client.ValidateProvider(context.Background(), "missing"); err == nil {
+		t.Fatal("expected error for missing provider")
+	}
+}
+
+func TestNewHTTPClient(t *testing.T) {
+	t.Setenv("OMNIA_API_TOKEN", "")
+	cfg := &Config{
+		APIEndpoint: "https://omnia.example.com/",
+		Workspace:   "ws1",
+		APIToken:    "tok",
+	}
+	c, err := newHTTPClient(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	hc, ok := c.(*httpClient)
+	if !ok {
+		t.Fatal("expected *httpClient")
+	}
+	if hc.baseURL != "https://omnia.example.com/api/workspaces/ws1" {
+		t.Errorf("unexpected baseURL: %q", hc.baseURL)
+	}
+	if hc.endpoint != "https://omnia.example.com" {
+		t.Errorf("unexpected endpoint: %q", hc.endpoint)
+	}
+
+	// Missing token is an error.
+	if _, err := newHTTPClient(&Config{APIEndpoint: "https://x", Workspace: "w"}); err == nil {
+		t.Fatal("expected error when no token configured")
 	}
 }
