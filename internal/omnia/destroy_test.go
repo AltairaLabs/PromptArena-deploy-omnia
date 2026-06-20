@@ -23,7 +23,6 @@ func TestDestroy_AllResources(t *testing.T) {
 	sim := newSimulatedClient()
 	// Pre-populate resources so deletes succeed.
 	for _, r := range []struct{ typ, name string }{
-		{ResTypeConfigMap, "test-pack-packdata"},
 		{ResTypePromptPack, "test-pack"},
 		{ResTypeToolRegistry, "test-pack-tools"},
 		{ResTypeAgentRuntime, "test-pack"},
@@ -37,7 +36,6 @@ func TestDestroy_AllResources(t *testing.T) {
 
 	state := AdapterState{
 		Resources: []ResourceState{
-			{Type: ResTypeConfigMap, Name: "test-pack-packdata"},
 			{Type: ResTypePromptPack, Name: "test-pack"},
 			{Type: ResTypeToolRegistry, Name: "test-pack-tools"},
 			{Type: ResTypeAgentRuntime, Name: "test-pack"},
@@ -67,22 +65,24 @@ func TestDestroy_AllResources(t *testing.T) {
 		t.Errorf("expected %d resource delete events, got %d", len(state.Resources), resourceEvents)
 	}
 
-	// Verify destroy order via events: AgentRuntime delete before ConfigMap delete.
-	var runtimeIdx, configmapIdx int
+	// Verify destroy order via events: AgentRuntime delete before PromptPack
+	// delete (reverse dependency order; PromptPack is last).
+	runtimeIdx, promptPackIdx := -1, -1
 	idx := 0
 	for _, e := range *events {
 		if e.Type == "resource" && e.Resource != nil && e.Resource.Action == deploy.ActionDelete {
 			if e.Resource.Type == ResTypeAgentRuntime {
 				runtimeIdx = idx
 			}
-			if e.Resource.Type == ResTypeConfigMap {
-				configmapIdx = idx
+			if e.Resource.Type == ResTypePromptPack {
+				promptPackIdx = idx
 			}
 			idx++
 		}
 	}
-	if runtimeIdx > configmapIdx && configmapIdx > 0 {
-		t.Error("expected agent_runtime to be deleted before configmap")
+	if runtimeIdx == -1 || promptPackIdx == -1 || runtimeIdx > promptPackIdx {
+		t.Errorf("expected agent_runtime to be deleted before prompt_pack (runtime=%d promptpack=%d)",
+			runtimeIdx, promptPackIdx)
 	}
 }
 
@@ -121,8 +121,8 @@ func TestDestroy_PartialFailure(t *testing.T) {
 	sim := newSimulatedClient()
 	// Pre-populate all resources so deletes work (except the one we inject failure on).
 	for _, r := range []struct{ typ, name string }{
-		{ResTypeConfigMap, "test-pack-packdata"},
 		{ResTypePromptPack, "test-pack"},
+		{ResTypeToolRegistry, "test-pack-tools"},
 		{ResTypeAgentRuntime, "test-pack"},
 	} {
 		sim.resources[simKey(r.typ, r.name)] = &ResourceResponse{
@@ -135,8 +135,8 @@ func TestDestroy_PartialFailure(t *testing.T) {
 
 	state := AdapterState{
 		Resources: []ResourceState{
-			{Type: ResTypeConfigMap, Name: "test-pack-packdata"},
 			{Type: ResTypePromptPack, Name: "test-pack"},
+			{Type: ResTypeToolRegistry, Name: "test-pack-tools"},
 			{Type: ResTypeAgentRuntime, Name: "test-pack"},
 		},
 		PackID: "test-pack",

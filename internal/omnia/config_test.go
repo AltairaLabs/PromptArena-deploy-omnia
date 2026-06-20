@@ -114,6 +114,57 @@ func TestValidateConfig_Valid(t *testing.T) {
 	}
 }
 
+func intPtr(v int) *int { return &v }
+
+func TestValidateConfig_Autoscaling(t *testing.T) {
+	base := func(a *AutoscalingConfig) *Config {
+		return &Config{
+			APIEndpoint: "https://omnia.example.com",
+			Workspace:   "test-ws",
+			APIToken:    "tok",
+			Providers:   map[string]string{"default": "claude-prod"},
+			Runtime:     &RuntimeConfig{Autoscaling: a},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		as        *AutoscalingConfig
+		wantError string // substring expected in the first error, "" = no error
+	}{
+		{"valid hpa", &AutoscalingConfig{Enabled: true, Type: "hpa", MinReplicas: intPtr(1), MaxReplicas: intPtr(10)}, ""},
+		{"valid keda scale-to-zero", &AutoscalingConfig{Enabled: true, Type: "keda", MinReplicas: intPtr(0), MaxReplicas: intPtr(5)}, ""},
+		{"valid empty block", &AutoscalingConfig{}, ""},
+		{"bad type", &AutoscalingConfig{Type: "vpa"}, "must be"},
+		{"negative min", &AutoscalingConfig{MinReplicas: intPtr(-1)}, "min_replicas must be >= 0"},
+		{"zero max", &AutoscalingConfig{MaxReplicas: intPtr(0)}, "max_replicas must be >= 1"},
+		{"min exceeds max", &AutoscalingConfig{MinReplicas: intPtr(8), MaxReplicas: intPtr(3)}, "must not exceed max_replicas"},
+		{"cpu over 100", &AutoscalingConfig{TargetCPUUtilization: intPtr(150)}, "target_cpu_utilization must be between 1 and 100"},
+		{"memory under 1", &AutoscalingConfig{TargetMemoryUtilization: intPtr(0)}, "target_memory_utilization must be between 1 and 100"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := base(tt.as).validate()
+			if tt.wantError == "" {
+				if len(errs) != 0 {
+					t.Errorf("expected no errors, got %v", errs)
+				}
+				return
+			}
+			found := false
+			for _, e := range errs {
+				if strings.Contains(e, tt.wantError) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected an error containing %q, got %v", tt.wantError, errs)
+			}
+		})
+	}
+}
+
 func TestResolveToken_ConfigTakesPrecedence(t *testing.T) {
 	t.Setenv("OMNIA_API_TOKEN", "env-token")
 
@@ -145,13 +196,13 @@ func TestBaseURL(t *testing.T) {
 			name:     "no trailing slash",
 			endpoint: "https://omnia.example.com",
 			ws:       "ws1",
-			want:     "https://omnia.example.com/api/v1/workspaces/ws1",
+			want:     "https://omnia.example.com/api/workspaces/ws1",
 		},
 		{
 			name:     "trailing slash",
 			endpoint: "https://omnia.example.com/",
 			ws:       "ws2",
-			want:     "https://omnia.example.com/api/v1/workspaces/ws2",
+			want:     "https://omnia.example.com/api/workspaces/ws2",
 		},
 	}
 

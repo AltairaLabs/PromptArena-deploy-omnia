@@ -54,14 +54,8 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 
 // generateDesiredResources builds the list of desired Omnia resources from the pack.
 func generateDesiredResources(pack *prompt.Pack) []deploy.ResourceChange {
-	// Step 0: ConfigMap for pack data + Step 1: PromptPack CRD.
+	// Step 0: PromptPack CRD (dashboard folds pack content into a managed ConfigMap).
 	desired := []deploy.ResourceChange{
-		{
-			Type:   ResTypeConfigMap,
-			Name:   sanitizeName(pack.ID + "-packdata"),
-			Action: deploy.ActionCreate,
-			Detail: fmt.Sprintf("Create ConfigMap with pack data for %s", pack.ID),
-		},
 		{
 			Type:   ResTypePromptPack,
 			Name:   sanitizeName(pack.ID),
@@ -70,7 +64,7 @@ func generateDesiredResources(pack *prompt.Pack) []deploy.ResourceChange {
 		},
 	}
 
-	// Step 2: ToolRegistry (if pack has tools).
+	// Step 1: ToolRegistry (if pack has tools).
 	if len(pack.Tools) > 0 {
 		desired = append(desired, deploy.ResourceChange{
 			Type:   ResTypeToolRegistry,
@@ -80,7 +74,7 @@ func generateDesiredResources(pack *prompt.Pack) []deploy.ResourceChange {
 		})
 	}
 
-	// Step 3: AgentPolicy (if pack has tool blocklist).
+	// Step 2: AgentPolicy (if pack has tool blocklist).
 	if hasToolPolicy(pack) {
 		desired = append(desired, deploy.ResourceChange{
 			Type:   ResTypeAgentPolicy,
@@ -90,7 +84,7 @@ func generateDesiredResources(pack *prompt.Pack) []deploy.ResourceChange {
 		})
 	}
 
-	// Step 4: AgentRuntime(s).
+	// Step 3: AgentRuntime(s).
 	for _, name := range agentRuntimeNames(pack) {
 		desired = append(desired, deploy.ResourceChange{
 			Type:   ResTypeAgentRuntime,

@@ -11,7 +11,8 @@ import (
 
 // httpClient is the real HTTP implementation of omniaClient.
 type httpClient struct {
-	baseURL    string
+	baseURL    string // workspace-scoped: {endpoint}/api/workspaces/{ws}
+	endpoint   string // API root: {endpoint} (for non-workspace routes like /api/health)
 	token      string
 	httpClient *http.Client
 }
@@ -24,6 +25,7 @@ func newHTTPClient(cfg *Config) (omniaClient, error) {
 	}
 	return &httpClient{
 		baseURL:    cfg.baseURL(),
+		endpoint:   cfg.endpointRoot(),
 		token:      token,
 		httpClient: &http.Client{},
 	}, nil
@@ -109,7 +111,7 @@ func (c *httpClient) ValidateProvider(ctx context.Context, name string) error {
 }
 
 func (c *httpClient) Health(ctx context.Context) error { //nolint:revive // interface implementation
-	url := fmt.Sprintf("%s/health", c.baseURL)
+	url := fmt.Sprintf("%s/api/health", c.endpoint)
 	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err

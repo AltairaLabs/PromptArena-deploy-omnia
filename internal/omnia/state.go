@@ -2,7 +2,6 @@ package omnia
 
 // Resource type constants used across plan, apply, destroy, and status.
 const (
-	ResTypeConfigMap    = "configmap"
 	ResTypePromptPack   = "prompt_pack"
 	ResTypeAgentRuntime = "agent_runtime"
 	ResTypeToolRegistry = "tool_registry"
@@ -15,6 +14,7 @@ const (
 	ResStatusUpdated = "updated"
 	ResStatusFailed  = "failed"
 	ResStatusPlanned = "planned"
+	ResStatusDeleted = "deleted"
 )
 
 // Health status constants returned by resource checks.

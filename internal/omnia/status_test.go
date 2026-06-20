@@ -11,15 +11,15 @@ import (
 func TestStatus_Deployed(t *testing.T) {
 	sim := newSimulatedClient()
 	// Pre-populate resources so GetResource returns them as healthy.
-	sim.resources[resourceKey(ResTypeConfigMap, "test-pack-packdata")] = &ResourceResponse{
-		Kind:     "ConfigMap",
-		Metadata: ResourceMetadata{Name: "test-pack-packdata"},
-		Status:   &ResourceStatus{Phase: "Active"},
-	}
 	sim.resources[resourceKey(ResTypePromptPack, "test-pack")] = &ResourceResponse{
 		Kind:     "PromptPack",
 		Metadata: ResourceMetadata{Name: "test-pack"},
 		Status:   &ResourceStatus{Conditions: []ResourceCondition{{Type: "Ready", Status: "True"}}},
+	}
+	sim.resources[resourceKey(ResTypeToolRegistry, "test-pack-tools")] = &ResourceResponse{
+		Kind:     "ToolRegistry",
+		Metadata: ResourceMetadata{Name: "test-pack-tools"},
+		Status:   &ResourceStatus{Phase: "Active"},
 	}
 	sim.resources[resourceKey(ResTypeAgentRuntime, "test-pack")] = &ResourceResponse{
 		Kind:     "AgentRuntime",
@@ -30,8 +30,8 @@ func TestStatus_Deployed(t *testing.T) {
 
 	state := AdapterState{
 		Resources: []ResourceState{
-			{Type: ResTypeConfigMap, Name: "test-pack-packdata"},
 			{Type: ResTypePromptPack, Name: "test-pack"},
+			{Type: ResTypeToolRegistry, Name: "test-pack-tools"},
 			{Type: ResTypeAgentRuntime, Name: "test-pack"},
 		},
 	}
@@ -60,16 +60,16 @@ func TestStatus_Deployed(t *testing.T) {
 func TestStatus_Degraded(t *testing.T) {
 	sim := newSimulatedClient()
 	// Only populate some resources — the missing one will cause "degraded".
-	sim.resources[resourceKey(ResTypeConfigMap, "test-pack-packdata")] = &ResourceResponse{
-		Kind:     "ConfigMap",
-		Metadata: ResourceMetadata{Name: "test-pack-packdata"},
+	sim.resources[resourceKey(ResTypePromptPack, "test-pack")] = &ResourceResponse{
+		Kind:     "PromptPack",
+		Metadata: ResourceMetadata{Name: "test-pack"},
 	}
 	// Do NOT add the AgentRuntime — it will be "missing".
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
 	state := AdapterState{
 		Resources: []ResourceState{
-			{Type: ResTypeConfigMap, Name: "test-pack-packdata"},
+			{Type: ResTypePromptPack, Name: "test-pack"},
 			{Type: ResTypeAgentRuntime, Name: "test-pack"},
 		},
 	}

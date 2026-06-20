@@ -9,107 +9,154 @@ import (
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
-// configMapRequest builds the JSON body for creating/updating a ConfigMap
-// that holds the raw pack JSON data.
-func buildConfigMapRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, error) {
-	req := map[string]interface{}{
-		"kind": "ConfigMap",
-		"metadata": map[string]interface{}{
-			"name":   sanitizeName(pack.ID + "-packdata"),
-			"labels": buildResourceLabels(pack.ID, pack.Version, ResTypeConfigMap, cfg.Labels),
-		},
-		"data": map[string]string{
-			"pack.json": cfg.PackJSON,
-		},
-	}
-	return json.Marshal(req)
-}
+// promptPackContentKey is the ConfigMap data key the dashboard's promptpacks
+// route folds pack JSON into.
+const promptPackContentKey = "pack.json"
 
-// buildPromptPackRequest builds the JSON body for creating/updating a PromptPack CRD.
+// JSON request body keys used across the resource builders.
+const (
+	keySpec     = "spec"
+	keyLabels   = "labels"
+	keyMetadata = "metadata"
+	keyName     = "name"
+)
+
+// defaultProviderName is the NamedProviderRef name treated as the runtime's
+// primary provider by the AgentRuntime CRD.
+const defaultProviderName = "default"
+
+// buildPromptPackRequest builds the JSON body for creating/updating a PromptPack.
+// The dashboard's promptpacks route folds body.content into a managed
+// ConfigMap and sets spec.source itself, so the adapter only sends the pack
+// version in spec and the raw pack JSON in content.
 func buildPromptPackRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, error) {
-	// Resolve provider mapping.
-	providerRef := ""
-	if defaultProvider, ok := cfg.Providers["default"]; ok {
-		providerRef = defaultProvider
-	}
-
-	spec := map[string]interface{}{
-		"packId":       pack.ID,
-		"version":      pack.Version,
-		"configMapRef": sanitizeName(pack.ID + "-packdata"),
-	}
-	if providerRef != "" {
-		spec["providerRef"] = providerRef
-	}
-	if pack.Description != "" {
-		spec["description"] = pack.Description
-	}
-
 	req := map[string]interface{}{
-		"kind": "PromptPack",
-		"metadata": map[string]interface{}{
-			"name":   sanitizeName(pack.ID),
-			"labels": buildResourceLabels(pack.ID, pack.Version, ResTypePromptPack, cfg.Labels),
+		keyMetadata: map[string]interface{}{
+			keyName:   sanitizeName(pack.ID),
+			keyLabels: buildResourceLabels(pack.ID, pack.Version, ResTypePromptPack, cfg.Labels),
 		},
-		"spec": spec,
+		keySpec: map[string]interface{}{
+			"version": pack.Version,
+		},
+		"content": map[string]string{
+			promptPackContentKey: cfg.PackJSON,
+		},
 	}
 	return json.Marshal(req)
 }
 
-// buildAgentRuntimeRequest builds the JSON body for creating/updating an AgentRuntime CRD.
+// buildAgentRuntimeRequest builds the JSON body for creating/updating an AgentRuntime.
 func buildAgentRuntimeRequest(
 	pack *prompt.Pack, agentName string, cfg *Config,
 ) (json.RawMessage, error) {
 	spec := map[string]interface{}{
-		"promptPackRef": sanitizeName(pack.ID),
+		"promptPackRef": map[string]interface{}{
+			keyName: sanitizeName(pack.ID),
+		},
+		"facade": map[string]interface{}{
+			"type":    "websocket",
+			"handler": "runtime",
+		},
 	}
 
-	// Multi-agent: reference the specific member prompt.
-	if adaptersdk.IsMultiAgent(pack) {
-		spec["agentName"] = agentName
-	}
-
-	// Provider mapping for this agent.
+	// Primary provider mapping for this agent. The "default" entry is the
+	// runtime's primary provider.
 	if providerRef, ok := resolveProviderForAgent(agentName, cfg); ok {
-		spec["providerRef"] = providerRef
-	}
-
-	// Runtime sizing.
-	if cfg.Runtime != nil {
-		resources := map[string]interface{}{}
-		if cfg.Runtime.Replicas > 0 {
-			spec["replicas"] = cfg.Runtime.Replicas
-		}
-		if cfg.Runtime.CPU != "" {
-			resources["cpu"] = cfg.Runtime.CPU
-		}
-		if cfg.Runtime.Memory != "" {
-			resources["memory"] = cfg.Runtime.Memory
-		}
-		if len(resources) > 0 {
-			spec["resources"] = resources
+		spec["providers"] = []map[string]interface{}{
+			{
+				keyName:       defaultProviderName,
+				"providerRef": map[string]interface{}{keyName: providerRef},
+				"role":        "llm",
+			},
 		}
 	}
 
-	// Tool registry reference.
+	// Tool registry reference (CRD created by the ToolRegistry phase).
 	if len(pack.Tools) > 0 {
-		spec["toolRegistryRef"] = sanitizeName(pack.ID + "-tools")
+		spec["toolRegistryRef"] = map[string]interface{}{
+			keyName: sanitizeName(pack.ID + "-tools"),
+		}
 	}
 
-	// Policy reference.
-	if hasToolPolicy(pack) {
-		spec["agentPolicyRef"] = sanitizeName(pack.ID + "-policy")
+	if runtime := buildRuntimeSpec(cfg.Runtime); runtime != nil {
+		spec["runtime"] = runtime
 	}
 
 	req := map[string]interface{}{
-		"kind": "AgentRuntime",
-		"metadata": map[string]interface{}{
-			"name":   sanitizeName(agentName),
-			"labels": buildResourceLabels(pack.ID, pack.Version, ResTypeAgentRuntime, cfg.Labels),
+		keyMetadata: map[string]interface{}{
+			keyName:   sanitizeName(agentName),
+			keyLabels: buildResourceLabels(pack.ID, pack.Version, ResTypeAgentRuntime, cfg.Labels),
 		},
-		"spec": spec,
+		keySpec: spec,
 	}
 	return json.Marshal(req)
+}
+
+// buildRuntimeSpec maps the adapter's runtime config to spec.runtime, or nil
+// when nothing is configured (so the platform default applies).
+func buildRuntimeSpec(rc *RuntimeConfig) map[string]interface{} {
+	if rc == nil {
+		return nil
+	}
+	runtime := map[string]interface{}{}
+	if rc.Replicas > 0 {
+		runtime["replicas"] = rc.Replicas
+	}
+	if requests := buildResourceRequests(rc); requests != nil {
+		runtime["resources"] = map[string]interface{}{"requests": requests}
+	}
+	if as := buildAutoscalingSpec(rc.Autoscaling); as != nil {
+		runtime["autoscaling"] = as
+	}
+	if len(runtime) == 0 {
+		return nil
+	}
+	return runtime
+}
+
+// buildResourceRequests maps cpu/memory into a k8s resource requests map.
+func buildResourceRequests(rc *RuntimeConfig) map[string]interface{} {
+	requests := map[string]interface{}{}
+	if rc.CPU != "" {
+		requests["cpu"] = rc.CPU
+	}
+	if rc.Memory != "" {
+		requests["memory"] = rc.Memory
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	return requests
+}
+
+// buildAutoscalingSpec maps the adapter's autoscaling config to
+// spec.runtime.autoscaling (camelCase CRD keys). It is a faithful passthrough:
+// only fields the user set are emitted, so unset fields fall back to CRD
+// defaults at admission time.
+func buildAutoscalingSpec(a *AutoscalingConfig) map[string]interface{} {
+	if a == nil {
+		return nil
+	}
+	as := map[string]interface{}{"enabled": a.Enabled}
+	if a.Type != "" {
+		as["type"] = a.Type
+	}
+	if a.MinReplicas != nil {
+		as["minReplicas"] = *a.MinReplicas
+	}
+	if a.MaxReplicas != nil {
+		as["maxReplicas"] = *a.MaxReplicas
+	}
+	if a.TargetCPUUtilization != nil {
+		as["targetCPUUtilizationPercentage"] = *a.TargetCPUUtilization
+	}
+	if a.TargetMemoryUtilization != nil {
+		as["targetMemoryUtilizationPercentage"] = *a.TargetMemoryUtilization
+	}
+	if a.ScaleDownStabilizationSeconds != nil {
+		as["scaleDownStabilizationSeconds"] = *a.ScaleDownStabilizationSeconds
+	}
+	return as
 }
 
 // buildToolRegistryRequest builds the JSON body for creating/updating a ToolRegistry CRD.
@@ -124,7 +171,7 @@ func buildToolRegistryRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, 
 	for _, name := range toolNames {
 		tool := pack.Tools[name]
 		entry := map[string]interface{}{
-			"name": name,
+			keyName: name,
 		}
 		if tool.Description != "" {
 			entry["description"] = tool.Description
@@ -136,12 +183,11 @@ func buildToolRegistryRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, 
 	}
 
 	req := map[string]interface{}{
-		"kind": "ToolRegistry",
-		"metadata": map[string]interface{}{
-			"name":   sanitizeName(pack.ID + "-tools"),
-			"labels": buildResourceLabels(pack.ID, pack.Version, ResTypeToolRegistry, cfg.Labels),
+		keyMetadata: map[string]interface{}{
+			keyName:   sanitizeName(pack.ID + "-tools"),
+			keyLabels: buildResourceLabels(pack.ID, pack.Version, ResTypeToolRegistry, cfg.Labels),
 		},
-		"spec": map[string]interface{}{
+		keySpec: map[string]interface{}{
 			"tools": tools,
 		},
 	}
@@ -166,12 +212,11 @@ func buildAgentPolicyRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, e
 	}
 
 	req := map[string]interface{}{
-		"kind": "AgentPolicy",
-		"metadata": map[string]interface{}{
-			"name":   sanitizeName(pack.ID + "-policy"),
-			"labels": buildResourceLabels(pack.ID, pack.Version, ResTypeAgentPolicy, cfg.Labels),
+		keyMetadata: map[string]interface{}{
+			keyName:   sanitizeName(pack.ID + "-policy"),
+			keyLabels: buildResourceLabels(pack.ID, pack.Version, ResTypeAgentPolicy, cfg.Labels),
 		},
-		"spec": spec,
+		keySpec: spec,
 	}
 	return json.Marshal(req)
 }
@@ -184,7 +229,7 @@ func resolveProviderForAgent(agentName string, cfg *Config) (string, bool) {
 		return ref, true
 	}
 	// Fall back to default provider.
-	if ref, ok := cfg.Providers["default"]; ok {
+	if ref, ok := cfg.Providers[defaultProviderName]; ok {
 		return ref, true
 	}
 	return "", false

@@ -49,7 +49,7 @@ func TestApply_SingleAgent(t *testing.T) {
 	for _, r := range state.Resources {
 		typeSet[r.Type] = true
 	}
-	for _, expected := range []string{ResTypeConfigMap, ResTypePromptPack, ResTypeToolRegistry, ResTypeAgentRuntime} {
+	for _, expected := range []string{ResTypePromptPack, ResTypeToolRegistry, ResTypeAgentRuntime} {
 		if !typeSet[expected] {
 			t.Errorf("expected resource type %q in state", expected)
 		}
@@ -98,7 +98,6 @@ func TestApply_WithPriorState(t *testing.T) {
 	sim := newSimulatedClient()
 	// Pre-populate the simulated client with existing resources so updates succeed.
 	for _, r := range []struct{ typ, name string }{
-		{ResTypeConfigMap, "test-pack-packdata"},
 		{ResTypePromptPack, "test-pack"},
 		{ResTypeToolRegistry, "test-pack-tools"},
 		{ResTypeAgentRuntime, "test-pack"},
@@ -112,7 +111,6 @@ func TestApply_WithPriorState(t *testing.T) {
 
 	priorState := AdapterState{
 		Resources: []ResourceState{
-			{Type: ResTypeConfigMap, Name: "test-pack-packdata", UID: "old-uid-1"},
 			{Type: ResTypePromptPack, Name: "test-pack", UID: "old-uid-2"},
 			{Type: ResTypeToolRegistry, Name: "test-pack-tools", UID: "old-uid-3"},
 			{Type: ResTypeAgentRuntime, Name: "test-pack", UID: "old-uid-4"},
