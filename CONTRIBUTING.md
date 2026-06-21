@@ -28,6 +28,16 @@ This adds a "Signed-off-by" line to your commit message:
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
+> **This is enforced.** A required `DCO` check verifies every commit in your pull request carries a matching `Signed-off-by` line. If you forget, fix it with `git commit --amend -s` (single commit) or `git rebase --signoff main` (multiple commits), then force-push.
+
+## Contributor License Agreement (CLA)
+
+Before your first contribution can be merged you must sign our Contributor License Agreement. When you open your first pull request, the **CLA Assistant** bot comments with a link to the CLA; you sign by replying on the PR with:
+
+> I have read the CLA Document and I hereby sign the CLA
+
+You sign **once** — the signature then applies to your future contributions across AltairaLabs repositories. The CLA is a **license grant**, not a copyright assignment: you keep ownership of your contribution and grant AltairaLabs a license to use and relicense it. Full text: [CLA.md](CLA.md). If you are contributing on behalf of an employer, use the Corporate CLA section of that document.
+
 ## How to Contribute
 
 ### Reporting Bugs
