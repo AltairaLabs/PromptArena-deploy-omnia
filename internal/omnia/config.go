@@ -82,6 +82,21 @@ var validSkillSelectors = map[string]bool{
 // skillSourceNamePattern is the omnia SkillSource name pattern (RFC1123 label).
 var skillSourceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
+// API-key role constants. An APIKeysAuth defaultRole selects the role applied
+// to keys that don't specify one; it must be one of these.
+const (
+	authRoleViewer = "viewer"
+	authRoleEditor = "editor"
+	authRoleAdmin  = "admin"
+)
+
+// validAuthRoles is the set of accepted API-key default roles.
+var validAuthRoles = map[string]bool{
+	authRoleViewer: true,
+	authRoleEditor: true,
+	authRoleAdmin:  true,
+}
+
 // SkillBinding maps a deploy-config skill entry to an Omnia SkillSource CRD.
 // It mirrors the PromptPack spec.skills[] SkillRef: source is the SkillSource
 // name; include narrows which skills are mounted; mountAs renames the mount.
@@ -331,6 +346,76 @@ const configSchema = `{
       },
       "additionalProperties": false
     },
+    "externalAuth": {
+      "type": "object",
+      "description": "Data-plane auth validators (AgentRuntime spec.externalAuth). Each is independent (OR). Optional.",
+      "properties": {
+        "allowManagementPlane": {
+          "type": "boolean",
+          "description": "Accept dashboard-minted management-plane tokens (debug view). Defaults true at the CRD."
+        },
+        "sharedToken": {
+          "type": "object",
+          "description": "Single shared bearer token in a Secret.",
+          "required": ["secretRef"],
+          "properties": {
+            "secretRef": { "type": "string", "description": "Name of the Secret holding the token (key 'token')" },
+            "trustEndUserHeader": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "apiKeys": {
+          "type": "object",
+          "description": "Per-caller API keys (key list lives in Secrets, not here).",
+          "properties": {
+            "defaultRole": { "type": "string", "enum": ["viewer", "editor", "admin"] },
+            "trustEndUserHeader": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "oidc": {
+          "type": "object",
+          "description": "Validate customer-issued JWTs against an OIDC discovery document.",
+          "required": ["issuer", "audience"],
+          "properties": {
+            "issuer": { "type": "string", "minLength": 1 },
+            "audience": { "type": "string", "minLength": 1 },
+            "claimMapping": {
+              "type": "object",
+              "properties": {
+                "subject": { "type": "string" },
+                "role": { "type": "string" },
+                "endUser": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "edgeTrust": {
+          "type": "object",
+          "description": "Trust claim-headers injected by an upstream edge (Istio/API gateway).",
+          "properties": {
+            "headerMapping": {
+              "type": "object",
+              "properties": {
+                "subject": { "type": "string" },
+                "role": { "type": "string" },
+                "endUser": { "type": "string" },
+                "email": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            "claimsFromHeaders": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "labels": {
       "type": "object",
       "additionalProperties": { "type": "string" },
@@ -349,16 +434,17 @@ const envAPIToken = "OMNIA_API_TOKEN" //nolint:gosec // environment variable nam
 
 // Config holds Omnia-specific configuration.
 type Config struct {
-	APIEndpoint  string            `json:"api_endpoint"`
-	Workspace    string            `json:"workspace"`
-	APIToken     string            `json:"api_token,omitempty"`
-	Providers    Providers         `json:"providers"`
-	Tools        []ToolHandler     `json:"tools,omitempty"`
-	Skills       []SkillBinding    `json:"skills,omitempty"`
-	SkillsConfig *SkillsConfig     `json:"skillsConfig,omitempty"`
-	Runtime      *RuntimeConfig    `json:"runtime,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`
-	DryRun       bool              `json:"dry_run,omitempty"`
+	APIEndpoint  string              `json:"api_endpoint"`
+	Workspace    string              `json:"workspace"`
+	APIToken     string              `json:"api_token,omitempty"`
+	Providers    Providers           `json:"providers"`
+	Tools        []ToolHandler       `json:"tools,omitempty"`
+	Skills       []SkillBinding      `json:"skills,omitempty"`
+	SkillsConfig *SkillsConfig       `json:"skillsConfig,omitempty"`
+	Runtime      *RuntimeConfig      `json:"runtime,omitempty"`
+	ExternalAuth *ExternalAuthConfig `json:"externalAuth,omitempty"`
+	Labels       map[string]string   `json:"labels,omitempty"`
+	DryRun       bool                `json:"dry_run,omitempty"`
 
 	// PackJSON holds the raw pack JSON content. Populated at apply-time.
 	// NOT serialized — transient computed field.
@@ -385,6 +471,67 @@ type AutoscalingConfig struct {
 	TargetCPUUtilization          *int   `json:"target_cpu_utilization,omitempty"`
 	TargetMemoryUtilization       *int   `json:"target_memory_utilization,omitempty"`
 	ScaleDownStabilizationSeconds *int   `json:"scale_down_stabilization_seconds,omitempty"`
+}
+
+// ExternalAuthConfig is the deploy-config externalAuth block. It maps
+// faithfully to the AgentRuntime spec.externalAuth (AgentExternalAuth):
+// each validator is independent (OR logic), and an empty block leaves the
+// agent reachable only from the management plane (dashboard debug view).
+// The adapter does structural validation only — Secret existence and deep
+// OIDC/edge checks are the omnia controller's job.
+type ExternalAuthConfig struct {
+	AllowManagementPlane *bool                  `json:"allowManagementPlane,omitempty"`
+	SharedToken          *SharedTokenAuthConfig `json:"sharedToken,omitempty"`
+	APIKeys              *APIKeysAuthConfig     `json:"apiKeys,omitempty"`
+	OIDC                 *OIDCAuthConfig        `json:"oidc,omitempty"`
+	EdgeTrust            *EdgeTrustAuthConfig   `json:"edgeTrust,omitempty"`
+}
+
+// SharedTokenAuthConfig validates a single bearer token shared by all
+// callers. SecretRef names a Secret (with key "token"); it emits to the CRD
+// as a LocalObjectReference ({"name": ...}).
+type SharedTokenAuthConfig struct {
+	SecretRef          string `json:"secretRef"`
+	TrustEndUserHeader bool   `json:"trustEndUserHeader,omitempty"`
+}
+
+// APIKeysAuthConfig toggles per-caller API key validation. DefaultRole, when
+// set, must be one of viewer|editor|admin.
+type APIKeysAuthConfig struct {
+	DefaultRole        string `json:"defaultRole,omitempty"`
+	TrustEndUserHeader bool   `json:"trustEndUserHeader,omitempty"`
+}
+
+// OIDCAuthConfig validates customer-issued JWTs. Issuer and Audience are both
+// required when the block is present.
+type OIDCAuthConfig struct {
+	Issuer       string                  `json:"issuer"`
+	Audience     string                  `json:"audience"`
+	ClaimMapping *OIDCClaimMappingConfig `json:"claimMapping,omitempty"`
+}
+
+// OIDCClaimMappingConfig overrides the JWT claim names the OIDC validator
+// reads. All fields optional — omitted fields fall back to CRD defaults.
+type OIDCClaimMappingConfig struct {
+	Subject string `json:"subject,omitempty"`
+	Role    string `json:"role,omitempty"`
+	EndUser string `json:"endUser,omitempty"`
+}
+
+// EdgeTrustAuthConfig trusts claim-headers injected by an upstream edge. It
+// has no required fields.
+type EdgeTrustAuthConfig struct {
+	HeaderMapping     *EdgeTrustHeaderMappingConfig `json:"headerMapping,omitempty"`
+	ClaimsFromHeaders map[string]string             `json:"claimsFromHeaders,omitempty"`
+}
+
+// EdgeTrustHeaderMappingConfig overrides the inbound header names the
+// edgeTrust validator reads. All fields optional.
+type EdgeTrustHeaderMappingConfig struct {
+	Subject string `json:"subject,omitempty"`
+	Role    string `json:"role,omitempty"`
+	EndUser string `json:"endUser,omitempty"`
+	Email   string `json:"email,omitempty"`
 }
 
 // parseConfig unmarshals JSON config into Config.
@@ -431,6 +578,8 @@ func (c *Config) validate() []string {
 	errs = append(errs, validateToolHandlers(c.Tools)...)
 
 	errs = append(errs, validateSkills(c.Skills, c.SkillsConfig)...)
+
+	errs = append(errs, validateExternalAuth(c.ExternalAuth)...)
 
 	if c.resolveToken() == "" {
 		errs = append(errs, "api_token is required (set in config or OMNIA_API_TOKEN env var)")
@@ -494,6 +643,40 @@ func validateSkills(skills []SkillBinding, sc *SkillsConfig) []string {
 		}
 		if sc.MaxActive != nil && *sc.MaxActive < 1 {
 			errs = append(errs, "skillsConfig.maxActive must be >= 1")
+		}
+	}
+
+	return errs
+}
+
+// validateExternalAuth checks the optional externalAuth block. Structural
+// only — the adapter rejects only what the AgentExternalAuth CRD would also
+// reject, so a valid adapter config produces an admissible spec. It does NOT
+// validate Secret existence or fetch OIDC discovery; that is the controller's
+// job. Each validator is independent; an empty block is valid (the agent
+// stays management-plane-only). edgeTrust has no required fields.
+func validateExternalAuth(ea *ExternalAuthConfig) []string {
+	if ea == nil {
+		return nil
+	}
+	var errs []string
+
+	if ea.SharedToken != nil && ea.SharedToken.SecretRef == "" {
+		errs = append(errs, "externalAuth.sharedToken.secretRef is required")
+	}
+
+	if ea.APIKeys != nil && ea.APIKeys.DefaultRole != "" && !validAuthRoles[ea.APIKeys.DefaultRole] {
+		errs = append(errs, fmt.Sprintf(
+			"externalAuth.apiKeys.defaultRole %q must be one of viewer, editor, admin",
+			ea.APIKeys.DefaultRole))
+	}
+
+	if ea.OIDC != nil {
+		if ea.OIDC.Issuer == "" {
+			errs = append(errs, "externalAuth.oidc.issuer is required")
+		}
+		if ea.OIDC.Audience == "" {
+			errs = append(errs, "externalAuth.oidc.audience is required")
 		}
 	}
 

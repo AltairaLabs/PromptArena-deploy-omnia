@@ -684,3 +684,178 @@ func TestBuildSkillsConfigSpec_EmptyBlock(t *testing.T) {
 		t.Errorf("expected nil for nil skillsConfig, got %v", got)
 	}
 }
+
+func boolPtr(v bool) *bool { return &v }
+
+// agentRuntimeSpec parses a built AgentRuntime body and returns spec.
+func agentRuntimeSpec(t *testing.T, cfg *Config) map[string]interface{} {
+	t.Helper()
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("failed to parse pack: %v", err)
+	}
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	spec, ok := result["spec"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected spec to be an object")
+	}
+	return spec
+}
+
+func TestBuildAgentRuntimeRequest_ExternalAuth(t *testing.T) {
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		ExternalAuth: &ExternalAuthConfig{
+			AllowManagementPlane: boolPtr(false),
+			SharedToken:          &SharedTokenAuthConfig{SecretRef: "partner-token", TrustEndUserHeader: true},
+			OIDC: &OIDCAuthConfig{
+				Issuer:       "https://issuer.example.com",
+				Audience:     "omnia-agents",
+				ClaimMapping: &OIDCClaimMappingConfig{Subject: "sub", EndUser: "actor"},
+			},
+		},
+	}
+
+	spec := agentRuntimeSpec(t, cfg)
+	ea, ok := spec["externalAuth"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected spec.externalAuth to be an object")
+	}
+
+	if ea["allowManagementPlane"] != false {
+		t.Errorf("allowManagementPlane = %v, want false", ea["allowManagementPlane"])
+	}
+
+	// sharedToken.secretRef must be a LocalObjectReference {"name": ...}.
+	st, ok := ea["sharedToken"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected sharedToken to be an object")
+	}
+	secretRef, ok := st["secretRef"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected sharedToken.secretRef to be an object, got %T", st["secretRef"])
+	}
+	if secretRef["name"] != "partner-token" {
+		t.Errorf("sharedToken.secretRef.name = %v, want partner-token", secretRef["name"])
+	}
+	if st["trustEndUserHeader"] != true {
+		t.Errorf("sharedToken.trustEndUserHeader = %v, want true", st["trustEndUserHeader"])
+	}
+
+	// oidc carries issuer/audience and the claimMapping.
+	oidc, ok := ea["oidc"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected oidc to be an object")
+	}
+	if oidc["issuer"] != "https://issuer.example.com" || oidc["audience"] != "omnia-agents" {
+		t.Errorf("oidc = %v", oidc)
+	}
+	cm, ok := oidc["claimMapping"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected oidc.claimMapping to be an object")
+	}
+	if cm["subject"] != "sub" || cm["endUser"] != "actor" {
+		t.Errorf("oidc.claimMapping = %v", cm)
+	}
+	if _, present := cm["role"]; present {
+		t.Error("oidc.claimMapping.role should be omitted when unset")
+	}
+
+	// unset validator blocks are omitted.
+	if _, present := ea["apiKeys"]; present {
+		t.Error("apiKeys should be omitted when unset")
+	}
+	if _, present := ea["edgeTrust"]; present {
+		t.Error("edgeTrust should be omitted when unset")
+	}
+}
+
+func TestBuildAgentRuntimeRequest_ExternalAuth_EdgeTrustAndAPIKeys(t *testing.T) {
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		ExternalAuth: &ExternalAuthConfig{
+			APIKeys: &APIKeysAuthConfig{DefaultRole: authRoleEditor},
+			EdgeTrust: &EdgeTrustAuthConfig{
+				HeaderMapping:     &EdgeTrustHeaderMappingConfig{Subject: "x-user-id", Email: "x-user-email"},
+				ClaimsFromHeaders: map[string]string{"x-user-groups": "groups"},
+			},
+		},
+	}
+
+	spec := agentRuntimeSpec(t, cfg)
+	ea := spec["externalAuth"].(map[string]interface{})
+
+	ak := ea["apiKeys"].(map[string]interface{})
+	if ak["defaultRole"] != "editor" {
+		t.Errorf("apiKeys.defaultRole = %v, want editor", ak["defaultRole"])
+	}
+	if _, present := ak["trustEndUserHeader"]; present {
+		t.Error("apiKeys.trustEndUserHeader should be omitted when false")
+	}
+
+	et := ea["edgeTrust"].(map[string]interface{})
+	hm := et["headerMapping"].(map[string]interface{})
+	if hm["subject"] != "x-user-id" || hm["email"] != "x-user-email" {
+		t.Errorf("edgeTrust.headerMapping = %v", hm)
+	}
+	if _, present := hm["role"]; present {
+		t.Error("edgeTrust.headerMapping.role should be omitted when unset")
+	}
+	cfh := et["claimsFromHeaders"].(map[string]interface{})
+	if cfh["x-user-groups"] != "groups" {
+		t.Errorf("edgeTrust.claimsFromHeaders = %v", cfh)
+	}
+
+	if _, present := ea["allowManagementPlane"]; present {
+		t.Error("allowManagementPlane should be omitted when nil")
+	}
+}
+
+func TestBuildAgentRuntimeRequest_NoExternalAuth(t *testing.T) {
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+	}
+	spec := agentRuntimeSpec(t, cfg)
+	if _, present := spec["externalAuth"]; present {
+		t.Error("spec.externalAuth must be omitted when cfg.ExternalAuth is nil")
+	}
+}
+
+func TestBuildExternalAuthSpec_EmptyBlocks(t *testing.T) {
+	if got := buildExternalAuthSpec(nil); got != nil {
+		t.Errorf("expected nil for nil externalAuth, got %v", got)
+	}
+	if got := buildExternalAuthSpec(&ExternalAuthConfig{}); got != nil {
+		t.Errorf("expected nil for empty externalAuth, got %v", got)
+	}
+	// edgeTrust with empty sub-blocks collapses to nothing.
+	ea := &ExternalAuthConfig{EdgeTrust: &EdgeTrustAuthConfig{HeaderMapping: &EdgeTrustHeaderMappingConfig{}}}
+	if got := buildExternalAuthSpec(ea); got != nil {
+		t.Errorf("expected nil when edgeTrust has only empty sub-blocks, got %v", got)
+	}
+	// apiKeys empty struct still emits an (empty) block — presence is meaningful.
+	ea = &ExternalAuthConfig{APIKeys: &APIKeysAuthConfig{}}
+	got := buildExternalAuthSpec(ea)
+	if got == nil {
+		t.Fatal("expected apiKeys empty struct to emit a block")
+	}
+	if _, present := got["apiKeys"]; !present {
+		t.Errorf("expected apiKeys block present, got %v", got)
+	}
+}
