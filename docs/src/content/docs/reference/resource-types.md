@@ -276,6 +276,18 @@ Always. Single-agent packs produce one AgentRuntime. Multi-agent packs produce o
         "maxReplicas": 10,
         "targetCPUUtilizationPercentage": 70
       }
+    },
+    "externalAuth": {
+      "oidc": { "issuer": "https://auth.example.com/", "audience": "omnia-agents" }
+    },
+    "memory": {
+      "enabled": true,
+      "retrieval": { "strategy": "semantic", "limit": 10 }
+    },
+    "evals": {
+      "enabled": true,
+      "inline": { "groups": ["fast-running"] },
+      "worker": { "groups": ["long-running", "external"] }
     }
   }
 }
@@ -285,6 +297,7 @@ Notes:
 - Every provider binding is emitted as a `NamedProviderRef` in `spec.providers`, preserving order. The binding named `default` is the runtime's primary; an empty `role` defaults to `llm`.
 - `toolRegistryRef` is only set when the deploy-config `tools` block is non-empty.
 - `runtime` is only set when the `runtime` config is provided; `replicas`/`resources`/`autoscaling` each appear only when their inputs are set. Autoscaling keys use camelCase CRD names (`minReplicas`, `targetCPUUtilizationPercentage`, etc.).
+- `externalAuth`, `memory`, and `evals` are each emitted only when their deploy-config block is set, and carry only the sub-fields you provide (faithful passthrough). See the [configuration reference](./configuration/) for the full shape of each.
 - The AgentRuntime does not carry an `agentPolicyRef`; the AgentPolicy CRD is created independently when the pack defines a tool blocklist.
 
 ### API operations
