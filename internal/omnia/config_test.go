@@ -30,8 +30,11 @@ func TestParseConfig_Valid(t *testing.T) {
 	if cfg.APIToken != "tok-123" {
 		t.Errorf("APIToken = %q, want %q", cfg.APIToken, "tok-123")
 	}
-	if len(cfg.Providers) != 1 || cfg.Providers["openai"] != "openai-prod" {
-		t.Errorf("Providers = %v, want map[openai:openai-prod]", cfg.Providers)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "openai" || cfg.Providers[0].Ref != "openai-prod" {
+		t.Errorf("Providers = %v, want [{openai openai-prod llm}]", cfg.Providers)
+	}
+	if cfg.Providers[0].Role != roleLLM {
+		t.Errorf("Providers[0].Role = %q, want %q (legacy map defaults to llm)", cfg.Providers[0].Role, roleLLM)
 	}
 	if cfg.Runtime == nil || cfg.Runtime.Replicas != 2 {
 		t.Errorf("Runtime.Replicas = %v, want 2", cfg.Runtime)
@@ -47,6 +50,128 @@ func TestParseConfig_Valid(t *testing.T) {
 	}
 	if !cfg.DryRun {
 		t.Error("DryRun = false, want true")
+	}
+}
+
+func TestParseConfig_LegacyMapForm(t *testing.T) {
+	raw := `{
+		"api_endpoint": "https://omnia.example.com",
+		"workspace": "ws",
+		"providers": {"default": "x"}
+	}`
+
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(cfg.Providers))
+	}
+	b := cfg.Providers[0]
+	if b.Name != "default" || b.Ref != "x" || b.Role != roleLLM {
+		t.Errorf("binding = %+v, want {default x llm}", b)
+	}
+}
+
+func TestParseConfig_NewListForm(t *testing.T) {
+	raw := `{
+		"api_endpoint": "https://omnia.example.com",
+		"workspace": "ws",
+		"providers": [
+			{"name": "default", "ref": "claude-prod", "role": "llm"},
+			{"name": "embed", "ref": "openai-embed", "role": "embedding"},
+			{"name": "infer", "ref": "vllm", "role": "inference"}
+		]
+	}`
+
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if len(cfg.Providers) != 3 {
+		t.Fatalf("expected 3 bindings, got %d", len(cfg.Providers))
+	}
+	want := Providers{
+		{Name: "default", Ref: "claude-prod", Role: roleLLM},
+		{Name: "embed", Ref: "openai-embed", Role: roleEmbedding},
+		{Name: "infer", Ref: "vllm", Role: roleInference},
+	}
+	for i, b := range want {
+		if cfg.Providers[i] != b {
+			t.Errorf("binding[%d] = %+v, want %+v", i, cfg.Providers[i], b)
+		}
+	}
+}
+
+func TestParseConfig_InvalidProvidersShape(t *testing.T) {
+	raw := `{
+		"api_endpoint": "https://omnia.example.com",
+		"workspace": "ws",
+		"providers": "nope"
+	}`
+	_, err := parseConfig(raw)
+	if err == nil {
+		t.Fatal("expected error for scalar providers value, got nil")
+	}
+}
+
+func TestValidateConfig_InvalidRole(t *testing.T) {
+	t.Setenv("OMNIA_API_TOKEN", "tok")
+	cfg := &Config{
+		APIEndpoint: "https://omnia.example.com",
+		Workspace:   "ws",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "vision"}},
+	}
+	errs := cfg.validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "invalid role") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an invalid role error, got %v", errs)
+	}
+}
+
+func TestValidateConfig_EmptyRef(t *testing.T) {
+	t.Setenv("OMNIA_API_TOKEN", "tok")
+	cfg := &Config{
+		APIEndpoint: "https://omnia.example.com",
+		Workspace:   "ws",
+		Providers:   Providers{{Name: "default", Ref: ""}},
+	}
+	errs := cfg.validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "ref is required") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a ref-required error, got %v", errs)
+	}
+}
+
+func TestValidateConfig_DuplicateNames(t *testing.T) {
+	t.Setenv("OMNIA_API_TOKEN", "tok")
+	cfg := &Config{
+		APIEndpoint: "https://omnia.example.com",
+		Workspace:   "ws",
+		Providers: Providers{
+			{Name: "default", Ref: "a", Role: "llm"},
+			{Name: "default", Ref: "b", Role: "embedding"},
+		},
+	}
+	errs := cfg.validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "duplicated") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a duplicate-name error, got %v", errs)
 	}
 }
 
@@ -106,7 +231,7 @@ func TestValidateConfig_Valid(t *testing.T) {
 	cfg := &Config{
 		APIEndpoint: "https://omnia.example.com",
 		Workspace:   "test-ws",
-		Providers:   map[string]string{"openai": "openai-prod"},
+		Providers:   Providers{{Name: "openai", Ref: "openai-prod"}},
 	}
 	errs := cfg.validate()
 	if len(errs) != 0 {
@@ -122,7 +247,7 @@ func TestValidateConfig_Autoscaling(t *testing.T) {
 			APIEndpoint: "https://omnia.example.com",
 			Workspace:   "test-ws",
 			APIToken:    "tok",
-			Providers:   map[string]string{"default": "claude-prod"},
+			Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
 			Runtime:     &RuntimeConfig{Autoscaling: a},
 		}
 	}

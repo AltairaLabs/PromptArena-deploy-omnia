@@ -175,17 +175,17 @@ func (p *Provider) validateProviders(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("omnia: failed to create client for provider validation: %w", err)
 	}
 
-	// Deduplicate provider names.
+	// Deduplicate provider refs.
 	seen := make(map[string]bool, len(cfg.Providers))
 	var errs []string
-	for _, providerName := range cfg.Providers {
-		if seen[providerName] {
+	for _, b := range cfg.Providers {
+		if seen[b.Ref] {
 			continue
 		}
-		seen[providerName] = true
+		seen[b.Ref] = true
 
-		if err := client.ValidateProvider(ctx, providerName); err != nil {
-			errs = append(errs, fmt.Sprintf("provider %q not found in workspace", providerName))
+		if err := client.ValidateProvider(ctx, b.Ref); err != nil {
+			errs = append(errs, fmt.Sprintf("provider %q not found in workspace", b.Ref))
 		}
 	}
 

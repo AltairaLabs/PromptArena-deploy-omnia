@@ -1,11 +1,90 @@
 package omnia
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
+
+// Provider role constants. A binding's role tells the AgentRuntime which
+// capability the referenced Provider CRD fulfills. An empty role defaults to
+// roleLLM.
+const (
+	roleLLM       = "llm"
+	roleEmbedding = "embedding"
+	roleTTS       = "tts"
+	roleSTT       = "stt"
+	roleImage     = "image"
+	roleInference = "inference"
+)
+
+// validProviderRoles is the set of accepted provider roles.
+var validProviderRoles = map[string]bool{
+	roleLLM:       true,
+	roleEmbedding: true,
+	roleTTS:       true,
+	roleSTT:       true,
+	roleImage:     true,
+	roleInference: true,
+}
+
+// ProviderBinding maps a logical provider name to an Omnia Provider CRD for a
+// given role. The binding named "default" is the runtime's primary provider.
+type ProviderBinding struct {
+	Name string `json:"name"`           // logical name; "default" = the runtime's primary
+	Ref  string `json:"ref"`            // Omnia Provider CRD name
+	Role string `json:"role,omitempty"` // llm|embedding|tts|stt|image|inference (default llm)
+}
+
+// Providers is the list of provider bindings for a deployment. It accepts both
+// the new list form and the legacy map form on unmarshal (see UnmarshalJSON).
+type Providers []ProviderBinding
+
+// UnmarshalJSON accepts BOTH config shapes:
+//   - the NEW list form: [{"name":..,"ref":..,"role":..}]
+//   - the LEGACY map form: {"logicalName":"crdName"} — converted to bindings
+//     with Role=roleLLM, iterating keys in sorted order for determinism.
+func (p *Providers) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return fmt.Errorf("providers: empty value")
+	}
+
+	switch trimmed[0] {
+	case '[':
+		var bindings []ProviderBinding
+		if err := json.Unmarshal(trimmed, &bindings); err != nil {
+			return fmt.Errorf("providers: invalid list form: %w", err)
+		}
+		*p = bindings
+		return nil
+	case '{':
+		var legacy map[string]string
+		if err := json.Unmarshal(trimmed, &legacy); err != nil {
+			return fmt.Errorf("providers: invalid map form: %w", err)
+		}
+		names := make([]string, 0, len(legacy))
+		for name := range legacy {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		bindings := make([]ProviderBinding, 0, len(names))
+		for _, name := range names {
+			bindings = append(bindings, ProviderBinding{
+				Name: name,
+				Ref:  legacy[name],
+				Role: roleLLM,
+			})
+		}
+		*p = bindings
+		return nil
+	default:
+		return fmt.Errorf("providers: must be a list of bindings or a name→ref map")
+	}
+}
 
 // configSchema is the JSON Schema for the omnia provider config.
 const configSchema = `{
@@ -28,9 +107,29 @@ const configSchema = `{
       "description": "API bearer token (or set OMNIA_API_TOKEN env var)"
     },
     "providers": {
-      "type": "object",
-      "additionalProperties": { "type": "string" },
-      "description": "Arena provider name to Omnia Provider CRD name mapping"
+      "description": "Provider bindings: a list of {name,ref,role} or the legacy name-to-CRD map (role llm).",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "ref"],
+            "properties": {
+              "name": { "type": "string" },
+              "ref": { "type": "string" },
+              "role": {
+                "type": "string",
+                "enum": ["llm", "embedding", "tts", "stt", "image", "inference"]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      ]
     },
     "runtime": {
       "type": "object",
@@ -80,7 +179,7 @@ type Config struct {
 	APIEndpoint string            `json:"api_endpoint"`
 	Workspace   string            `json:"workspace"`
 	APIToken    string            `json:"api_token,omitempty"`
-	Providers   map[string]string `json:"providers"`
+	Providers   Providers         `json:"providers"`
 	Runtime     *RuntimeConfig    `json:"runtime,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	DryRun      bool              `json:"dry_run,omitempty"`
@@ -151,9 +250,7 @@ func (c *Config) validate() []string {
 		errs = append(errs, "workspace is required")
 	}
 
-	if len(c.Providers) == 0 {
-		errs = append(errs, "providers map is required (at least one arena→omnia provider mapping)")
-	}
+	errs = append(errs, validateProviderBindings(c.Providers)...)
 
 	if c.resolveToken() == "" {
 		errs = append(errs, "api_token is required (set in config or OMNIA_API_TOKEN env var)")
@@ -166,6 +263,31 @@ func (c *Config) validate() []string {
 		errs = append(errs, validateAutoscaling(c.Runtime.Autoscaling)...)
 	}
 
+	return errs
+}
+
+// validateProviderBindings checks the provider bindings: at least one is
+// required, each ref must be non-empty, each role (if set) must be in the
+// enum, and binding names must be unique. A "default" binding is NOT required.
+func validateProviderBindings(bindings Providers) []string {
+	if len(bindings) == 0 {
+		errs := []string{"providers is required (at least one provider binding)"}
+		return errs
+	}
+	var errs []string
+	seen := make(map[string]bool, len(bindings))
+	for _, b := range bindings {
+		if b.Ref == "" {
+			errs = append(errs, fmt.Sprintf("provider binding %q: ref is required", b.Name))
+		}
+		if b.Role != "" && !validProviderRoles[b.Role] {
+			errs = append(errs, fmt.Sprintf("provider binding %q: invalid role %q", b.Name, b.Role))
+		}
+		if seen[b.Name] {
+			errs = append(errs, fmt.Sprintf("provider binding name %q is duplicated", b.Name))
+		}
+		seen[b.Name] = true
+	}
 	return errs
 }
 

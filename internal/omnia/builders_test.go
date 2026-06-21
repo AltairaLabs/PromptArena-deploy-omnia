@@ -33,7 +33,7 @@ func TestBuildAgentRuntimeRequest_WithRuntime(t *testing.T) {
 		APIEndpoint: "https://omnia.test.com",
 		Workspace:   "test-ws",
 		APIToken:    "test-token",
-		Providers:   map[string]string{"default": "claude-prod"},
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
 		Runtime:     &RuntimeConfig{Replicas: 3, CPU: "500m", Memory: "512Mi"},
 	}
 
@@ -71,7 +71,7 @@ func TestBuildAgentRuntimeRequest_Autoscaling(t *testing.T) {
 	}
 	minR, maxR, cpu := 2, 10, 65
 	cfg := &Config{
-		Providers: map[string]string{"default": "claude-prod"},
+		Providers: Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
 		Runtime: &RuntimeConfig{
 			Autoscaling: &AutoscalingConfig{
 				Enabled:              true,
@@ -124,7 +124,10 @@ func TestBuildAgentRuntimeRequest_MultiAgent(t *testing.T) {
 		t.Fatalf("failed to parse pack: %v", err)
 	}
 	cfg := &Config{
-		Providers: map[string]string{"default": "claude-prod", "worker": "worker-model"},
+		Providers: Providers{
+			{Name: "default", Ref: "claude-prod", Role: "llm"},
+			{Name: "worker", Ref: "worker-model", Role: "llm"},
+		},
 	}
 
 	body, err := buildAgentRuntimeRequest(pack, "worker", cfg)
@@ -138,8 +141,9 @@ func TestBuildAgentRuntimeRequest_MultiAgent(t *testing.T) {
 	}
 	spec := result["spec"].(map[string]interface{})
 	providers := spec["providers"].([]interface{})
-	if len(providers) != 1 {
-		t.Fatalf("expected 1 provider, got %d", len(providers))
+	// All bindings are emitted, in order — agentName no longer selects one.
+	if len(providers) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(providers))
 	}
 	p0 := providers[0].(map[string]interface{})
 	if p0["name"] != "default" {
@@ -149,8 +153,82 @@ func TestBuildAgentRuntimeRequest_MultiAgent(t *testing.T) {
 		t.Errorf("expected provider role %q, got %v", "llm", p0["role"])
 	}
 	ref := p0["providerRef"].(map[string]interface{})
-	if ref["name"] != "worker-model" {
-		t.Errorf("expected providerRef.name %q, got %v", "worker-model", ref["name"])
+	if ref["name"] != "claude-prod" {
+		t.Errorf("expected providerRef.name %q, got %v", "claude-prod", ref["name"])
+	}
+	p1 := providers[1].(map[string]interface{})
+	if p1["name"] != "worker" {
+		t.Errorf("expected second provider name %q, got %v", "worker", p1["name"])
+	}
+}
+
+func TestBuildAgentRuntimeRequest_MultiRoleProviders(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("failed to parse pack: %v", err)
+	}
+	cfg := &Config{
+		Providers: Providers{
+			{Name: "default", Ref: "claude-prod", Role: "llm"},
+			{Name: "embed", Ref: "openai-embed", Role: "embedding"},
+			{Name: "infer", Ref: "vllm", Role: "inference"},
+		},
+	}
+
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	spec := result["spec"].(map[string]interface{})
+	providers := spec["providers"].([]interface{})
+	if len(providers) != 3 {
+		t.Fatalf("expected 3 provider entries, got %d", len(providers))
+	}
+
+	type want struct{ name, ref, role string }
+	wants := []want{
+		{"default", "claude-prod", "llm"},
+		{"embed", "openai-embed", "embedding"},
+		{"infer", "vllm", "inference"},
+	}
+	for i, w := range wants {
+		p := providers[i].(map[string]interface{})
+		if p["name"] != w.name {
+			t.Errorf("provider[%d].name = %v, want %q", i, p["name"], w.name)
+		}
+		if p["role"] != w.role {
+			t.Errorf("provider[%d].role = %v, want %q", i, p["role"], w.role)
+		}
+		ref := p["providerRef"].(map[string]interface{})
+		if ref["name"] != w.ref {
+			t.Errorf("provider[%d].providerRef.name = %v, want %q", i, ref["name"], w.ref)
+		}
+	}
+}
+
+func TestBuildAgentRuntimeRequest_EmptyRoleDefaultsToLLM(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("failed to parse pack: %v", err)
+	}
+	cfg := &Config{Providers: Providers{{Name: "default", Ref: "claude-prod"}}}
+
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	providers := result["spec"].(map[string]interface{})["providers"].([]interface{})
+	if providers[0].(map[string]interface{})["role"] != "llm" {
+		t.Errorf("expected empty role to default to llm, got %v", providers[0])
 	}
 }
 
@@ -169,26 +247,6 @@ func TestResourceTypePath(t *testing.T) {
 	}
 }
 
-func TestResolveProviderForAgent(t *testing.T) {
-	cfg := &Config{Providers: map[string]string{"default": "base", "worker": "special"}}
-
-	// Agent-specific mapping.
-	if ref, ok := resolveProviderForAgent("worker", cfg); !ok || ref != "special" {
-		t.Errorf("expected special for worker, got %q ok=%v", ref, ok)
-	}
-
-	// Falls back to default.
-	if ref, ok := resolveProviderForAgent("unknown", cfg); !ok || ref != "base" {
-		t.Errorf("expected base for unknown, got %q ok=%v", ref, ok)
-	}
-
-	// No providers at all.
-	emptyCfg := &Config{Providers: map[string]string{}}
-	if _, ok := resolveProviderForAgent("any", emptyCfg); ok {
-		t.Error("expected no provider for empty map")
-	}
-}
-
 func TestBuildPromptPackRequest(t *testing.T) {
 	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
 	if err != nil {
@@ -198,7 +256,7 @@ func TestBuildPromptPackRequest(t *testing.T) {
 		APIEndpoint: "https://omnia.test.com",
 		Workspace:   "test-ws",
 		APIToken:    "test-token",
-		Providers:   map[string]string{"default": "claude-prod"},
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
 		PackJSON:    testPackJSON,
 	}
 
@@ -253,7 +311,7 @@ func TestBuildAgentRuntimeRequest(t *testing.T) {
 		APIEndpoint: "https://omnia.test.com",
 		Workspace:   "test-ws",
 		APIToken:    "test-token",
-		Providers:   map[string]string{"default": "claude-prod"},
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
 	}
 
 	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
@@ -312,7 +370,7 @@ func TestBuildToolRegistryRequest(t *testing.T) {
 		APIEndpoint: "https://omnia.test.com",
 		Workspace:   "test-ws",
 		APIToken:    "test-token",
-		Providers:   map[string]string{"default": "claude-prod"},
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
 	}
 
 	body, err := buildToolRegistryRequest(pack, cfg)
@@ -372,7 +430,7 @@ func TestBuildAgentPolicyRequest(t *testing.T) {
 		APIEndpoint: "https://omnia.test.com",
 		Workspace:   "test-ws",
 		APIToken:    "test-token",
-		Providers:   map[string]string{"default": "claude-prod"},
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
 	}
 
 	body, err := buildAgentPolicyRequest(pack, cfg)
