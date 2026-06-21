@@ -1,6 +1,6 @@
 ---
 title: Multi-Agent Deployment
-description: Deploy a multi-agent prompt pack with per-agent provider mappings
+description: Deploy a multi-agent prompt pack with shared provider bindings
 ---
 
 This tutorial covers deploying a prompt pack that contains multiple agents. Each agent gets its own AgentRuntime CRD while sharing the pack's ConfigMap, PromptPack, ToolRegistry, and AgentPolicy resources.
@@ -11,16 +11,18 @@ When the adapter detects a multi-agent pack (via `adaptersdk.IsMultiAgent`), it:
 
 1. Creates a single ConfigMap, PromptPack, ToolRegistry, and AgentPolicy (shared across all agents).
 2. Creates one AgentRuntime per agent extracted from the pack.
-3. Each AgentRuntime references the shared PromptPack and includes an `agentName` field identifying which member prompt it serves.
+3. Each AgentRuntime references the shared PromptPack and receives the **same** set of provider bindings.
 
 ## Prerequisites
 
 - A compiled multi-agent prompt pack
 - Omnia cluster access and API token (same as the [First Deployment](/tutorials/01-first-deployment/) tutorial)
 
-## Step 1: Configure agent-specific providers
+## Step 1: Configure providers
 
-Multi-agent packs often need different LLM providers for different agents. The `providers` map supports agent-specific overrides:
+Every binding in `providers` is emitted to **each** AgentRuntime — bindings are shared across all agents, not assigned per agent. The binding named `default` is each runtime's primary provider; the others are available by role.
+
+Use the list form to give each runtime an LLM plus, say, an embedding provider:
 
 ```yaml
 deploy:
@@ -29,16 +31,23 @@ deploy:
     api_endpoint: "https://omnia.example.com"
     workspace: "prod-workspace"
     providers:
-      default: claude-sonnet-4-20250514
-      router-agent: gpt4-prod
-      specialist-agent: claude-sonnet-4-20250514
+      - name: default
+        ref: claude-sonnet-4-20250514
+        role: llm
+      - name: embedder
+        ref: text-embedding-3-large
+        role: embedding
 ```
 
-Provider resolution follows this order:
-1. If an entry matches the agent name exactly, use that provider.
-2. Otherwise, fall back to the `default` entry.
+The legacy map form is also accepted (each entry binds with role `llm`):
 
-In the example above, `router-agent` uses `gpt4-prod`, `specialist-agent` uses `claude-sonnet-4-20250514`, and any other agents use the `default` provider `claude-sonnet-4-20250514`.
+```yaml
+    providers:
+      default: claude-sonnet-4-20250514
+      router: gpt4-prod
+```
+
+There is no per-agent provider override keyed by agent name. All bindings go to every runtime; `default` is the primary. Selecting a non-primary provider for a given agent is driven by role within the pack, not by the deploy config.
 
 ## Step 2: Plan and review
 
@@ -65,7 +74,7 @@ Note the two separate `agent_runtime` entries, one per agent.
 promptarena deploy apply
 ```
 
-The shared resources (ConfigMap, PromptPack, ToolRegistry, AgentPolicy) are created first. Then each AgentRuntime is created, referencing the shared PromptPack and its agent-specific provider.
+The shared resources (ConfigMap, PromptPack, ToolRegistry, AgentPolicy) are created first. Then each AgentRuntime is created, referencing the shared PromptPack and the shared provider bindings.
 
 ## Step 4: Verify
 

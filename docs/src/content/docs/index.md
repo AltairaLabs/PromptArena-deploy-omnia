@@ -12,17 +12,19 @@ The adapter maps each concept from a compiled pack to one or more Omnia Kubernet
 | Pack concept | Omnia resource | Adapter resource type |
 |---|---|---|
 | Pack JSON | ConfigMap | `configmap` |
-| Pack identity | PromptPack CRD | `prompt_pack` |
-| Agent | AgentRuntime CRD | `agent_runtime` |
-| Tools | ToolRegistry CRD | `tool_registry` |
+| Pack identity + skills | PromptPack CRD | `prompt_pack` |
+| Agent + provider bindings | AgentRuntime CRD | `agent_runtime` |
+| Deploy-config `tools` | ToolRegistry CRD | `tool_registry` |
 | Tool blocklist | AgentPolicy CRD | `agent_policy` |
 
 ## Key features
 
 - **Single and multi-agent packs** -- single-agent packs produce one AgentRuntime; multi-agent packs produce one per agent with shared PromptPack and ToolRegistry resources.
+- **Role-aware multi-provider** -- bind one or more Omnia Provider CRDs per runtime, each tagged with a role (`llm`, `embedding`, `tts`, `stt`, `image`, `inference`). The `default` binding is the primary.
+- **Tool registry** -- tool handlers declared in the deploy-config `tools` block are projected into a ToolRegistry CRD (`spec.handlers[]`) so the Omnia runtime can discover them at startup.
+- **Skill bindings** -- `skills` and `skillsConfig` from the deploy config are projected onto the PromptPack, referencing Omnia SkillSource CRDs (pre-flighted at apply time).
 - **Dry-run mode** -- preview every resource the adapter would create or update, without making API calls.
 - **Managed resource labels** -- every resource is labelled with `app.kubernetes.io/managed-by`, pack ID, pack version, and resource type for reliable ownership tracking.
-- **Tool registry** -- pack tool definitions are projected into a ToolRegistry CRD so the Omnia runtime can discover them at startup.
 - **Agent policy** -- tool blocklists defined in the pack are enforced via an AgentPolicy CRD.
 - **Create/update diffing** -- when prior state exists, the adapter diffs desired resources against the previous deployment and emits create, update, or delete actions accordingly.
 

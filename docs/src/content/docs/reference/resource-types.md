@@ -11,7 +11,7 @@ The Omnia adapter manages five Kubernetes resource types. This page documents ea
 |---|---|---|---|
 | ConfigMap | `configmap` | `configmaps` | No -- always created |
 | PromptPack | `prompt_pack` | `promptpacks` | No -- always created |
-| ToolRegistry | `tool_registry` | `toolregistries` | Yes -- only if pack defines tools |
+| ToolRegistry | `tool_registry` | `toolregistries` | Yes -- only if the deploy-config `tools` block is non-empty |
 | AgentPolicy | `agent_policy` | `agentpolicies` | Yes -- only if pack defines a tool blocklist |
 | AgentRuntime | `agent_runtime` | `agentruntimes` | No -- always created (one per agent) |
 
@@ -50,10 +50,10 @@ Always. Every deployment creates exactly one ConfigMap.
 
 | Operation | HTTP method | URL |
 |---|---|---|
-| Create | `POST` | `/api/v1/workspaces/<ws>/configmaps` |
-| Update | `PUT` | `/api/v1/workspaces/<ws>/configmaps/<name>` |
-| Get | `GET` | `/api/v1/workspaces/<ws>/configmaps/<name>` |
-| Delete | `DELETE` | `/api/v1/workspaces/<ws>/configmaps/<name>` |
+| Create | `POST` | `/api/workspaces/<ws>/configmaps` |
+| Update | `PUT` | `/api/workspaces/<ws>/configmaps/<name>` |
+| Get | `GET` | `/api/workspaces/<ws>/configmaps/<name>` |
+| Delete | `DELETE` | `/api/workspaces/<ws>/configmaps/<name>` |
 
 ---
 
@@ -61,7 +61,7 @@ Always. Every deployment creates exactly one ConfigMap.
 
 ### What it represents
 
-A custom resource that identifies the prompt pack, references its ConfigMap data, and records the provider mapping.
+A custom resource that identifies the prompt pack and records its version and skill bindings. The raw pack JSON is sent in the request `content`; the Omnia dashboard's promptpacks route folds that into a managed ConfigMap and sets `spec.source` itself.
 
 ### Naming convention
 
@@ -75,31 +75,40 @@ Always. Every deployment creates exactly one PromptPack.
 
 ```json
 {
-  "kind": "PromptPack",
   "metadata": {
     "name": "<pack-id>",
     "labels": { ... }
   },
   "spec": {
-    "packId": "<pack-id>",
     "version": "<pack-version>",
-    "configMapRef": "<pack-id>-packdata",
-    "providerRef": "<default-provider>",
-    "description": "<pack description>"
+    "skills": [
+      {
+        "source": "company-skills",
+        "include": ["refund-policy", "escalation"],
+        "mountAs": "support"
+      }
+    ],
+    "skillsConfig": {
+      "maxActive": 3,
+      "selector": "model-driven"
+    }
+  },
+  "content": {
+    "pack.json": "<raw pack JSON>"
   }
 }
 ```
 
-The `providerRef` is set from the `default` entry in the providers map. The `description` is included only if the pack has a non-empty description.
+`spec.skills` is emitted only when the deploy-config `skills` block is non-empty; each entry's `include`/`mountAs` appear only when set. `spec.skillsConfig` is emitted only when `skillsConfig` sets `maxActive` and/or `selector`. The provider bindings are recorded on the AgentRuntime, not the PromptPack.
 
 ### API operations
 
 | Operation | HTTP method | URL |
 |---|---|---|
-| Create | `POST` | `/api/v1/workspaces/<ws>/promptpacks` |
-| Update | `PUT` | `/api/v1/workspaces/<ws>/promptpacks/<name>` |
-| Get | `GET` | `/api/v1/workspaces/<ws>/promptpacks/<name>` |
-| Delete | `DELETE` | `/api/v1/workspaces/<ws>/promptpacks/<name>` |
+| Create | `POST` | `/api/workspaces/<ws>/promptpacks` |
+| Update | `PUT` | `/api/workspaces/<ws>/promptpacks/<name>` |
+| Get | `GET` | `/api/workspaces/<ws>/promptpacks/<name>` |
+| Delete | `DELETE` | `/api/workspaces/<ws>/promptpacks/<name>` |
 
 ---
 
@@ -107,7 +116,7 @@ The `providerRef` is set from the `default` entry in the providers map. The `des
 
 ### What it represents
 
-A custom resource that lists the tools available to the agent runtime. Each tool entry includes its name, description, and JSON Schema input parameters.
+A custom resource that lists the tool handlers available to the agent runtime. Handlers are a faithful passthrough of the deploy-config `tools` block to `spec.handlers[]` — they are **not** derived from tools embedded in the pack (inline pack tool schemas reach the runtime via the PromptPack content fold instead).
 
 ### Naming convention
 
@@ -115,39 +124,64 @@ A custom resource that lists the tools available to the agent runtime. Each tool
 
 ### When created
 
-Conditional. Only created when the pack defines at least one tool (`len(pack.Tools) > 0`).
+Conditional. Only created when the deploy-config `tools` block is non-empty (`len(cfg.Tools) > 0`).
 
 ### Payload structure
 
+Each handler carries its `name` and `type` plus the type-specific blocks that were set. The shape varies by `type`:
+
 ```json
 {
-  "kind": "ToolRegistry",
   "metadata": {
     "name": "<pack-id>-tools",
     "labels": { ... }
   },
   "spec": {
-    "tools": [
+    "handlers": [
       {
-        "name": "tool-name",
-        "description": "Tool description",
-        "inputSchema": { ... }
+        "name": "weather",
+        "type": "http",
+        "tool": {
+          "name": "get_weather",
+          "description": "Get the current weather for a city.",
+          "inputSchema": { ... },
+          "outputSchema": { ... }
+        },
+        "httpConfig": { ... },
+        "timeout": "10s"
+      },
+      {
+        "name": "docs-search",
+        "type": "mcp",
+        "mcpConfig": { ... }
+      },
+      {
+        "name": "browser-action",
+        "type": "client",
+        "clientConfig": { ... }
       }
     ]
   }
 }
 ```
 
-Tools are sorted alphabetically by name for deterministic output.
+Per-type shape:
+
+- **`http` / `grpc`** — a `tool` block (`name`, `description`, `inputSchema`, optional `outputSchema`) plus `httpConfig`/`grpcConfig` or a `selector`.
+- **`openapi`** — `openAPIConfig` or a `selector`; no `tool` block.
+- **`mcp`** — `mcpConfig` or a `selector`; no `tool` block.
+- **`client`** — optional `clientConfig`; no hard requirement.
+
+Optional blocks (`tool`, `selector`, the `*Config` blocks, `timeout`) are emitted only when present. Handlers preserve the order of the deploy-config `tools` list.
 
 ### API operations
 
 | Operation | HTTP method | URL |
 |---|---|---|
-| Create | `POST` | `/api/v1/workspaces/<ws>/toolregistries` |
-| Update | `PUT` | `/api/v1/workspaces/<ws>/toolregistries/<name>` |
-| Get | `GET` | `/api/v1/workspaces/<ws>/toolregistries/<name>` |
-| Delete | `DELETE` | `/api/v1/workspaces/<ws>/toolregistries/<name>` |
+| Create | `POST` | `/api/workspaces/<ws>/toolregistries` |
+| Update | `PUT` | `/api/workspaces/<ws>/toolregistries/<name>` |
+| Get | `GET` | `/api/workspaces/<ws>/toolregistries/<name>` |
+| Delete | `DELETE` | `/api/workspaces/<ws>/toolregistries/<name>` |
 
 ---
 
@@ -186,10 +220,10 @@ The blocklist is the deduplicated, sorted union of all blocklists across all pro
 
 | Operation | HTTP method | URL |
 |---|---|---|
-| Create | `POST` | `/api/v1/workspaces/<ws>/agentpolicies` |
-| Update | `PUT` | `/api/v1/workspaces/<ws>/agentpolicies/<name>` |
-| Get | `GET` | `/api/v1/workspaces/<ws>/agentpolicies/<name>` |
-| Delete | `DELETE` | `/api/v1/workspaces/<ws>/agentpolicies/<name>` |
+| Create | `POST` | `/api/workspaces/<ws>/agentpolicies` |
+| Update | `PUT` | `/api/workspaces/<ws>/agentpolicies/<name>` |
+| Get | `GET` | `/api/workspaces/<ws>/agentpolicies/<name>` |
+| Delete | `DELETE` | `/api/workspaces/<ws>/agentpolicies/<name>` |
 
 ---
 
@@ -197,7 +231,7 @@ The blocklist is the deduplicated, sorted union of all blocklists across all pro
 
 ### What it represents
 
-The running agent instance. References the PromptPack and optionally the ToolRegistry and AgentPolicy. Supports resource sizing via the `runtime` config.
+The running agent instance. References the PromptPack, lists its provider bindings, and optionally references the ToolRegistry. Supports resource sizing and autoscaling via the `runtime` config.
 
 ### Naming convention
 
@@ -212,41 +246,55 @@ Always. Single-agent packs produce one AgentRuntime. Multi-agent packs produce o
 
 ```json
 {
-  "kind": "AgentRuntime",
   "metadata": {
     "name": "<agent-name>",
     "labels": { ... }
   },
   "spec": {
-    "promptPackRef": "<pack-id>",
-    "agentName": "<agent-name>",
-    "providerRef": "<resolved-provider>",
-    "replicas": 2,
-    "resources": {
-      "cpu": "500m",
-      "memory": "512Mi"
-    },
-    "toolRegistryRef": "<pack-id>-tools",
-    "agentPolicyRef": "<pack-id>-policy"
+    "promptPackRef": { "name": "<pack-id>" },
+    "facade": { "type": "websocket", "handler": "runtime" },
+    "providers": [
+      {
+        "name": "default",
+        "providerRef": { "name": "<provider-crd>" },
+        "role": "llm"
+      },
+      {
+        "name": "embedder",
+        "providerRef": { "name": "<embedding-provider-crd>" },
+        "role": "embedding"
+      }
+    ],
+    "toolRegistryRef": { "name": "<pack-id>-tools" },
+    "runtime": {
+      "replicas": 2,
+      "resources": { "requests": { "cpu": "500m", "memory": "512Mi" } },
+      "autoscaling": {
+        "enabled": true,
+        "type": "hpa",
+        "minReplicas": 1,
+        "maxReplicas": 10,
+        "targetCPUUtilizationPercentage": 70
+      }
+    }
   }
 }
 ```
 
 Notes:
-- `agentName` is only set for multi-agent packs.
-- `providerRef` is resolved per-agent: first by exact agent name match in the providers map, then by the `default` entry.
-- `replicas` and `resources` are only set when the `runtime` config is provided.
-- `toolRegistryRef` is only set when the pack defines tools.
-- `agentPolicyRef` is only set when the pack defines a tool policy.
+- Every provider binding is emitted as a `NamedProviderRef` in `spec.providers`, preserving order. The binding named `default` is the runtime's primary; an empty `role` defaults to `llm`.
+- `toolRegistryRef` is only set when the deploy-config `tools` block is non-empty.
+- `runtime` is only set when the `runtime` config is provided; `replicas`/`resources`/`autoscaling` each appear only when their inputs are set. Autoscaling keys use camelCase CRD names (`minReplicas`, `targetCPUUtilizationPercentage`, etc.).
+- The AgentRuntime does not carry an `agentPolicyRef`; the AgentPolicy CRD is created independently when the pack defines a tool blocklist.
 
 ### API operations
 
 | Operation | HTTP method | URL |
 |---|---|---|
-| Create | `POST` | `/api/v1/workspaces/<ws>/agentruntimes` |
-| Update | `PUT` | `/api/v1/workspaces/<ws>/agentruntimes/<name>` |
-| Get | `GET` | `/api/v1/workspaces/<ws>/agentruntimes/<name>` |
-| Delete | `DELETE` | `/api/v1/workspaces/<ws>/agentruntimes/<name>` |
+| Create | `POST` | `/api/workspaces/<ws>/agentruntimes` |
+| Update | `PUT` | `/api/workspaces/<ws>/agentruntimes/<name>` |
+| Get | `GET` | `/api/workspaces/<ws>/agentruntimes/<name>` |
+| Delete | `DELETE` | `/api/workspaces/<ws>/agentruntimes/<name>` |
 
 ## Name sanitization
 
