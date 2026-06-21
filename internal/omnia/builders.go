@@ -138,6 +138,10 @@ func buildAgentRuntimeRequest(
 		spec["memory"] = m
 	}
 
+	if ev := buildEvalsSpec(cfg.Evals); ev != nil {
+		spec["evals"] = ev
+	}
+
 	req := map[string]interface{}{
 		keyMetadata: map[string]interface{}{
 			keyName:   sanitizeName(agentName),
@@ -395,6 +399,33 @@ func buildMemoryAccessFilterSpec(af *MemoryAccessFilterConfig) map[string]interf
 		return nil
 	}
 	return map[string]interface{}{"denyCEL": af.DenyCEL}
+}
+
+// buildEvalsSpec maps the adapter's evals config to spec.evals. enabled is
+// always emitted (it is the on/off switch); inline/worker are emitted as
+// {"groups": [...]} only when their group list is non-empty, so omitted paths
+// fall back to the CRD defaults. Returns nil when nothing is configured.
+func buildEvalsSpec(e *EvalsConfig) map[string]interface{} {
+	if e == nil {
+		return nil
+	}
+	out := map[string]interface{}{keyEnabled: e.Enabled}
+	if p := buildEvalPathSpec(e.Inline); p != nil {
+		out["inline"] = p
+	}
+	if p := buildEvalPathSpec(e.Worker); p != nil {
+		out["worker"] = p
+	}
+	return out
+}
+
+// buildEvalPathSpec maps a single eval path (inline or worker) to {"groups":
+// [...]}. Returns nil when the path is nil or its group list is empty.
+func buildEvalPathSpec(p *EvalPathConfig) map[string]interface{} {
+	if p == nil || len(p.Groups) == 0 {
+		return nil
+	}
+	return map[string]interface{}{"groups": p.Groups}
 }
 
 // buildToolRegistryRequest builds the JSON body for creating/updating a

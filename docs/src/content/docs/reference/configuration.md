@@ -255,6 +255,30 @@ The adapter validates configuration against the following JSON Schema:
       },
       "additionalProperties": false
     },
+    "evals": {
+      "type": "object",
+      "description": "Runtime evals (spec.evals). enabled is on/off; inline/worker route eval groups. Optional.",
+      "properties": {
+        "enabled": { "type": "boolean", "description": "Turn evals on for the agent." },
+        "inline": {
+          "type": "object",
+          "description": "Eval groups run synchronously in the runtime (default: fast-running).",
+          "properties": {
+            "groups": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "worker": {
+          "type": "object",
+          "description": "Eval groups run async in the per-service-group worker (default: long-running, external).",
+          "properties": {
+            "groups": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "labels": {
       "type": "object",
       "additionalProperties": { "type": "string" },
@@ -620,6 +644,40 @@ memory:
     accessFilter:
       denyCEL: 'metadata.url.contains("restricted")'   # only enforced when strategy: semantic
 ```
+
+### `evals`
+
+| | |
+|---|---|
+| **Type** | `object` |
+| **Required** | No |
+
+Turns runtime evaluations on for the deployed agent and routes which eval **groups** run where. Faithful passthrough to the AgentRuntime `spec.evals` — the adapter emits `enabled` always (it is the on/off switch) and `inline`/`worker` only when their group list is non-empty, so omitted paths fall back to the CRD defaults.
+
+:::note
+The eval **definitions** are not configured here. They come from the **PromptPack** (`pack.json` `evals`). This block only turns evals on and routes which eval **groups** execute **inline** (synchronously in the runtime) vs in the per-service-group **worker** (asynchronously).
+:::
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `enabled` | boolean | No | Turn evals on for the agent. Always emitted. Defaults to `false`. |
+| `inline` | object | No | `groups` (array of strings) — eval group names run **synchronously in the runtime**. Defaults to `["fast-running"]` when omitted. |
+| `worker` | object | No | `groups` (array of strings) — eval group names run **asynchronously in the per-service-group eval-worker**. Defaults to `["long-running", "external"]` when omitted. |
+
+Group names are free-form and resolved against the PromptPack's eval definitions; the adapter validates only that no group entry is an empty string.
+
+```yaml
+evals:
+  enabled: true
+  inline:
+    groups: [fast-running]              # run synchronously in the runtime
+  worker:
+    groups: [long-running, external]    # run async in the per-service-group worker
+```
+
+:::note
+`sampling`, `rateLimit`, `sessionCompletion`, and `podOverrides` exist on the AgentRuntime CRD but are **intentionally not exposed** here. The first three have no runtime/controller consumers (dead config); `podOverrides` is advanced eval-worker pod infrastructure with per-namespace last-writer-wins semantics — a platform-level concern, not a per-agent deploy setting.
+:::
 
 ### `labels`
 

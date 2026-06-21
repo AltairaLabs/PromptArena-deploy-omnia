@@ -952,3 +952,95 @@ func TestBuildMemorySpec_Subblocks(t *testing.T) {
 		t.Errorf("retrieval.limit = %v, want 7", rv["limit"])
 	}
 }
+
+func TestBuildAgentRuntimeRequest_Evals(t *testing.T) {
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		Evals: &EvalsConfig{
+			Enabled: true,
+			Inline:  &EvalPathConfig{Groups: []string{"fast-running"}},
+			Worker:  &EvalPathConfig{Groups: []string{"long-running", "external"}},
+		},
+	}
+
+	spec := agentRuntimeSpec(t, cfg)
+	ev, ok := spec["evals"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected spec.evals to be an object")
+	}
+	if ev["enabled"] != true {
+		t.Errorf("evals.enabled = %v, want true", ev["enabled"])
+	}
+
+	inline, ok := ev["inline"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected evals.inline to be an object")
+	}
+	inlineGroups, ok := inline["groups"].([]interface{})
+	if !ok || len(inlineGroups) != 1 || inlineGroups[0] != "fast-running" {
+		t.Errorf("inline.groups = %v, want [fast-running]", inline["groups"])
+	}
+
+	worker, ok := ev["worker"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected evals.worker to be an object")
+	}
+	workerGroups, ok := worker["groups"].([]interface{})
+	if !ok || len(workerGroups) != 2 || workerGroups[1] != "external" {
+		t.Errorf("worker.groups = %v, want [long-running external]", worker["groups"])
+	}
+}
+
+func TestBuildAgentRuntimeRequest_NoEvals(t *testing.T) {
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+	}
+	spec := agentRuntimeSpec(t, cfg)
+	if _, present := spec["evals"]; present {
+		t.Error("spec.evals must be omitted when cfg.Evals is nil")
+	}
+}
+
+func TestBuildEvalsSpec_Subblocks(t *testing.T) {
+	if got := buildEvalsSpec(nil); got != nil {
+		t.Errorf("expected nil for nil evals, got %v", got)
+	}
+
+	// A disabled empty block still emits {"enabled": false} — enabled is the switch.
+	got := buildEvalsSpec(&EvalsConfig{})
+	if got == nil || got["enabled"] != false {
+		t.Fatalf("expected {enabled:false}, got %v", got)
+	}
+	if len(got) != 1 {
+		t.Errorf("expected only enabled, got %v", got)
+	}
+
+	// Empty group lists collapse to nothing — inline/worker are omitted.
+	got = buildEvalsSpec(&EvalsConfig{
+		Enabled: true,
+		Inline:  &EvalPathConfig{},
+		Worker:  &EvalPathConfig{Groups: []string{}},
+	})
+	if _, present := got["inline"]; present {
+		t.Errorf("expected inline omitted when its groups are empty, got %v", got)
+	}
+	if _, present := got["worker"]; present {
+		t.Errorf("expected worker omitted when its groups are empty, got %v", got)
+	}
+
+	// Non-empty groups emit under their path.
+	got = buildEvalsSpec(&EvalsConfig{
+		Inline: &EvalPathConfig{Groups: []string{"fast-running"}},
+	})
+	inline := got["inline"].(map[string]interface{})
+	groups := inline["groups"].([]string)
+	if len(groups) != 1 || groups[0] != "fast-running" {
+		t.Errorf("inline.groups = %v, want [fast-running]", groups)
+	}
+}
