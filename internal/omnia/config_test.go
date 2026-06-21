@@ -551,6 +551,159 @@ func TestValidateToolHandlers_GRPCAndOpenAPI(t *testing.T) {
 	}
 }
 
+func TestParseConfig_ExternalAuth_OIDC(t *testing.T) {
+	raw := `{
+		"api_endpoint": "https://omnia.example.com",
+		"workspace": "ws",
+		"api_token": "tok",
+		"providers": {"default": "claude-prod"},
+		"externalAuth": {
+			"allowManagementPlane": false,
+			"oidc": {
+				"issuer": "https://issuer.example.com",
+				"audience": "omnia-agents",
+				"claimMapping": {"subject": "sub", "role": "omnia.role", "endUser": "actor"}
+			},
+			"edgeTrust": {
+				"headerMapping": {"subject": "x-user-id", "email": "x-user-email"},
+				"claimsFromHeaders": {"x-user-groups": "groups"}
+			}
+		}
+	}`
+
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if cfg.ExternalAuth == nil {
+		t.Fatal("expected ExternalAuth to be populated")
+	}
+	if cfg.ExternalAuth.AllowManagementPlane == nil || *cfg.ExternalAuth.AllowManagementPlane {
+		t.Errorf("AllowManagementPlane = %v, want explicit false", cfg.ExternalAuth.AllowManagementPlane)
+	}
+	oidc := cfg.ExternalAuth.OIDC
+	if oidc == nil || oidc.Issuer != "https://issuer.example.com" || oidc.Audience != "omnia-agents" {
+		t.Fatalf("oidc = %+v", oidc)
+	}
+	if oidc.ClaimMapping == nil || oidc.ClaimMapping.Subject != "sub" || oidc.ClaimMapping.EndUser != "actor" {
+		t.Errorf("oidc.claimMapping = %+v", oidc.ClaimMapping)
+	}
+	et := cfg.ExternalAuth.EdgeTrust
+	if et == nil || et.HeaderMapping == nil || et.HeaderMapping.Subject != "x-user-id" {
+		t.Fatalf("edgeTrust = %+v", et)
+	}
+	if et.HeaderMapping.Email != "x-user-email" {
+		t.Errorf("edgeTrust.headerMapping.email = %q", et.HeaderMapping.Email)
+	}
+	if et.ClaimsFromHeaders["x-user-groups"] != "groups" {
+		t.Errorf("edgeTrust.claimsFromHeaders = %v", et.ClaimsFromHeaders)
+	}
+}
+
+func TestParseConfig_ExternalAuth_SharedTokenAndAPIKeys(t *testing.T) {
+	raw := `{
+		"api_endpoint": "https://omnia.example.com",
+		"workspace": "ws",
+		"api_token": "tok",
+		"providers": {"default": "claude-prod"},
+		"externalAuth": {
+			"sharedToken": {"secretRef": "partner-token", "trustEndUserHeader": true},
+			"apiKeys": {"defaultRole": "editor"}
+		}
+	}`
+
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if cfg.ExternalAuth == nil {
+		t.Fatal("expected ExternalAuth to be populated")
+	}
+	st := cfg.ExternalAuth.SharedToken
+	if st == nil || st.SecretRef != "partner-token" || !st.TrustEndUserHeader {
+		t.Fatalf("sharedToken = %+v", st)
+	}
+	ak := cfg.ExternalAuth.APIKeys
+	if ak == nil || ak.DefaultRole != authRoleEditor || ak.TrustEndUserHeader {
+		t.Fatalf("apiKeys = %+v", ak)
+	}
+}
+
+func externalAuthBaseConfig(ea *ExternalAuthConfig) *Config {
+	return &Config{
+		APIEndpoint:  "https://omnia.example.com",
+		Workspace:    "ws",
+		APIToken:     "tok",
+		Providers:    Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		ExternalAuth: ea,
+	}
+}
+
+func TestValidateExternalAuth(t *testing.T) {
+	tests := []struct {
+		name      string
+		ea        *ExternalAuthConfig
+		wantError string // substring; "" = expect no error
+	}{
+		{"nil block is valid", nil, ""},
+		{"empty block is valid", &ExternalAuthConfig{}, ""},
+		{
+			name:      "sharedToken missing secretRef",
+			ea:        &ExternalAuthConfig{SharedToken: &SharedTokenAuthConfig{}},
+			wantError: "sharedToken.secretRef is required",
+		},
+		{
+			name:      "apiKeys invalid defaultRole",
+			ea:        &ExternalAuthConfig{APIKeys: &APIKeysAuthConfig{DefaultRole: "superuser"}},
+			wantError: "defaultRole",
+		},
+		{
+			name:      "apiKeys empty defaultRole is valid",
+			ea:        &ExternalAuthConfig{APIKeys: &APIKeysAuthConfig{}},
+			wantError: "",
+		},
+		{
+			name:      "oidc missing audience",
+			ea:        &ExternalAuthConfig{OIDC: &OIDCAuthConfig{Issuer: "https://i"}},
+			wantError: "oidc.audience is required",
+		},
+		{
+			name:      "oidc missing issuer",
+			ea:        &ExternalAuthConfig{OIDC: &OIDCAuthConfig{Audience: "aud"}},
+			wantError: "oidc.issuer is required",
+		},
+		{
+			name:      "edgeTrust has no required fields",
+			ea:        &ExternalAuthConfig{EdgeTrust: &EdgeTrustAuthConfig{}},
+			wantError: "",
+		},
+		{
+			name: "valid full block",
+			ea: &ExternalAuthConfig{
+				SharedToken: &SharedTokenAuthConfig{SecretRef: "s"},
+				APIKeys:     &APIKeysAuthConfig{DefaultRole: authRoleAdmin},
+				OIDC:        &OIDCAuthConfig{Issuer: "https://i", Audience: "aud"},
+			},
+			wantError: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := externalAuthBaseConfig(tt.ea).validate()
+			if tt.wantError == "" {
+				if len(errs) != 0 {
+					t.Errorf("expected no errors, got %v", errs)
+				}
+				return
+			}
+			if !strings.Contains(strings.Join(errs, "; "), tt.wantError) {
+				t.Errorf("expected an error containing %q, got %v", tt.wantError, errs)
+			}
+		})
+	}
+}
+
 func TestBaseURL(t *testing.T) {
 	tests := []struct {
 		name     string
