@@ -799,6 +799,94 @@ func TestValidateMemory(t *testing.T) {
 	}
 }
 
+func TestParseConfig_Evals(t *testing.T) {
+	raw := `{
+		"api_endpoint": "https://omnia.example.com",
+		"workspace": "ws",
+		"api_token": "tok",
+		"providers": {"default": "claude-prod"},
+		"evals": {
+			"enabled": true,
+			"inline": {"groups": ["fast-running"]},
+			"worker": {"groups": ["long-running", "external"]}
+		}
+	}`
+
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	e := cfg.Evals
+	if e == nil {
+		t.Fatal("expected Evals to be populated")
+	}
+	if !e.Enabled {
+		t.Fatalf("evals enabled = %v", e.Enabled)
+	}
+	if e.Inline == nil || len(e.Inline.Groups) != 1 || e.Inline.Groups[0] != "fast-running" {
+		t.Fatalf("inline = %+v", e.Inline)
+	}
+	if e.Worker == nil || len(e.Worker.Groups) != 2 || e.Worker.Groups[1] != "external" {
+		t.Fatalf("worker = %+v", e.Worker)
+	}
+}
+
+func evalsBaseConfig(e *EvalsConfig) *Config {
+	return &Config{
+		APIEndpoint: "https://omnia.example.com",
+		Workspace:   "ws",
+		APIToken:    "tok",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		Evals:       e,
+	}
+}
+
+func TestValidateEvals(t *testing.T) {
+	tests := []struct {
+		name      string
+		e         *EvalsConfig
+		wantError string // substring; "" = expect no error
+	}{
+		{"nil block is valid", nil, ""},
+		{"disabled empty block is valid", &EvalsConfig{}, ""},
+		{"enabled with no paths is valid", &EvalsConfig{Enabled: true}, ""},
+		{
+			name: "valid groups",
+			e: &EvalsConfig{
+				Enabled: true,
+				Inline:  &EvalPathConfig{Groups: []string{"fast-running"}},
+				Worker:  &EvalPathConfig{Groups: []string{"long-running", "external"}},
+			},
+			wantError: "",
+		},
+		{
+			name:      "empty inline group entry",
+			e:         &EvalsConfig{Inline: &EvalPathConfig{Groups: []string{"fast-running", "  "}}},
+			wantError: "evals.inline.groups must not contain empty group names",
+		},
+		{
+			name:      "empty worker group entry",
+			e:         &EvalsConfig{Worker: &EvalPathConfig{Groups: []string{""}}},
+			wantError: "evals.worker.groups must not contain empty group names",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := evalsBaseConfig(tt.e).validate()
+			if tt.wantError == "" {
+				if len(errs) != 0 {
+					t.Errorf("expected no errors, got %v", errs)
+				}
+				return
+			}
+			if !strings.Contains(strings.Join(errs, "; "), tt.wantError) {
+				t.Errorf("expected an error containing %q, got %v", tt.wantError, errs)
+			}
+		})
+	}
+}
+
 func TestBaseURL(t *testing.T) {
 	tests := []struct {
 		name     string

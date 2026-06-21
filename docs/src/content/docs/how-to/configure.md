@@ -79,6 +79,12 @@ deploy:
       retrieval:
         strategy: semantic
         limit: 10
+    evals:
+      enabled: true
+      inline:
+        groups: [fast-running]
+      worker:
+        groups: [long-running, external]
     labels:
       team: platform
       environment: production
@@ -275,6 +281,31 @@ memory:
 Embedding for semantic memory is configured at the **workspace** level (the workspace service group's memory-api uses a configured embedding `Provider`), not per agent — there is no per-agent embedding setting here.
 :::
 
+### `evals` (optional)
+
+Turns runtime evaluations on for the deployed agent and routes which eval **groups** run where, projected onto the AgentRuntime's `spec.evals`. The eval **definitions** come from the **PromptPack** (`pack.json` `evals`), *not* this block — here you only flip evals on and choose which groups run **inline** (synchronously in the runtime) vs in the per-service-group **worker** (asynchronously).
+
+```yaml
+evals:
+  enabled: true
+  inline:
+    groups: [fast-running]              # run synchronously in the runtime
+  worker:
+    groups: [long-running, external]    # run async in the per-service-group worker
+```
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `enabled` | boolean | Turn evals on for the agent. Always emitted. Defaults to `false`. |
+| `inline.groups` | array of strings | Eval group names run **synchronously in the runtime**. Defaults to `["fast-running"]` when omitted. |
+| `worker.groups` | array of strings | Eval group names run **asynchronously in the per-service-group eval-worker**. Defaults to `["long-running", "external"]` when omitted. |
+
+Group names are free-form and resolved against the PromptPack's eval definitions. Both `inline` and `worker` are emitted only when their `groups` list is non-empty, so an omitted path falls back to the CRD default.
+
+:::note
+`sampling`, `rateLimit`, `sessionCompletion`, and `podOverrides` are **intentionally not exposed**. The first three exist on the CRD but have no runtime/controller consumers (dead config); `podOverrides` is advanced eval-worker pod infrastructure with per-namespace last-writer-wins semantics — a platform-level concern, not a per-agent deploy setting.
+:::
+
 ### `runtime` (optional)
 
 Resource sizing and autoscaling for AgentRuntime CRDs.
@@ -352,5 +383,6 @@ The adapter validates the configuration before any operation. Validation checks:
 - `runtime.replicas` is >= 1 and any `runtime.autoscaling` values are within range (if runtime is specified)
 - If `externalAuth` is specified, each configured validator is structurally valid (`sharedToken.secretRef` non-empty, `apiKeys.defaultRole` a valid role, `oidc.issuer`/`oidc.audience` non-empty). Secret existence and OIDC discovery are checked by the controller at reconcile time, not at plan time.
 - If `memory` is specified, it is structurally valid: `retrieval.strategy` (if set) is valid; `retrieval.limit` (if set) is between 1 and 50.
+- If `evals` is specified, it is structurally valid: no `inline.groups`/`worker.groups` entry is an empty string (group names are otherwise free-form, resolved against the PromptPack's eval definitions).
 
 Validation errors are returned as a list of human-readable messages.

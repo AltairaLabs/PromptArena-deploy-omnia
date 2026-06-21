@@ -458,6 +458,30 @@ const configSchema = `{
       },
       "additionalProperties": false
     },
+    "evals": {
+      "type": "object",
+      "description": "Runtime evals (spec.evals). enabled is on/off; inline/worker route eval groups. Optional.",
+      "properties": {
+        "enabled": { "type": "boolean", "description": "Turn evals on for the agent." },
+        "inline": {
+          "type": "object",
+          "description": "Eval groups run synchronously in the runtime (default: fast-running).",
+          "properties": {
+            "groups": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "worker": {
+          "type": "object",
+          "description": "Eval groups run async in the per-service-group worker (default: long-running, external).",
+          "properties": {
+            "groups": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "labels": {
       "type": "object",
       "additionalProperties": { "type": "string" },
@@ -486,6 +510,7 @@ type Config struct {
 	Runtime      *RuntimeConfig      `json:"runtime,omitempty"`
 	ExternalAuth *ExternalAuthConfig `json:"externalAuth,omitempty"`
 	Memory       *MemoryConfig       `json:"memory,omitempty"`
+	Evals        *EvalsConfig        `json:"evals,omitempty"`
 	Labels       map[string]string   `json:"labels,omitempty"`
 	DryRun       bool                `json:"dry_run,omitempty"`
 
@@ -604,6 +629,28 @@ type MemoryAccessFilterConfig struct {
 	DenyCEL string `json:"denyCEL,omitempty"`
 }
 
+// EvalsConfig is the deploy-config evals block. It maps to the AgentRuntime
+// spec.evals: enabled is the on/off switch the runtime and the eval-worker
+// reconcile gate both read; inline/worker route which eval *groups* run where.
+// The eval *definitions* come from the PromptPack (pack.json "evals"), NOT this
+// block — this block only turns evals on and routes group execution. The
+// adapter intentionally exposes only the proven-wired knobs: sampling,
+// rateLimit, sessionCompletion, and podOverrides exist on the CRD but are not
+// surfaced per-agent here (unwired or platform-level). The adapter does
+// structural validation only.
+type EvalsConfig struct {
+	Enabled bool            `json:"enabled,omitempty"`
+	Inline  *EvalPathConfig `json:"inline,omitempty"`
+	Worker  *EvalPathConfig `json:"worker,omitempty"`
+}
+
+// EvalPathConfig names the eval groups that run on a single path (inline in the
+// runtime, or in the per-service-group worker). Groups are free-form names
+// resolved against the PromptPack's eval definitions.
+type EvalPathConfig struct {
+	Groups []string `json:"groups,omitempty"`
+}
+
 // parseConfig unmarshals JSON config into Config.
 func parseConfig(raw string) (*Config, error) {
 	var cfg Config
@@ -652,6 +699,8 @@ func (c *Config) validate() []string {
 	errs = append(errs, validateExternalAuth(c.ExternalAuth)...)
 
 	errs = append(errs, validateMemory(c.Memory)...)
+
+	errs = append(errs, validateEvals(c.Evals)...)
 
 	if c.resolveToken() == "" {
 		errs = append(errs, "api_token is required (set in config or OMNIA_API_TOKEN env var)")
@@ -777,6 +826,33 @@ func validateMemory(m *MemoryConfig) []string {
 	}
 
 	return errs
+}
+
+// validateEvals checks the optional evals block. Structural only — group names
+// are free-form (resolved against the PromptPack's eval definitions), so the
+// only genuine structural issue is an empty-string group entry. A nil block is
+// valid (no evals configured).
+func validateEvals(e *EvalsConfig) []string {
+	if e == nil {
+		return nil
+	}
+	var errs []string
+	errs = append(errs, validateEvalGroups("evals.inline.groups", e.Inline)...)
+	errs = append(errs, validateEvalGroups("evals.worker.groups", e.Worker)...)
+	return errs
+}
+
+// validateEvalGroups rejects empty-string entries in a path's group list.
+func validateEvalGroups(field string, p *EvalPathConfig) []string {
+	if p == nil {
+		return nil
+	}
+	for _, g := range p.Groups {
+		if strings.TrimSpace(g) == "" {
+			return []string{field + " must not contain empty group names"}
+		}
+	}
+	return nil
 }
 
 // validateAutoscaling checks the optional autoscaling block. The adapter only
