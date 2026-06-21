@@ -126,9 +126,39 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 			func() (json.RawMessage, error) { return buildAgentRuntimeRequest(ac.pack, agentName, ac.cfg) })
 		resources = append(resources, res...)
 		applyErr = combineErrors(applyErr, err)
+
+		// On a successful create/update, surface a dashboard deep-link so the
+		// operator can open the agent immediately. The /agents/[name] route
+		// keys on the AgentRuntime metadata.name = sanitizeName(agentName).
+		if err == nil && agentRuntimeSucceeded(res) {
+			if cbErr := reportAgentAccessURL(ac, agentName, pct); cbErr != nil {
+				return resources, cbErr
+			}
+		}
 	}
 
 	return resources, applyErr
+}
+
+// agentRuntimeSucceeded reports whether the AgentRuntime phase produced a
+// created/updated resource (not failed/skipped).
+func agentRuntimeSucceeded(res []ResourceState) bool {
+	for _, r := range res {
+		if r.Type == ResTypeAgentRuntime &&
+			(r.Status == ResStatusCreated || r.Status == ResStatusUpdated) {
+			return true
+		}
+	}
+	return false
+}
+
+// reportAgentAccessURL emits a Progress event with the dashboard deep-link for
+// a freshly deployed AgentRuntime.
+func reportAgentAccessURL(ac *applyContext, agentName string, pct float64) error {
+	url := fmt.Sprintf("%s/agents/%s?workspace=%s",
+		ac.cfg.endpointRoot(), sanitizeName(agentName), ac.cfg.Workspace)
+	return ac.reporter.Progress(
+		fmt.Sprintf("Agent %q ready — open: %s", agentName, url), pct)
 }
 
 // applyResourcePhase creates or updates a single resource, reporting progress.

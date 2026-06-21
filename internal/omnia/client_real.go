@@ -199,14 +199,16 @@ func (c *httpClient) newRequest(
 	return req, nil
 }
 
-// readError reads an error response body and returns a formatted error.
+// readError reads an error response body and returns a typed *HTTPError that
+// carries the status-code-driven category and remediation hint, so downstream
+// classification (newDeployError) does not have to re-guess from the message.
 func (c *httpClient) readError(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
 	category, hint := classifyHTTPError(resp.StatusCode)
-	msg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))
-	if hint != "" {
-		msg += " [hint: " + hint + "]"
+	return &HTTPError{
+		StatusCode:  resp.StatusCode,
+		Body:        string(body),
+		Category:    category,
+		Remediation: hint,
 	}
-	_ = category // available for structured error if needed
-	return fmt.Errorf("%s", msg)
 }

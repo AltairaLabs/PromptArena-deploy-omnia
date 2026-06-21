@@ -4,12 +4,159 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
 )
 
 func noopApplyCallback(_ *deploy.ApplyEvent) error { return nil }
+
+// capturingCallback records every ApplyEvent so tests can assert on emitted
+// progress/resource messages.
+func capturingCallback(events *[]*deploy.ApplyEvent) deploy.ApplyCallback {
+	return func(e *deploy.ApplyEvent) error {
+		*events = append(*events, e)
+		return nil
+	}
+}
+
+// progressMessages returns the messages of all progress events.
+func progressMessages(events []*deploy.ApplyEvent) []string {
+	var msgs []string
+	for _, e := range events {
+		if e.Type == "progress" {
+			msgs = append(msgs, e.Message)
+		}
+	}
+	return msgs
+}
+
+// countContaining counts how many strings contain the given substring.
+func countContaining(strs []string, substr string) int {
+	n := 0
+	for _, s := range strs {
+		if strings.Contains(s, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// multiAgentPackJSON is a pack with two agent members (alice, bob).
+const multiAgentPackJSON = `{
+	"id": "multi-pack",
+	"version": "1.0.0",
+	"description": "Multi-agent test pack",
+	"prompts": {
+		"alice": {"system": "You are Alice", "description": "Alice"},
+		"bob": {"system": "You are Bob", "description": "Bob"}
+	},
+	"agents": {
+		"entry": "alice",
+		"members": {
+			"alice": {"description": "Alice agent"},
+			"bob": {"description": "Bob agent"}
+		}
+	}
+}`
+
+func TestApply_EmitsAccessURL(t *testing.T) {
+	sim := newSimulatedClient()
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	var events []*deploy.ApplyEvent
+	if _, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: testDeployConfig,
+	}, capturingCallback(&events)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Exactly one access-URL message for the single AgentRuntime.
+	msgs := progressMessages(events)
+	want := "https://omnia.test.com/agents/test-pack?workspace=test-ws"
+	if got := countContaining(msgs, want); got != 1 {
+		t.Errorf("expected 1 access-URL message containing %q, got %d (messages: %v)", want, got, msgs)
+	}
+}
+
+func TestApply_AccessURL_MultiAgent(t *testing.T) {
+	sim := newSimulatedClient()
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	cfg := `{
+		"api_endpoint": "https://omnia.test.com/",
+		"workspace": "test-ws",
+		"api_token": "test-token",
+		"providers": {"default": "claude-prod"}
+	}`
+
+	var events []*deploy.ApplyEvent
+	if _, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON:     multiAgentPackJSON,
+		DeployConfig: cfg,
+	}, capturingCallback(&events)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := progressMessages(events)
+	for _, name := range []string{"alice", "bob"} {
+		want := "https://omnia.test.com/agents/" + name + "?workspace=test-ws"
+		if got := countContaining(msgs, want); got != 1 {
+			t.Errorf("expected 1 access-URL message containing %q, got %d (messages: %v)", want, got, msgs)
+		}
+	}
+}
+
+func TestAgentRuntimeSucceeded(t *testing.T) {
+	tests := []struct {
+		name string
+		res  []ResourceState
+		want bool
+	}{
+		{name: "created", res: []ResourceState{{Type: ResTypeAgentRuntime, Status: ResStatusCreated}}, want: true},
+		{name: "updated", res: []ResourceState{{Type: ResTypeAgentRuntime, Status: ResStatusUpdated}}, want: true},
+		{name: "failed", res: []ResourceState{{Type: ResTypeAgentRuntime, Status: ResStatusFailed}}, want: false},
+		{name: "wrong type", res: []ResourceState{{Type: ResTypePromptPack, Status: ResStatusCreated}}, want: false},
+		{name: "empty", res: nil, want: false},
+		{
+			name: "mixed with success",
+			res: []ResourceState{
+				{Type: ResTypePromptPack, Status: ResStatusCreated},
+				{Type: ResTypeAgentRuntime, Status: ResStatusUpdated},
+			},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := agentRuntimeSucceeded(tt.res); got != tt.want {
+				t.Errorf("agentRuntimeSucceeded() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApply_NoAccessURL_OnFailure(t *testing.T) {
+	sim := newSimulatedClient()
+	// Fail the AgentRuntime create so no access URL should be emitted for it.
+	sim.failOn[resourceKey(ResTypeAgentRuntime, "test-pack")] = fmt.Errorf("simulated failure")
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	var events []*deploy.ApplyEvent
+	if _, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: testDeployConfig,
+	}, capturingCallback(&events)); err == nil {
+		t.Fatal("expected error due to AgentRuntime failure")
+	}
+
+	msgs := progressMessages(events)
+	if got := countContaining(msgs, "/agents/test-pack?workspace="); got != 0 {
+		t.Errorf("expected no access-URL message on failure, got %d (messages: %v)", got, msgs)
+	}
+}
 
 func TestApply_SingleAgent(t *testing.T) {
 	sim := newSimulatedClient()

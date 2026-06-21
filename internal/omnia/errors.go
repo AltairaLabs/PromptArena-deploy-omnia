@@ -50,6 +50,28 @@ func (e *DeployError) Unwrap() error {
 	return e.Cause
 }
 
+// HTTPError carries the status-code-driven classification of a failed Omnia
+// API response. The HTTP client computes Category/Remediation from the status
+// code (via classifyHTTPError) and returns this typed error so the
+// classification survives to newDeployError, instead of being re-guessed by
+// string-matching the message.
+type HTTPError struct {
+	StatusCode  int
+	Body        string
+	Category    string
+	Remediation string
+}
+
+// Error implements the error interface. It mirrors the previous string form
+// (HTTP <code>: <body>) and appends the remediation hint when one is set.
+func (e *HTTPError) Error() string {
+	msg := fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
+	if e.Remediation != "" {
+		msg += " [hint: " + e.Remediation + "]"
+	}
+	return msg
+}
+
 // HTTP status code ranges for error classification.
 const (
 	httpStatusUnauthorized = 401
@@ -129,8 +151,12 @@ func containsAny(s string, substrings []string) bool {
 }
 
 // newDeployError creates a DeployError with automatic error classification.
+// When the cause carries a typed *HTTPError, the status-code-driven category
+// and remediation are used directly (robust). Otherwise — notably for
+// transport errors that never produced an HTTP response (connection refused,
+// timeout, no such host) — it falls back to classifying the error message.
 func newDeployError(operation, resType, resName string, cause error) *DeployError {
-	category, remediation := classifyErrorMessage(cause.Error())
+	category, remediation := classifyCause(cause)
 	return &DeployError{
 		Category:     category,
 		ResourceType: resType,
@@ -140,6 +166,17 @@ func newDeployError(operation, resType, resName string, cause error) *DeployErro
 		Remediation:  remediation,
 		Cause:        cause,
 	}
+}
+
+// classifyCause prefers the typed HTTPError classification (status-code-driven)
+// and falls back to message-string classification for transport errors that
+// have no HTTP response.
+func classifyCause(cause error) (category, remediation string) {
+	var he *HTTPError
+	if errors.As(cause, &he) {
+		return he.Category, he.Remediation
+	}
+	return classifyErrorMessage(cause.Error())
 }
 
 // IsDeployError returns the DeployError if err is (or wraps) one.

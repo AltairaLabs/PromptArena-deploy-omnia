@@ -123,6 +123,103 @@ func TestNewDeployError(t *testing.T) {
 	}
 }
 
+func TestHTTPError_Error(t *testing.T) {
+	t.Run("with remediation", func(t *testing.T) {
+		he := &HTTPError{
+			StatusCode:  403,
+			Body:        "forbidden",
+			Category:    ErrCategoryPermission,
+			Remediation: "check your token",
+		}
+		got := he.Error()
+		if !strings.Contains(got, "HTTP 403") {
+			t.Errorf("expected status code in error, got %q", got)
+		}
+		if !strings.Contains(got, "forbidden") {
+			t.Errorf("expected body in error, got %q", got)
+		}
+		if !strings.Contains(got, "check your token") {
+			t.Errorf("expected remediation in error, got %q", got)
+		}
+	})
+
+	t.Run("without remediation", func(t *testing.T) {
+		he := &HTTPError{StatusCode: 500, Body: "boom"}
+		got := he.Error()
+		if got != "HTTP 500: boom" {
+			t.Errorf("Error() = %q, want %q", got, "HTTP 500: boom")
+		}
+	})
+}
+
+func TestNewDeployError_FromHTTPError(t *testing.T) {
+	// Each status code must drive the category/remediation via errors.As on the
+	// typed HTTPError — NOT by string-matching the message.
+	tests := []struct {
+		name         string
+		statusCode   int
+		wantCategory string
+	}{
+		{name: "401 -> permission", statusCode: 401, wantCategory: ErrCategoryPermission},
+		{name: "404 -> not found", statusCode: 404, wantCategory: ErrCategoryNotFound},
+		{name: "409 -> conflict", statusCode: 409, wantCategory: ErrCategoryConflict},
+		{name: "500 -> network", statusCode: 500, wantCategory: ErrCategoryNetwork},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			category, remediation := classifyHTTPError(tt.statusCode)
+			he := &HTTPError{
+				StatusCode:  tt.statusCode,
+				Body:        "irrelevant body text",
+				Category:    category,
+				Remediation: remediation,
+			}
+			de := newDeployError("create", ResTypeAgentRuntime, "agent", he)
+			if de.Category != tt.wantCategory {
+				t.Errorf("Category = %q, want %q", de.Category, tt.wantCategory)
+			}
+			if de.Remediation != remediation {
+				t.Errorf("Remediation = %q, want %q", de.Remediation, remediation)
+			}
+			if de.Remediation == "" {
+				t.Error("expected non-empty remediation carried from HTTPError")
+			}
+		})
+	}
+}
+
+func TestNewDeployError_TransportError(t *testing.T) {
+	// A transport error (no HTTP response) has no HTTPError, so it must keep
+	// flowing through classifyErrorMessage as a network/connection failure.
+	cause := fmt.Errorf("Post \"https://omnia.test/x\": dial tcp 1.2.3.4:443: connection refused")
+	de := newDeployError("create", ResTypeAgentRuntime, "agent", cause)
+	if de.Category != ErrCategoryNetwork {
+		t.Errorf("Category = %q, want %q", de.Category, ErrCategoryNetwork)
+	}
+}
+
+func TestClassifyCause(t *testing.T) {
+	t.Run("wrapped HTTPError", func(t *testing.T) {
+		he := &HTTPError{StatusCode: 404, Category: ErrCategoryNotFound, Remediation: "find it"}
+		wrapped := fmt.Errorf("PUT failed: %w", he)
+		category, remediation := classifyCause(wrapped)
+		if category != ErrCategoryNotFound {
+			t.Errorf("category = %q, want %q", category, ErrCategoryNotFound)
+		}
+		if remediation != "find it" {
+			t.Errorf("remediation = %q, want %q", remediation, "find it")
+		}
+	})
+
+	t.Run("plain transport error", func(t *testing.T) {
+		category, _ := classifyCause(fmt.Errorf("no such host"))
+		if category != ErrCategoryNetwork {
+			t.Errorf("category = %q, want %q", category, ErrCategoryNetwork)
+		}
+	})
+}
+
 func TestCombineErrors(t *testing.T) {
 	err1 := fmt.Errorf("first")
 	err2 := fmt.Errorf("second")
