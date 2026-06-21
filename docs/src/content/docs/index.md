@@ -23,6 +23,9 @@ The adapter maps each concept from a compiled pack to one or more Omnia Kubernet
 - **Role-aware multi-provider** -- bind one or more Omnia Provider CRDs per runtime, each tagged with a role (`llm`, `embedding`, `tts`, `stt`, `image`, `inference`). The `default` binding is the primary.
 - **Tool registry** -- tool handlers declared in the deploy-config `tools` block are projected into a ToolRegistry CRD (`spec.handlers[]`) so the Omnia runtime can discover them at startup.
 - **Skill bindings** -- `skills` and `skillsConfig` from the deploy config are projected onto the PromptPack, referencing Omnia SkillSource CRDs (pre-flighted at apply time).
+- **External authentication** -- the `externalAuth` block configures how the deployed agent authenticates real external traffic (shared token, API keys, OIDC, or edge-trust). Without it, the agent is reachable only from the dashboard (management plane).
+- **Cross-session memory** -- the `memory` block turns on ambient memory recall and tunes retrieval (strategy, limit, deny-filter). Embedding itself is configured at the workspace.
+- **Evals** -- the `evals` block activates eval execution and routes which eval groups run inline (in the runtime) vs. in the per-service-group eval-worker. Eval definitions come from the pack.
 - **Dry-run mode** -- preview every resource the adapter would create or update, without making API calls.
 - **Managed resource labels** -- every resource is labelled with `app.kubernetes.io/managed-by`, pack ID, pack version, and resource type for reliable ownership tracking.
 - **Agent policy** -- tool blocklists defined in the pack are enforced via an AgentPolicy CRD.
