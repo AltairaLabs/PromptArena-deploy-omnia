@@ -252,22 +252,24 @@ At least **one** validator is required to serve external traffic. Any `Secret` r
 
 ### `memory` (optional)
 
-Cross-session memory / RAG for the deployed agent, projected onto the AgentRuntime's `spec.memory`. It lets the agent retain and recall information across sessions. The adapter emits only the fields you set; omitted sub-blocks fall back to CRD defaults.
+Cross-session memory for the deployed agent, projected onto the AgentRuntime's `spec.memory`. `retrieval` tunes the **ambient per-turn recall**: on every turn the runtime injects an always-on "profile" set (the user's identity / preferences / health memories, capped at 20) plus an **episodic** set from a per-turn search — your `retrieval` config controls that episodic set. (This is the automatic in-context path, separate from the explicit `memory__recall` tool.)
 
 ```yaml
 memory:
   enabled: true
   retrieval:
-    strategy: semantic
-    limit: 10
+    strategy: semantic            # only `semantic` runs semantic search + applies accessFilter
+    limit: 10                     # max episodic hits per turn (profile set is capped separately)
     accessFilter:
-      denyCEL: "user.tier == 'free'"
+      denyCEL: 'metadata.url.contains("restricted")'   # only enforced when strategy: semantic
 ```
 
 | Sub-field | Type | Description |
 |---|---|---|
 | `enabled` | boolean | Turn cross-session memory on. Defaults to `false`. Always emitted to the CRD. |
-| `retrieval` | object | `strategy` (`keyword`/`semantic`/`graph`/`composite`), `limit` (1–50), and `accessFilter.denyCEL` (a CEL deny expression). |
+| `retrieval.strategy` | string | Episodic recall mode. **`semantic`** = workspace-scoped hybrid semantic search, and the only mode that applies `accessFilter`. Any other value falls back to keyword search; `graph`/`composite` are accepted by the schema but **not yet implemented** (they behave as `keyword`). |
+| `retrieval.limit` | integer | Max **episodic** memories injected per turn (`1`–`50`, default `10`). Doesn't affect the always-on profile set. |
+| `retrieval.accessFilter` | object | `denyCEL` — a CEL expression over memory metadata; matching memories are dropped from recall. **Enforced only on the `semantic` strategy.** |
 
 :::note
 Embedding for semantic memory is configured at the **workspace** level (the workspace service group's memory-api uses a configured embedding `Provider`), not per agent — there is no per-agent embedding setting here.

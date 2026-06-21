@@ -603,20 +603,22 @@ Embedding for semantic memory is configured at the **workspace** level (the work
 
 #### `memory.retrieval`
 
+`retrieval` tunes the **ambient per-turn recall** — cross-session memories the runtime pulls and injects into the prompt automatically on every turn (distinct from the explicit `memory__recall` tool). Each turn the runtime always includes a small "profile" set (the user's identity / preferences / health memories, capped at 20), then adds an **episodic** set from a per-turn search; `retrieval` controls that episodic set.
+
 | Sub-field | Type | Required | Description |
 |---|---|---|---|
-| `strategy` | string | No | Recall strategy. One of `keyword`, `semantic`, `graph`, `composite`. |
-| `limit` | integer | No | Maximum number of memories recalled per turn. Between `1` and `50`. |
-| `accessFilter` | object | No | `denyCEL` (string) — a CEL expression that, when true, denies recall. |
+| `strategy` | string | No | Episodic recall mode. **`semantic`** runs workspace-scoped hybrid semantic search and is the only mode that applies `accessFilter`. Any other value falls back to keyword full-text search; `graph` and `composite` are accepted by the schema but **not yet implemented** (they currently behave as `keyword`). |
+| `limit` | integer | No | Max **episodic** memories injected per turn (`1`–`50`, default `10`). Does not affect the always-included profile set (capped separately at 20). |
+| `accessFilter` | object | No | `denyCEL` (string) — a CEL expression over memory metadata; matching memories are dropped from recall. **Enforced only on the `semantic` strategy** — the keyword fallback ignores it. |
 
 ```yaml
 memory:
   enabled: true
   retrieval:
-    strategy: semantic
-    limit: 10
+    strategy: semantic            # only semantic applies accessFilter; other values = keyword FTS
+    limit: 10                     # episodic hits per turn; the profile set is capped separately
     accessFilter:
-      denyCEL: "user.tier == 'free'"
+      denyCEL: 'metadata.url.contains("restricted")'   # only enforced when strategy: semantic
 ```
 
 ### `labels`
