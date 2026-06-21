@@ -19,6 +19,9 @@ type omniaClient interface {
 	// ValidateProvider checks that a Provider CRD exists.
 	ValidateProvider(ctx context.Context, name string) error
 
+	// ValidateSkillSource checks that a SkillSource CRD exists and is synced.
+	ValidateSkillSource(ctx context.Context, name string) error
+
 	// Health checks the API health endpoint.
 	Health(ctx context.Context) error
 }

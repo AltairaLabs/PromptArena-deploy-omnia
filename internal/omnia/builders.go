@@ -27,19 +27,63 @@ const (
 // ConfigMap and sets spec.source itself, so the adapter only sends the pack
 // version in spec and the raw pack JSON in content.
 func buildPromptPackRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, error) {
+	spec := map[string]interface{}{
+		"version": pack.Version,
+	}
+	if skills := buildSkillsSpec(cfg.Skills); skills != nil {
+		spec["skills"] = skills
+	}
+	if sc := buildSkillsConfigSpec(cfg.SkillsConfig); sc != nil {
+		spec["skillsConfig"] = sc
+	}
+
 	req := map[string]interface{}{
 		keyMetadata: map[string]interface{}{
 			keyName:   sanitizeName(pack.ID),
 			keyLabels: buildResourceLabels(pack.ID, pack.Version, ResTypePromptPack, cfg.Labels),
 		},
-		keySpec: map[string]interface{}{
-			"version": pack.Version,
-		},
+		keySpec: spec,
 		"content": map[string]string{
 			promptPackContentKey: cfg.PackJSON,
 		},
 	}
 	return json.Marshal(req)
+}
+
+// buildSkillsSpec maps the deploy-config skills to spec.skills[], preserving
+// order and emitting include/mountAs only when set. Returns nil when empty.
+func buildSkillsSpec(skills []SkillBinding) []map[string]interface{} {
+	if len(skills) == 0 {
+		return nil
+	}
+	out := make([]map[string]interface{}, 0, len(skills))
+	for _, b := range skills {
+		entry := map[string]interface{}{"source": b.Source}
+		if len(b.Include) > 0 {
+			entry["include"] = b.Include
+		}
+		if b.MountAs != "" {
+			entry["mountAs"] = b.MountAs
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// buildSkillsConfigSpec maps skillsConfig to spec.skillsConfig, emitting only
+// the fields the user set. Returns nil when the block has no content.
+func buildSkillsConfigSpec(sc *SkillsConfig) map[string]interface{} {
+	if sc == nil || (sc.Selector == "" && sc.MaxActive == nil) {
+		return nil
+	}
+	out := map[string]interface{}{}
+	if sc.MaxActive != nil {
+		out["maxActive"] = *sc.MaxActive
+	}
+	if sc.Selector != "" {
+		out["selector"] = sc.Selector
+	}
+	return out
 }
 
 // buildAgentRuntimeRequest builds the JSON body for creating/updating an AgentRuntime.

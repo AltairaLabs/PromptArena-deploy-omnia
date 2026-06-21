@@ -214,6 +214,85 @@ func TestPlan_WithDeletion(t *testing.T) {
 	}
 }
 
+const testDeployConfigWithSkills = `{
+	"api_endpoint": "https://omnia.test.com",
+	"workspace": "test-ws",
+	"api_token": "test-token",
+	"providers": {"default": "claude-prod"},
+	"skills": [
+		{"source": "shared-skills"},
+		{"source": "shared-skills"},
+		{"source": "math-skills"}
+	]
+}`
+
+func TestPlan_ValidatesSkillSources(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	sim.validSkillSources["shared-skills"] = true
+	sim.validSkillSources["math-skills"] = true
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: testDeployConfigWithSkills,
+	})
+	if err != nil {
+		t.Fatalf("expected plan to succeed with valid skill sources, got: %v", err)
+	}
+	if len(resp.Changes) == 0 {
+		t.Error("expected non-empty changes")
+	}
+}
+
+func TestPlan_InvalidSkillSource(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	// Only shared-skills is valid — math-skills should fail.
+	sim.validSkillSources["shared-skills"] = true
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	_, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: testDeployConfigWithSkills,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid skill source, got nil")
+	}
+	if !strings.Contains(err.Error(), "skill validation failed") {
+		t.Errorf("expected skill validation error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "math-skills") {
+		t.Errorf("expected error to mention the failing source, got: %v", err)
+	}
+}
+
+func TestPlan_SkipsSkillValidationOnDryRun(t *testing.T) {
+	sim := newSimulatedClient()
+	// No valid skill sources — dry-run should skip validation.
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	dryRunConfig := `{
+		"api_endpoint": "https://omnia.test.com",
+		"workspace": "test-ws",
+		"api_token": "test-token",
+		"providers": {"default": "claude-prod"},
+		"skills": [{"source": "missing-skills"}],
+		"dry_run": true
+	}`
+
+	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: dryRunConfig,
+	})
+	if err != nil {
+		t.Fatalf("expected dry-run plan to succeed, got: %v", err)
+	}
+	if len(resp.Changes) == 0 {
+		t.Error("expected non-empty changes")
+	}
+}
+
 func TestBuildSummary(t *testing.T) {
 	changes := []deploy.ResourceChange{
 		{Action: deploy.ActionCreate},
