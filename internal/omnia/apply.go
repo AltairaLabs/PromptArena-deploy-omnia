@@ -92,8 +92,8 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	resources = append(resources, res...)
 	applyErr = combineErrors(applyErr, err)
 
-	// Phase 1: ToolRegistry (if pack has tools)
-	if len(ac.pack.Tools) > 0 {
+	// Phase 1: ToolRegistry (if the deploy config declares tool handlers)
+	if len(ac.cfg.Tools) > 0 {
 		res, err = applyResourcePhase(ctx, ac, stepToolRegistry, ResTypeToolRegistry,
 			sanitizeName(ac.pack.ID+"-tools"),
 			func() (json.RawMessage, error) { return buildToolRegistryRequest(ac.pack, ac.cfg) })
@@ -198,12 +198,13 @@ func (p *Provider) applyDryRun(
 		return "", fmt.Errorf("omnia: failed to parse pack: %w", err)
 	}
 
-	if _, cfgErr := parseConfig(req.DeployConfig); cfgErr != nil {
+	cfg, cfgErr := parseConfig(req.DeployConfig)
+	if cfgErr != nil {
 		return "", fmt.Errorf("omnia: failed to parse deploy config: %w", cfgErr)
 	}
 
 	reporter := adaptersdk.NewProgressReporter(callback)
-	desired := generateDesiredResources(pack)
+	desired := generateDesiredResources(pack, cfg)
 
 	resources := make([]ResourceState, 0, len(desired))
 	for i, d := range desired {

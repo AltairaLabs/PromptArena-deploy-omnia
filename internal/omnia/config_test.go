@@ -310,6 +310,247 @@ func TestResolveToken_FallsBackToEnv(t *testing.T) {
 	}
 }
 
+func TestParseConfig_ToolsBlock(t *testing.T) {
+	raw := `{
+		"api_endpoint": "https://omnia.example.com",
+		"workspace": "ws",
+		"providers": {"default": "x"},
+		"tools": [
+			{
+				"name": "search",
+				"type": "http",
+				"tool": {
+					"name": "search",
+					"description": "Search the web",
+					"inputSchema": {"type": "object"}
+				},
+				"httpConfig": {"endpoint": "https://api.example.com/search"},
+				"timeout": "30s"
+			},
+			{
+				"name": "knowledge",
+				"type": "mcp",
+				"mcpConfig": {"server": "knowledge-mcp"}
+			}
+		]
+	}`
+
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if len(cfg.Tools) != 2 {
+		t.Fatalf("expected 2 tool handlers, got %d", len(cfg.Tools))
+	}
+
+	h0 := cfg.Tools[0]
+	if h0.Name != "search" || h0.Type != "http" {
+		t.Errorf("handler[0] = %+v, want name=search type=http", h0)
+	}
+	if h0.Tool == nil || h0.Tool.Name != "search" || h0.Tool.Description != "Search the web" {
+		t.Errorf("handler[0].Tool = %+v", h0.Tool)
+	}
+	if h0.Tool.InputSchema == nil {
+		t.Error("handler[0].Tool.InputSchema should be populated")
+	}
+	if h0.HTTPConfig["endpoint"] != "https://api.example.com/search" {
+		t.Errorf("handler[0].HTTPConfig = %v", h0.HTTPConfig)
+	}
+	if h0.Timeout != "30s" {
+		t.Errorf("handler[0].Timeout = %q, want 30s", h0.Timeout)
+	}
+
+	h1 := cfg.Tools[1]
+	if h1.Name != "knowledge" || h1.Type != "mcp" {
+		t.Errorf("handler[1] = %+v, want name=knowledge type=mcp", h1)
+	}
+	if h1.Tool != nil {
+		t.Errorf("handler[1].Tool = %+v, want nil", h1.Tool)
+	}
+	if h1.MCPConfig["server"] != "knowledge-mcp" {
+		t.Errorf("handler[1].MCPConfig = %v", h1.MCPConfig)
+	}
+}
+
+func toolValidationBaseConfig(handlers []ToolHandler) *Config {
+	return &Config{
+		APIEndpoint: "https://omnia.example.com",
+		Workspace:   "ws",
+		APIToken:    "tok",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		Tools:       handlers,
+	}
+}
+
+func TestValidateToolHandlers(t *testing.T) {
+	goodTool := &HandlerTool{Name: "t", Description: "d", InputSchema: map[string]interface{}{"type": "object"}}
+	httpCfg := map[string]interface{}{"endpoint": "https://x"}
+
+	tests := []struct {
+		name      string
+		handlers  []ToolHandler
+		wantError string // substring; "" = expect no error
+	}{
+		{
+			name:      "empty tools is valid",
+			handlers:  nil,
+			wantError: "",
+		},
+		{
+			name: "valid http handler",
+			handlers: []ToolHandler{
+				{Name: "search", Type: "http", Tool: goodTool, HTTPConfig: httpCfg},
+			},
+			wantError: "",
+		},
+		{
+			name: "valid client handler with no config",
+			handlers: []ToolHandler{
+				{Name: "browser", Type: "client"},
+			},
+			wantError: "",
+		},
+		{
+			name: "valid mcp via selector",
+			handlers: []ToolHandler{
+				{Name: "kb", Type: "mcp", Selector: map[string]interface{}{"app": "kb"}},
+			},
+			wantError: "",
+		},
+		{
+			name: "invalid type",
+			handlers: []ToolHandler{
+				{Name: "search", Type: "rest", Tool: goodTool, HTTPConfig: httpCfg},
+			},
+			wantError: `invalid type "rest"`,
+		},
+		{
+			name: "duplicate handler names",
+			handlers: []ToolHandler{
+				{Name: "search", Type: "http", Tool: goodTool, HTTPConfig: httpCfg},
+				{Name: "search", Type: "mcp", MCPConfig: map[string]interface{}{"server": "s"}},
+			},
+			wantError: "duplicated",
+		},
+		{
+			name: "http missing tool",
+			handlers: []ToolHandler{
+				{Name: "search", Type: "http", HTTPConfig: httpCfg},
+			},
+			wantError: "tool is required",
+		},
+		{
+			name: "http with neither config nor selector",
+			handlers: []ToolHandler{
+				{Name: "search", Type: "http", Tool: goodTool},
+			},
+			wantError: "httpConfig or selector is required",
+		},
+		{
+			name: "bad name pattern",
+			handlers: []ToolHandler{
+				{Name: "Bad_Name", Type: "http", Tool: goodTool, HTTPConfig: httpCfg},
+			},
+			wantError: "name must match",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := toolValidationBaseConfig(tt.handlers).validate()
+			if tt.wantError == "" {
+				if len(errs) != 0 {
+					t.Errorf("expected no errors, got %v", errs)
+				}
+				return
+			}
+			found := false
+			for _, e := range errs {
+				if strings.Contains(e, tt.wantError) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected an error containing %q, got %v", tt.wantError, errs)
+			}
+		})
+	}
+}
+
+func TestValidateToolHandlers_GRPCAndOpenAPI(t *testing.T) {
+	goodTool := &HandlerTool{Name: "t", Description: "d", InputSchema: map[string]interface{}{"type": "object"}}
+
+	tests := []struct {
+		name      string
+		handlers  []ToolHandler
+		wantError string
+	}{
+		{
+			name: "valid grpc handler",
+			handlers: []ToolHandler{
+				{Name: "rpc", Type: "grpc", Tool: goodTool, GRPCConfig: map[string]interface{}{"service": "S"}},
+			},
+			wantError: "",
+		},
+		{
+			name: "grpc missing config and selector",
+			handlers: []ToolHandler{
+				{Name: "rpc", Type: "grpc", Tool: goodTool},
+			},
+			wantError: "grpcConfig or selector is required",
+		},
+		{
+			name: "valid openapi via config",
+			handlers: []ToolHandler{
+				{Name: "spec", Type: "openapi", OpenAPIConfig: map[string]interface{}{"url": "u"}},
+			},
+			wantError: "",
+		},
+		{
+			name: "openapi missing config and selector",
+			handlers: []ToolHandler{
+				{Name: "spec", Type: "openapi"},
+			},
+			wantError: "openAPIConfig or selector is required",
+		},
+		{
+			name: "http tool missing sub-fields",
+			handlers: []ToolHandler{
+				{Name: "x", Type: "http", Tool: &HandlerTool{}, HTTPConfig: map[string]interface{}{"endpoint": "e"}},
+			},
+			wantError: "tool.name is required",
+		},
+		{
+			name: "empty handler name",
+			handlers: []ToolHandler{
+				{Name: "", Type: "http", Tool: goodTool, HTTPConfig: map[string]interface{}{"endpoint": "e"}},
+			},
+			wantError: "name is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := toolValidationBaseConfig(tt.handlers).validate()
+			if tt.wantError == "" {
+				if len(errs) != 0 {
+					t.Errorf("expected no errors, got %v", errs)
+				}
+				return
+			}
+			found := false
+			for _, e := range errs {
+				if strings.Contains(e, tt.wantError) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected an error containing %q, got %v", tt.wantError, errs)
+			}
+		})
+	}
+}
+
 func TestBaseURL(t *testing.T) {
 	tests := []struct {
 		name     string
