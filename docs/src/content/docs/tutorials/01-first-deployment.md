@@ -33,13 +33,50 @@ deploy:
       environment: staging
 ```
 
+The example uses the legacy `providers` map form (each entry binds with role `llm`). The list form is equivalent and lets you set roles:
+
+```yaml
+    providers:
+      - name: default
+        ref: claude-sonnet-4-20250514
+        role: llm
+```
+
 ### Required fields
 
 | Field | Description |
 |---|---|
 | `api_endpoint` | Base URL of the Omnia Management API |
 | `workspace` | Target workspace name (must match the pattern `^[a-z0-9][a-z0-9-]*[a-z0-9]$`) |
-| `providers` | Map of Arena provider names to Omnia Provider CRD names. At minimum, include a `default` entry. |
+| `providers` | At least one provider binding. Use the list form (`{name, ref, role}`) or the legacy `name → CRD` map. The `default` binding is the runtime's primary. |
+
+### Optional: tools and skills
+
+You can also declare tool handlers and skill bindings in the same config. Tool handlers become a `ToolRegistry`; skills are projected onto the `PromptPack`:
+
+```yaml
+    tools:
+      - name: weather
+        type: http
+        tool:
+          name: get_weather
+          description: Get the current weather for a city.
+          inputSchema:
+            type: object
+            properties:
+              city: { type: string }
+            required: [city]
+        httpConfig:
+          url: "https://api.example.com/weather"
+    skills:
+      - source: company-skills
+        mountAs: support
+    skillsConfig:
+      maxActive: 3
+      selector: model-driven
+```
+
+Each `skills` entry must reference an existing `SkillSource` CRD whose `status.phase` is `Ready`, or the apply fails its pre-flight. See [Configure the Adapter](/how-to/configure/) for the full field reference.
 
 ### Authentication
 
@@ -82,10 +119,10 @@ promptarena deploy apply
 The adapter creates resources in dependency order:
 
 1. **ConfigMap** -- stores the raw pack JSON
-2. **PromptPack** -- references the ConfigMap and sets the provider
-3. **ToolRegistry** -- registers pack tool definitions (if the pack defines tools)
+2. **PromptPack** -- records the pack version and skill bindings; the dashboard folds the pack content into the ConfigMap
+3. **ToolRegistry** -- registers the deploy-config `tools` handlers (if `tools` is non-empty)
 4. **AgentPolicy** -- enforces tool blocklists (if the pack defines a tool policy)
-5. **AgentRuntime** -- the running agent, referencing all of the above
+5. **AgentRuntime** -- the running agent, with its provider bindings, referencing the PromptPack and ToolRegistry
 
 Progress events are streamed as each resource is created.
 

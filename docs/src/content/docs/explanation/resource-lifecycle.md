@@ -13,7 +13,7 @@ Resources are created in dependency order so that each resource can reference it
 |---|---|---|
 | 0 | ConfigMap | -- |
 | 1 | PromptPack | ConfigMap |
-| 2 | ToolRegistry | -- (conditional: only if pack defines tools) |
+| 2 | ToolRegistry | -- (conditional: only if the deploy-config `tools` block is non-empty) |
 | 3 | AgentPolicy | -- (conditional: only if pack defines a tool blocklist) |
 | 4 | AgentRuntime | PromptPack, ToolRegistry (optional), AgentPolicy (optional) |
 
@@ -23,9 +23,9 @@ The AgentRuntime is always created last because it references the PromptPack, an
 
 **Phase 0 -- ConfigMap**: Stores the raw pack JSON in a ConfigMap under the key `pack.json`. Named `<pack-id>-packdata`.
 
-**Phase 1 -- PromptPack**: Creates the PromptPack CRD that references the ConfigMap, sets the provider mapping, and records the pack version. Named `<pack-id>`.
+**Phase 1 -- PromptPack**: Creates the PromptPack CRD that records the pack version and any skill bindings, and sends the raw pack JSON as `content` (the dashboard folds it into a managed ConfigMap). Named `<pack-id>`.
 
-**Phase 2 -- ToolRegistry** (conditional): If the pack defines tools, creates a ToolRegistry CRD listing each tool's name, description, and input schema. Named `<pack-id>-tools`. Skipped if the pack has no tools.
+**Phase 2 -- ToolRegistry** (conditional): If the deploy-config `tools` block is non-empty, creates a ToolRegistry CRD whose `spec.handlers[]` is a faithful passthrough of those handlers. Named `<pack-id>-tools`. Skipped when `tools` is empty.
 
 **Phase 3 -- AgentPolicy** (conditional): If any prompt in the pack defines a tool blocklist, creates an AgentPolicy CRD with the deduplicated, sorted blocklist. Named `<pack-id>-policy`. Skipped if no prompts define a tool policy.
 

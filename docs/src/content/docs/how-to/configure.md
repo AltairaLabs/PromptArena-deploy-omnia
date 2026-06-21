@@ -27,12 +27,43 @@ deploy:
     workspace: "my-workspace"
     api_token: "optional-inline-token"
     providers:
-      default: claude-sonnet-4-20250514
-      router-agent: gpt4-prod
+      - name: default
+        ref: claude-sonnet-4-20250514
+        role: llm
+      - name: embedder
+        ref: text-embedding-3-large
+        role: embedding
+    tools:
+      - name: weather
+        type: http
+        tool:
+          name: get_weather
+          description: Get the current weather for a city.
+          inputSchema:
+            type: object
+            properties:
+              city: { type: string }
+            required: [city]
+        httpConfig:
+          url: "https://api.example.com/weather"
+        timeout: "10s"
+    skills:
+      - source: company-skills
+        include: [refund-policy, escalation]
+        mountAs: support
+    skillsConfig:
+      maxActive: 3
+      selector: model-driven
     runtime:
       replicas: 2
       cpu: "1000m"
       memory: "1Gi"
+      autoscaling:
+        enabled: true
+        type: hpa
+        min_replicas: 1
+        max_replicas: 10
+        target_cpu_utilization: 70
     labels:
       team: platform
       environment: production
@@ -43,7 +74,7 @@ deploy:
 
 ### `api_endpoint` (required)
 
-The base URL of the Omnia Management API. The adapter appends `/api/v1/workspaces/<workspace>/` to form the full API path.
+The base URL of the Omnia Management API. The adapter appends `/api/workspaces/<workspace>` to form the full API path.
 
 ```yaml
 api_endpoint: "https://omnia.example.com"
@@ -79,35 +110,139 @@ One of `api_token` or `OMNIA_API_TOKEN` must be set. Validation fails if neither
 
 ### `providers` (required)
 
-A map of Arena provider names to Omnia Provider CRD names. At minimum, include a `default` entry. For multi-agent packs, you can add agent-specific overrides keyed by agent name.
+Provider bindings tell each AgentRuntime which Omnia `Provider` CRD fulfils a given capability. Every binding is emitted to each runtime; the binding named `default` is the runtime's primary provider. The field accepts two shapes.
+
+**List form (recommended)** — a list of `{name, ref, role}` bindings. `role` defaults to `llm` and must be one of `llm`, `embedding`, `tts`, `stt`, `image`, `inference`:
+
+```yaml
+providers:
+  - name: default
+    ref: claude-sonnet-4-20250514
+    role: llm
+  - name: embedder
+    ref: text-embedding-3-large
+    role: embedding
+  - name: reranker
+    ref: bge-reranker
+    role: inference
+```
+
+Binding names must be unique, and each `ref` must name an Omnia `Provider` CRD.
+
+**Legacy map form** — a `name → Provider CRD` map. Each entry becomes a binding with role `llm`:
 
 ```yaml
 providers:
   default: claude-sonnet-4-20250514
-  router-agent: gpt4-prod
-  specialist-agent: claude-sonnet-4-20250514
+  router: gpt4-prod
 ```
 
-Resolution order:
-1. Exact match on the agent name.
-2. Fall back to the `default` entry.
+### `tools` (optional)
+
+Tool handlers projected into the `ToolRegistry` CRD's `spec.handlers[]`, in order. When `tools` is empty, no ToolRegistry is created.
+
+```yaml
+tools:
+  - name: weather
+    type: http
+    tool:
+      name: get_weather
+      description: Get the current weather for a city.
+      inputSchema:
+        type: object
+        properties:
+          city: { type: string }
+        required: [city]
+    httpConfig:
+      url: "https://api.example.com/weather"
+    timeout: "10s"
+  - name: docs-search
+    type: mcp
+    mcpConfig:
+      server: "docs-mcp"
+```
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `name` | string | Handler name; unique across handlers. Pattern `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`. |
+| `type` | string | One of `http`, `openapi`, `grpc`, `mcp`, `client`. Selects the type-specific config block. |
+| `tool` | object | Tool schema (`name`, `description`, `inputSchema`, optional `outputSchema`). Required for `http` and `grpc`. |
+| `selector` | object | Selector matching tools to this handler. |
+| `httpConfig` / `openAPIConfig` / `grpcConfig` / `mcpConfig` / `clientConfig` | object | Type-specific config; passed through verbatim. |
+| `timeout` | string | Per-handler timeout (e.g. `"30s"`). |
+
+Per-type requirements: `http`/`grpc` need a `tool` block **plus** the matching config block or a `selector`; `openapi`/`mcp` need the matching config block or a `selector`; `client` has no hard requirement. The omnia CRD validates the inner config fields deeply.
+
+### `skills` (optional)
+
+Skill bindings projected onto the PromptPack's `spec.skills[]`. Each references an Omnia `SkillSource` CRD. At apply time the adapter pre-flights each source and fails if it is missing or its `status.phase` is not `Ready`.
+
+```yaml
+skills:
+  - source: company-skills
+    include: [refund-policy, escalation]
+    mountAs: support
+```
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `source` | string | SkillSource CRD name. Pattern `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`. |
+| `include` | array of string | Skill names to mount from the source. All skills mounted when omitted. |
+| `mountAs` | string | Rename the mounted skill set. |
+
+### `skillsConfig` (optional)
+
+Maps to the PromptPack's `spec.skillsConfig`: how active skills are selected for a turn.
+
+```yaml
+skillsConfig:
+  maxActive: 3
+  selector: model-driven
+```
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `maxActive` | integer | Maximum concurrently-active skills. Must be >= 1. |
+| `selector` | string | Activation strategy: `model-driven`, `tag`, or `embedding`. |
 
 ### `runtime` (optional)
 
-Resource sizing for AgentRuntime CRDs.
+Resource sizing and autoscaling for AgentRuntime CRDs.
 
 ```yaml
 runtime:
   replicas: 2
   cpu: "500m"
   memory: "512Mi"
+  autoscaling:
+    enabled: true
+    type: hpa
+    min_replicas: 1
+    max_replicas: 10
+    target_cpu_utilization: 70
+    scale_down_stabilization_seconds: 300
 ```
 
 | Sub-field | Type | Description |
 |---|---|---|
-| `replicas` | integer | Number of runtime replicas. Must be >= 1. |
-| `cpu` | string | CPU request/limit in Kubernetes resource format (e.g., `"500m"`, `"1"`). |
-| `memory` | string | Memory request/limit in Kubernetes resource format (e.g., `"512Mi"`, `"1Gi"`). |
+| `replicas` | integer | Number of runtime replicas. Must be >= 1. Ignored when autoscaling is enabled. |
+| `cpu` | string | CPU request in Kubernetes resource format (e.g., `"500m"`, `"1"`). |
+| `memory` | string | Memory request in Kubernetes resource format (e.g., `"512Mi"`, `"1Gi"`). |
+| `autoscaling` | object | Horizontal autoscaling (see below). |
+
+#### `runtime.autoscaling`
+
+Faithful passthrough to `spec.runtime.autoscaling` — only fields you set are emitted; omitted fields fall back to CRD defaults. An omitted block means the platform default applies (currently static replicas).
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `enabled` | boolean | Turn autoscaling on. When enabled, the autoscaler manages replica count. |
+| `type` | string | `hpa` or `keda`. `keda` enables scale-to-zero but requires KEDA installed. |
+| `min_replicas` | integer (>= 0) | Minimum replicas. |
+| `max_replicas` | integer (>= 1) | Maximum replicas. Must not be below `min_replicas`. |
+| `target_cpu_utilization` | integer (1-100) | Target average CPU utilization percentage. |
+| `target_memory_utilization` | integer (1-100) | Target average memory utilization percentage. |
+| `scale_down_stabilization_seconds` | integer (0-3600) | Stabilization window before scaling down. |
 
 If `runtime` is omitted, the Omnia platform applies its own defaults.
 
@@ -140,8 +275,10 @@ The adapter validates the configuration before any operation. Validation checks:
 
 - `api_endpoint` is non-empty
 - `workspace` is non-empty
-- `providers` contains at least one entry
+- `providers` contains at least one binding with a non-empty `ref`; roles are valid and binding names unique
 - An API token is available (from config or environment)
-- `runtime.replicas` is >= 1 (if runtime is specified)
+- Each `tools` handler is structurally valid (name pattern/uniqueness, type enum, per-type tool/config-or-selector rules)
+- Each `skills` binding's `source` matches the SkillSource pattern; `skillsConfig` selector/`maxActive` are valid
+- `runtime.replicas` is >= 1 and any `runtime.autoscaling` values are within range (if runtime is specified)
 
 Validation errors are returned as a list of human-readable messages.

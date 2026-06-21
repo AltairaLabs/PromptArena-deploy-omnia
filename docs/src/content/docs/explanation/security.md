@@ -33,7 +33,7 @@ The adapter validates that a token is available before any API operation. If nei
 Every API call is scoped to a single workspace. The adapter constructs URLs in the form:
 
 ```
-<api_endpoint>/api/v1/workspaces/<workspace>/<resource-type>
+<api_endpoint>/api/workspaces/<workspace>/<resource-type>
 ```
 
 This means:
