@@ -582,3 +582,109 @@ func TestBaseURL(t *testing.T) {
 		})
 	}
 }
+
+func TestParseConfig_WithSkills(t *testing.T) {
+	raw := `{
+		"api_endpoint": "https://omnia.example.com",
+		"workspace": "ws",
+		"api_token": "tok",
+		"providers": {"default": "claude-prod"},
+		"skills": [
+			{"source": "shared-skills", "include": ["summarize", "search"], "mountAs": "tools"},
+			{"source": "math-skills"}
+		],
+		"skillsConfig": {"maxActive": 3, "selector": "embedding"}
+	}`
+
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if len(cfg.Skills) != 2 {
+		t.Fatalf("expected 2 skill bindings, got %d", len(cfg.Skills))
+	}
+	first := cfg.Skills[0]
+	if first.Source != "shared-skills" || first.MountAs != "tools" {
+		t.Errorf("skills[0] = %+v, want source=shared-skills mountAs=tools", first)
+	}
+	if len(first.Include) != 2 || first.Include[0] != "summarize" || first.Include[1] != "search" {
+		t.Errorf("skills[0].Include = %v, want [summarize search]", first.Include)
+	}
+	if cfg.Skills[1].Source != "math-skills" || len(cfg.Skills[1].Include) != 0 || cfg.Skills[1].MountAs != "" {
+		t.Errorf("skills[1] = %+v, want source-only math-skills", cfg.Skills[1])
+	}
+	if cfg.SkillsConfig == nil {
+		t.Fatal("expected SkillsConfig to be populated")
+	}
+	if cfg.SkillsConfig.MaxActive == nil || *cfg.SkillsConfig.MaxActive != 3 {
+		t.Errorf("SkillsConfig.MaxActive = %v, want 3", cfg.SkillsConfig.MaxActive)
+	}
+	if cfg.SkillsConfig.Selector != skillSelectorEmbedding {
+		t.Errorf("SkillsConfig.Selector = %q, want %q", cfg.SkillsConfig.Selector, skillSelectorEmbedding)
+	}
+}
+
+func TestValidateSkills(t *testing.T) {
+	maxActiveZero := 0
+	maxActiveOK := 2
+	tests := []struct {
+		name      string
+		skills    []SkillBinding
+		sc        *SkillsConfig
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:   "empty is valid",
+			skills: nil,
+			sc:     nil,
+		},
+		{
+			name:   "valid bindings and config",
+			skills: []SkillBinding{{Source: "shared-skills"}, {Source: "math-skills"}},
+			sc:     &SkillsConfig{MaxActive: &maxActiveOK, Selector: skillSelectorTag},
+		},
+		{
+			name:      "empty source",
+			skills:    []SkillBinding{{Source: ""}},
+			wantErr:   true,
+			errSubstr: "source is required",
+		},
+		{
+			name:      "bad source pattern",
+			skills:    []SkillBinding{{Source: "Bad_Name"}},
+			wantErr:   true,
+			errSubstr: "must match",
+		},
+		{
+			name:      "bad selector",
+			skills:    []SkillBinding{{Source: "ok"}},
+			sc:        &SkillsConfig{Selector: "random"},
+			wantErr:   true,
+			errSubstr: "invalid selector",
+		},
+		{
+			name:      "maxActive zero",
+			skills:    []SkillBinding{{Source: "ok"}},
+			sc:        &SkillsConfig{MaxActive: &maxActiveZero},
+			wantErr:   true,
+			errSubstr: "maxActive must be >= 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := validateSkills(tt.skills, tt.sc)
+			if tt.wantErr {
+				if len(errs) == 0 {
+					t.Fatalf("expected validation error, got none")
+				}
+				if tt.errSubstr != "" && !strings.Contains(strings.Join(errs, "; "), tt.errSubstr) {
+					t.Errorf("expected error containing %q, got %v", tt.errSubstr, errs)
+				}
+			} else if len(errs) != 0 {
+				t.Errorf("expected no errors, got %v", errs)
+			}
+		})
+	}
+}

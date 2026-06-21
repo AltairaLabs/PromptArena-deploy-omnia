@@ -228,6 +228,79 @@ func TestHTTPClient_ValidateProvider_NotFound(t *testing.T) {
 	}
 }
 
+func TestHTTPClient_ValidateSkillSource_Ready(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/skills/shared-skills") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(ResourceResponse{
+			Kind:     "SkillSource",
+			Metadata: ResourceMetadata{Name: "shared-skills"},
+			Status:   &ResourceStatus{Phase: "Ready"},
+		})
+	})
+
+	client := newTestHTTPClient(t, handler)
+	if err := client.ValidateSkillSource(context.Background(), "shared-skills"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHTTPClient_ValidateSkillSource_NotFound(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	client := newTestHTTPClient(t, handler)
+	err := client.ValidateSkillSource(context.Background(), "missing")
+	if err == nil {
+		t.Fatal("expected error for missing skill source")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not-found error, got: %v", err)
+	}
+}
+
+func TestHTTPClient_ValidateSkillSource_NotReady(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(ResourceResponse{
+			Kind:     "SkillSource",
+			Metadata: ResourceMetadata{Name: "syncing-skills"},
+			Status:   &ResourceStatus{Phase: "Syncing"},
+		})
+	})
+
+	client := newTestHTTPClient(t, handler)
+	err := client.ValidateSkillSource(context.Background(), "syncing-skills")
+	if err == nil {
+		t.Fatal("expected error for not-synced skill source")
+	}
+	if !strings.Contains(err.Error(), "not synced") || !strings.Contains(err.Error(), "Syncing") {
+		t.Errorf("expected not-synced error mentioning phase, got: %v", err)
+	}
+}
+
+func TestHTTPClient_ValidateSkillSource_NoStatus(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(ResourceResponse{
+			Kind:     "SkillSource",
+			Metadata: ResourceMetadata{Name: "no-status"},
+		})
+	})
+
+	client := newTestHTTPClient(t, handler)
+	err := client.ValidateSkillSource(context.Background(), "no-status")
+	if err == nil {
+		t.Fatal("expected error when status is nil")
+	}
+	if !strings.Contains(err.Error(), "unknown") {
+		t.Errorf("expected phase \"unknown\" when status nil, got: %v", err)
+	}
+}
+
 func TestNewHTTPClient(t *testing.T) {
 	t.Setenv("OMNIA_API_TOKEN", "")
 	cfg := &Config{

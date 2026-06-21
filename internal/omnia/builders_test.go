@@ -572,3 +572,115 @@ func TestAgentRuntimeNames_MultiAgent(t *testing.T) {
 		t.Errorf("expected names to include router and worker, got %v", names)
 	}
 }
+
+func TestBuildPromptPackRequest_WithSkills(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("failed to parse pack: %v", err)
+	}
+	maxActive := 4
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		PackJSON:    testPackJSON,
+		Skills: []SkillBinding{
+			{Source: "shared-skills", Include: []string{"summarize", "search"}, MountAs: "tools"},
+			{Source: "math-skills"},
+		},
+		SkillsConfig: &SkillsConfig{MaxActive: &maxActive, Selector: skillSelectorModelDriven},
+	}
+
+	body, err := buildPromptPackRequest(pack, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	spec := result["spec"].(map[string]interface{})
+
+	skills, ok := spec["skills"].([]interface{})
+	if !ok {
+		t.Fatalf("expected spec.skills to be an array, got %T", spec["skills"])
+	}
+	if len(skills) != 2 {
+		t.Fatalf("expected 2 skills, got %d", len(skills))
+	}
+	first := skills[0].(map[string]interface{})
+	if first["source"] != "shared-skills" {
+		t.Errorf("expected skills[0].source shared-skills, got %v", first["source"])
+	}
+	if first["mountAs"] != "tools" {
+		t.Errorf("expected skills[0].mountAs tools, got %v", first["mountAs"])
+	}
+	inc, ok := first["include"].([]interface{})
+	if !ok || len(inc) != 2 || inc[0] != "summarize" || inc[1] != "search" {
+		t.Errorf("expected skills[0].include [summarize search], got %v", first["include"])
+	}
+	// Source-only binding must omit include/mountAs.
+	second := skills[1].(map[string]interface{})
+	if second["source"] != "math-skills" {
+		t.Errorf("expected skills[1].source math-skills, got %v", second["source"])
+	}
+	if _, present := second["include"]; present {
+		t.Error("expected skills[1].include to be omitted")
+	}
+	if _, present := second["mountAs"]; present {
+		t.Error("expected skills[1].mountAs to be omitted")
+	}
+
+	sc, ok := spec["skillsConfig"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected spec.skillsConfig to be an object, got %T", spec["skillsConfig"])
+	}
+	if sc["maxActive"] != float64(4) {
+		t.Errorf("expected skillsConfig.maxActive 4, got %v", sc["maxActive"])
+	}
+	if sc["selector"] != skillSelectorModelDriven {
+		t.Errorf("expected skillsConfig.selector %q, got %v", skillSelectorModelDriven, sc["selector"])
+	}
+}
+
+func TestBuildPromptPackRequest_NoSkills(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("failed to parse pack: %v", err)
+	}
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		PackJSON:    testPackJSON,
+	}
+
+	body, err := buildPromptPackRequest(pack, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	spec := result["spec"].(map[string]interface{})
+	if _, present := spec["skills"]; present {
+		t.Error("expected spec.skills to be omitted when no skills configured")
+	}
+	if _, present := spec["skillsConfig"]; present {
+		t.Error("expected spec.skillsConfig to be omitted when no skills configured")
+	}
+}
+
+// TestBuildSkillsConfigSpec_EmptyBlock verifies an empty skillsConfig (no
+// selector, no maxActive) emits nothing.
+func TestBuildSkillsConfigSpec_EmptyBlock(t *testing.T) {
+	if got := buildSkillsConfigSpec(&SkillsConfig{}); got != nil {
+		t.Errorf("expected nil for empty skillsConfig, got %v", got)
+	}
+	if got := buildSkillsConfigSpec(nil); got != nil {
+		t.Errorf("expected nil for nil skillsConfig, got %v", got)
+	}
+}

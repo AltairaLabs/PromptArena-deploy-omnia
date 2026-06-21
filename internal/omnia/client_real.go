@@ -110,6 +110,38 @@ func (c *httpClient) ValidateProvider(ctx context.Context, name string) error {
 	return nil
 }
 
+// skillSourceReadyPhase is the SkillSource status.phase value meaning synced.
+const skillSourceReadyPhase = "Ready"
+
+//nolint:revive // interface implementation
+func (c *httpClient) ValidateSkillSource(ctx context.Context, name string) error {
+	url := fmt.Sprintf("%s/skills/%s", c.baseURL, name)
+	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("validate skillsource %s: %w", name, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return fmt.Errorf("skillsource %q not found (HTTP %d)", name, resp.StatusCode)
+	}
+	var result ResourceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode skillsource response: %w", err)
+	}
+	if result.Status == nil || result.Status.Phase != skillSourceReadyPhase {
+		phase := "unknown"
+		if result.Status != nil {
+			phase = result.Status.Phase
+		}
+		return fmt.Errorf("skillsource %q not synced (phase %q)", name, phase)
+	}
+	return nil
+}
+
 func (c *httpClient) Health(ctx context.Context) error { //nolint:revive // interface implementation
 	url := fmt.Sprintf("%s/api/health", c.endpoint)
 	req, err := c.newRequest(ctx, http.MethodGet, url, nil)

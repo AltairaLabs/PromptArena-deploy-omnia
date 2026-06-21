@@ -27,9 +27,12 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		return nil, fmt.Errorf("omnia: config validation failed: %s", errs[0])
 	}
 
-	// Validate that referenced providers exist (skip in dry-run mode).
+	// Validate that referenced providers and skill sources exist (skip in dry-run mode).
 	if !cfg.DryRun {
 		if err := p.validateProviders(ctx, cfg); err != nil {
+			return nil, err
+		}
+		if err := p.validateSkillSources(ctx, cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -192,6 +195,39 @@ func (p *Provider) validateProviders(ctx context.Context, cfg *Config) error {
 
 	if len(errs) > 0 {
 		return fmt.Errorf("omnia: provider validation failed: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// validateSkillSources creates a client and checks that every unique
+// SkillSource referenced in cfg.Skills exists and is synced. No-op when the
+// deploy config declares no skills.
+func (p *Provider) validateSkillSources(ctx context.Context, cfg *Config) error {
+	if len(cfg.Skills) == 0 {
+		return nil
+	}
+
+	client, err := p.clientFunc(cfg)
+	if err != nil {
+		return fmt.Errorf("omnia: failed to create client for skill validation: %w", err)
+	}
+
+	// Deduplicate skill sources.
+	seen := make(map[string]bool, len(cfg.Skills))
+	var errs []string
+	for _, b := range cfg.Skills {
+		if seen[b.Source] {
+			continue
+		}
+		seen[b.Source] = true
+
+		if err := client.ValidateSkillSource(ctx, b.Source); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("omnia: skill validation failed: %s", strings.Join(errs, "; "))
 	}
 	return nil
 }

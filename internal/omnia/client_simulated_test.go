@@ -12,20 +12,22 @@ import (
 // simulatedClient is a fake omniaClient for testing that stores resources
 // in memory and supports error injection.
 type simulatedClient struct {
-	mu             sync.Mutex
-	resources      map[string]*ResourceResponse
-	failOn         map[string]error
-	validProviders map[string]bool
-	healthy        bool
+	mu                sync.Mutex
+	resources         map[string]*ResourceResponse
+	failOn            map[string]error
+	validProviders    map[string]bool
+	validSkillSources map[string]bool
+	healthy           bool
 }
 
 // newSimulatedClient creates a simulatedClient with default healthy state.
 func newSimulatedClient() *simulatedClient {
 	return &simulatedClient{
-		resources:      make(map[string]*ResourceResponse),
-		failOn:         make(map[string]error),
-		validProviders: make(map[string]bool),
-		healthy:        true,
+		resources:         make(map[string]*ResourceResponse),
+		failOn:            make(map[string]error),
+		validProviders:    make(map[string]bool),
+		validSkillSources: make(map[string]bool),
+		healthy:           true,
 	}
 }
 
@@ -157,6 +159,16 @@ func (s *simulatedClient) ValidateProvider(ctx context.Context, name string) err
 		return nil
 	}
 	return fmt.Errorf("provider %q not found", name)
+}
+
+func (s *simulatedClient) ValidateSkillSource(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.validSkillSources[name] {
+		return nil
+	}
+	return fmt.Errorf("skillsource %q not found", name)
 }
 
 func (s *simulatedClient) Health(ctx context.Context) error {

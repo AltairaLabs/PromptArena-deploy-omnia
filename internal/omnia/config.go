@@ -64,6 +64,41 @@ var handlerConfigField = map[string]string{
 // handlerNamePattern is the omnia tool/handler name pattern (RFC1123-ish label).
 var handlerNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
+// Skill selector constants. A SkillsConfig selector tells the PromptPack how
+// active skills are chosen for a turn.
+const (
+	skillSelectorModelDriven = "model-driven"
+	skillSelectorTag         = "tag"
+	skillSelectorEmbedding   = "embedding"
+)
+
+// validSkillSelectors is the set of accepted skill selectors.
+var validSkillSelectors = map[string]bool{
+	skillSelectorModelDriven: true,
+	skillSelectorTag:         true,
+	skillSelectorEmbedding:   true,
+}
+
+// skillSourceNamePattern is the omnia SkillSource name pattern (RFC1123 label).
+var skillSourceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// SkillBinding maps a deploy-config skill entry to an Omnia SkillSource CRD.
+// It mirrors the PromptPack spec.skills[] SkillRef: source is the SkillSource
+// name; include narrows which skills are mounted; mountAs renames the mount.
+type SkillBinding struct {
+	Source  string   `json:"source"`
+	Include []string `json:"include,omitempty"`
+	MountAs string   `json:"mountAs,omitempty"`
+}
+
+// SkillsConfig is the deploy-config skillsConfig block. It maps faithfully to
+// the PromptPack spec.skillsConfig: maxActive caps concurrently-active skills;
+// selector chooses the activation strategy.
+type SkillsConfig struct {
+	MaxActive *int   `json:"maxActive,omitempty"`
+	Selector  string `json:"selector,omitempty"` // model-driven|tag|embedding
+}
+
 // HandlerTool is the schema-only tool descriptor carried by a ToolHandler. It
 // is a faithful passthrough to spec.handlers[].tool in the omnia ToolRegistry.
 type HandlerTool struct {
@@ -230,6 +265,45 @@ const configSchema = `{
         "additionalProperties": false
       }
     },
+    "skills": {
+      "type": "array",
+      "description": "Skill bindings for the PromptPack spec.skills[]. Each references a SkillSource. Optional.",
+      "items": {
+        "type": "object",
+        "required": ["source"],
+        "properties": {
+          "source": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+            "description": "SkillSource CRD name"
+          },
+          "include": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Skill names to include from the source (all when omitted)"
+          },
+          "mountAs": { "type": "string", "description": "Rename the mounted skill set" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "skillsConfig": {
+      "type": "object",
+      "description": "PromptPack spec.skillsConfig: active-skill cap and selection strategy. Optional.",
+      "properties": {
+        "maxActive": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum concurrently-active skills"
+        },
+        "selector": {
+          "type": "string",
+          "enum": ["model-driven", "tag", "embedding"],
+          "description": "Skill activation strategy"
+        }
+      },
+      "additionalProperties": false
+    },
     "runtime": {
       "type": "object",
       "properties": {
@@ -275,14 +349,16 @@ const envAPIToken = "OMNIA_API_TOKEN" //nolint:gosec // environment variable nam
 
 // Config holds Omnia-specific configuration.
 type Config struct {
-	APIEndpoint string            `json:"api_endpoint"`
-	Workspace   string            `json:"workspace"`
-	APIToken    string            `json:"api_token,omitempty"`
-	Providers   Providers         `json:"providers"`
-	Tools       []ToolHandler     `json:"tools,omitempty"`
-	Runtime     *RuntimeConfig    `json:"runtime,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	DryRun      bool              `json:"dry_run,omitempty"`
+	APIEndpoint  string            `json:"api_endpoint"`
+	Workspace    string            `json:"workspace"`
+	APIToken     string            `json:"api_token,omitempty"`
+	Providers    Providers         `json:"providers"`
+	Tools        []ToolHandler     `json:"tools,omitempty"`
+	Skills       []SkillBinding    `json:"skills,omitempty"`
+	SkillsConfig *SkillsConfig     `json:"skillsConfig,omitempty"`
+	Runtime      *RuntimeConfig    `json:"runtime,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	DryRun       bool              `json:"dry_run,omitempty"`
 
 	// PackJSON holds the raw pack JSON content. Populated at apply-time.
 	// NOT serialized — transient computed field.
@@ -354,6 +430,8 @@ func (c *Config) validate() []string {
 
 	errs = append(errs, validateToolHandlers(c.Tools)...)
 
+	errs = append(errs, validateSkills(c.Skills, c.SkillsConfig)...)
+
 	if c.resolveToken() == "" {
 		errs = append(errs, "api_token is required (set in config or OMNIA_API_TOKEN env var)")
 	}
@@ -390,6 +468,35 @@ func validateProviderBindings(bindings Providers) []string {
 		}
 		seen[b.Name] = true
 	}
+	return errs
+}
+
+// validateSkills checks the optional skills block and skillsConfig. Skills are
+// optional (zero is fine). Each binding's source must be non-empty and match
+// the SkillSource name pattern. If skillsConfig is set, the selector (when
+// non-empty) must be in the enum and maxActive (when set) must be >= 1.
+// Light/structural only — the omnia PromptPack CRD validates deeply.
+func validateSkills(skills []SkillBinding, sc *SkillsConfig) []string {
+	var errs []string
+	for _, b := range skills {
+		switch {
+		case b.Source == "":
+			errs = append(errs, "skill binding: source is required")
+		case !skillSourceNamePattern.MatchString(b.Source):
+			errs = append(errs, fmt.Sprintf(
+				"skill binding %q: source must match %s", b.Source, skillSourceNamePattern.String()))
+		}
+	}
+
+	if sc != nil {
+		if sc.Selector != "" && !validSkillSelectors[sc.Selector] {
+			errs = append(errs, fmt.Sprintf("skillsConfig: invalid selector %q", sc.Selector))
+		}
+		if sc.MaxActive != nil && *sc.MaxActive < 1 {
+			errs = append(errs, "skillsConfig.maxActive must be >= 1")
+		}
+	}
+
 	return errs
 }
 
