@@ -160,6 +160,76 @@ The adapter validates configuration against the following JSON Schema:
       },
       "additionalProperties": false
     },
+    "externalAuth": {
+      "type": "object",
+      "description": "Data-plane auth validators (AgentRuntime spec.externalAuth). Each is independent (OR). Optional.",
+      "properties": {
+        "allowManagementPlane": {
+          "type": "boolean",
+          "description": "Accept dashboard-minted management-plane tokens (debug view). Defaults true at the CRD."
+        },
+        "sharedToken": {
+          "type": "object",
+          "description": "Single shared bearer token in a Secret.",
+          "required": ["secretRef"],
+          "properties": {
+            "secretRef": { "type": "string", "description": "Name of the Secret holding the token (key 'token')" },
+            "trustEndUserHeader": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "apiKeys": {
+          "type": "object",
+          "description": "Per-caller API keys (key list lives in Secrets, not here).",
+          "properties": {
+            "defaultRole": { "type": "string", "enum": ["viewer", "editor", "admin"] },
+            "trustEndUserHeader": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "oidc": {
+          "type": "object",
+          "description": "Validate customer-issued JWTs against an OIDC discovery document.",
+          "required": ["issuer", "audience"],
+          "properties": {
+            "issuer": { "type": "string", "minLength": 1 },
+            "audience": { "type": "string", "minLength": 1 },
+            "claimMapping": {
+              "type": "object",
+              "properties": {
+                "subject": { "type": "string" },
+                "role": { "type": "string" },
+                "endUser": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "edgeTrust": {
+          "type": "object",
+          "description": "Trust claim-headers injected by an upstream edge (Istio/API gateway).",
+          "properties": {
+            "headerMapping": {
+              "type": "object",
+              "properties": {
+                "subject": { "type": "string" },
+                "role": { "type": "string" },
+                "endUser": { "type": "string" },
+                "email": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            "claimsFromHeaders": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "labels": {
       "type": "object",
       "additionalProperties": { "type": "string" },
@@ -412,6 +482,80 @@ runtime:
     scale_down_stabilization_seconds: 300
 ```
 
+### `externalAuth`
+
+| | |
+|---|---|
+| **Type** | `object` |
+| **Required** | No |
+
+Data-plane authentication for the deployed agent. Faithful passthrough to the AgentRuntime `spec.externalAuth` — the block holds up to four **independent** validators plus a management-plane toggle.
+
+The validators are evaluated with **OR** logic: a request is admitted if **any** configured validator accepts it. They are independent — configuring one does not affect the others.
+
+**Dashboard-only by default.** When `externalAuth` is omitted entirely — or present but with **no** validator configured — the agent is reachable **only** from the Omnia dashboard (the management plane) and serves no external traffic. To accept external traffic you must configure **at least one** validator (`sharedToken`, `apiKeys`, `oidc`, or `edgeTrust`).
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `allowManagementPlane` | boolean | No | Accept dashboard-minted management-plane tokens (the debug view). Defaults to `true` at the CRD. |
+| `sharedToken` | object | No | Single shared bearer token validator (see below). |
+| `apiKeys` | object | No | Per-caller API key validator (see below). |
+| `oidc` | object | No | OIDC JWT validator (see below). |
+| `edgeTrust` | object | No | Edge-injected claim-header validator (see below). |
+
+The adapter validates only structure — enums and the per-mode required fields below. The omnia controller validates Secret existence and fetches the OIDC discovery document at reconcile time; there is **no** plan-time secret pre-flight for this block.
+
+#### `externalAuth.sharedToken`
+
+Validates a single bearer token shared by all callers. The token value lives in a workspace `Secret` (under key `token`); `secretRef` names it and is emitted to the CRD as a `LocalObjectReference`.
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `secretRef` | string | Yes | Name of the workspace `Secret` holding the token (key `token`). |
+| `trustEndUserHeader` | boolean | No | Trust an end-user identity header alongside the shared token. |
+
+#### `externalAuth.apiKeys`
+
+Per-caller API key validation. The key list itself lives in Secrets, not in this config.
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `defaultRole` | string | No | Role applied to keys that don't specify one. One of `viewer`, `editor`, `admin`. |
+| `trustEndUserHeader` | boolean | No | Trust an end-user identity header alongside the API key. |
+
+#### `externalAuth.oidc`
+
+Validates customer-issued JWTs against an OIDC discovery document. Both `issuer` and `audience` are required when the block is present.
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `issuer` | string | Yes | OIDC issuer URL. The controller fetches its discovery document at reconcile time. |
+| `audience` | string | Yes | Expected token audience. |
+| `claimMapping` | object | No | Override the JWT claim names read for `subject`, `role`, and `endUser`. Omitted fields fall back to CRD defaults. |
+
+#### `externalAuth.edgeTrust`
+
+Trusts claim-headers injected by an upstream edge (Istio, an API gateway, etc.). It has **no** required fields.
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `headerMapping` | object | No | Override the inbound header names read for `subject`, `role`, `endUser`, and `email`. |
+| `claimsFromHeaders` | object (string values) | No | Map additional claim names to the headers they are read from. |
+
+```yaml
+externalAuth:
+  allowManagementPlane: true
+  oidc:
+    issuer: "https://auth.example.com/"
+    audience: "omnia-agents"
+    claimMapping:
+      subject: sub
+      role: groups
+  sharedToken:
+    secretRef: agent-shared-token
+    trustEndUserHeader: true
+```
+
 ### `labels`
 
 | | |
@@ -443,6 +587,7 @@ The adapter validates the config before every operation. The following checks ar
 5. Each `tools` handler must have a valid name (pattern + unique), a valid `type`, and satisfy the per-type tool/config-or-selector requirements.
 6. Each `skills` binding's `source` must be non-empty and match the SkillSource name pattern; `skillsConfig.selector` (if set) must be a valid selector and `skillsConfig.maxActive` (if set) must be >= 1.
 7. If `runtime` is specified, `runtime.replicas` must be >= 1, and any `runtime.autoscaling` values must be within the documented ranges (`type` is `hpa`/`keda`, utilization targets 1-100, `min_replicas` <= `max_replicas`).
-8. No additional properties are allowed (enforced by the JSON Schema).
+8. If `externalAuth` is specified, each configured validator is structurally valid: `sharedToken.secretRef` is non-empty, `apiKeys.defaultRole` (if set) is one of `viewer`/`editor`/`admin`, and `oidc.issuer` and `oidc.audience` are both non-empty. Secret existence and OIDC discovery are validated by the controller at reconcile time, not at plan time.
+9. No additional properties are allowed (enforced by the JSON Schema).
 
 Validation errors are returned as a list of human-readable strings.

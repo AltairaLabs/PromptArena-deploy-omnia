@@ -64,6 +64,16 @@ deploy:
         min_replicas: 1
         max_replicas: 10
         target_cpu_utilization: 70
+    externalAuth:
+      oidc:
+        issuer: "https://auth.example.com/"
+        audience: "omnia-agents"
+        claimMapping:
+          subject: sub
+          role: groups
+      sharedToken:
+        secretRef: agent-shared-token
+        trustEndUserHeader: true
     labels:
       team: platform
       environment: production
@@ -205,6 +215,36 @@ skillsConfig:
 | `maxActive` | integer | Maximum concurrently-active skills. Must be >= 1. |
 | `selector` | string | Activation strategy: `model-driven`, `tag`, or `embedding`. |
 
+### `externalAuth` (optional)
+
+Data-plane authentication for the deployed agent, projected onto the AgentRuntime's `spec.externalAuth`. It holds up to four **independent** validators — `sharedToken`, `apiKeys`, `oidc`, and `edgeTrust` — evaluated with **OR** logic: a request is admitted if **any** configured validator accepts it.
+
+**Dashboard-only by default.** When `externalAuth` is omitted — or present but with no validator configured — the agent is reachable **only** from the Omnia dashboard (the management plane) and serves no external traffic. To accept external traffic you must configure **at least one** validator.
+
+```yaml
+externalAuth:
+  allowManagementPlane: true
+  oidc:
+    issuer: "https://auth.example.com/"
+    audience: "omnia-agents"
+    claimMapping:
+      subject: sub
+      role: groups
+  sharedToken:
+    secretRef: agent-shared-token
+    trustEndUserHeader: true
+```
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `allowManagementPlane` | boolean | Accept dashboard-minted management-plane tokens (the debug view). Defaults to `true` at the CRD. |
+| `sharedToken` | object | Single shared bearer token. `secretRef` (required) names a workspace `Secret` holding the token under key `token`; `trustEndUserHeader` (boolean) optionally trusts an end-user identity header. |
+| `apiKeys` | object | Per-caller API keys. `defaultRole` (one of `viewer`/`editor`/`admin`) and `trustEndUserHeader` (boolean). The key list lives in Secrets, not here. |
+| `oidc` | object | Validate customer-issued JWTs. `issuer` and `audience` are both required; optional `claimMapping` overrides the `subject`/`role`/`endUser` claim names. |
+| `edgeTrust` | object | Trust claim-headers injected by an upstream edge. Optional `headerMapping` (`subject`/`role`/`endUser`/`email`) and `claimsFromHeaders` (claim → header map). No required fields. |
+
+At least **one** validator is required to serve external traffic. Any `Secret` referenced by `sharedToken.secretRef` (and the API-key Secrets) must already exist in the workspace — the adapter does not pre-flight them at plan time. The omnia controller validates Secret existence and fetches the OIDC discovery document at reconcile time.
+
 ### `runtime` (optional)
 
 Resource sizing and autoscaling for AgentRuntime CRDs.
@@ -280,5 +320,6 @@ The adapter validates the configuration before any operation. Validation checks:
 - Each `tools` handler is structurally valid (name pattern/uniqueness, type enum, per-type tool/config-or-selector rules)
 - Each `skills` binding's `source` matches the SkillSource pattern; `skillsConfig` selector/`maxActive` are valid
 - `runtime.replicas` is >= 1 and any `runtime.autoscaling` values are within range (if runtime is specified)
+- If `externalAuth` is specified, each configured validator is structurally valid (`sharedToken.secretRef` non-empty, `apiKeys.defaultRole` a valid role, `oidc.issuer`/`oidc.audience` non-empty). Secret existence and OIDC discovery are checked by the controller at reconcile time, not at plan time.
 
 Validation errors are returned as a list of human-readable messages.
