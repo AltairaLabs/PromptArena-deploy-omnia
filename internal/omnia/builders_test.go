@@ -859,3 +859,96 @@ func TestBuildExternalAuthSpec_EmptyBlocks(t *testing.T) {
 		t.Errorf("expected apiKeys block present, got %v", got)
 	}
 }
+
+func TestBuildAgentRuntimeRequest_Memory(t *testing.T) {
+	limit := int32(15)
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		Memory: &MemoryConfig{
+			Enabled:   true,
+			Retrieval: &MemoryRetrievalConfig{Strategy: memoryStrategySemantic, Limit: &limit},
+		},
+	}
+
+	spec := agentRuntimeSpec(t, cfg)
+	m, ok := spec["memory"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected spec.memory to be an object")
+	}
+	if m["enabled"] != true {
+		t.Errorf("memory.enabled = %v, want true", m["enabled"])
+	}
+
+	rv, ok := m["retrieval"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected memory.retrieval to be an object")
+	}
+	if rv["strategy"] != "semantic" {
+		t.Errorf("retrieval.strategy = %v, want semantic", rv["strategy"])
+	}
+	// limit round-trips through JSON as a float64.
+	if rv["limit"].(float64) != 15 {
+		t.Errorf("retrieval.limit = %v, want 15", rv["limit"])
+	}
+}
+
+func TestBuildAgentRuntimeRequest_NoMemory(t *testing.T) {
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+	}
+	spec := agentRuntimeSpec(t, cfg)
+	if _, present := spec["memory"]; present {
+		t.Error("spec.memory must be omitted when cfg.Memory is nil")
+	}
+}
+
+func TestBuildMemorySpec_Subblocks(t *testing.T) {
+	if got := buildMemorySpec(nil); got != nil {
+		t.Errorf("expected nil for nil memory, got %v", got)
+	}
+	// A disabled empty block still emits {"enabled": false} — enabled is the switch.
+	got := buildMemorySpec(&MemoryConfig{})
+	if got == nil || got["enabled"] != false {
+		t.Fatalf("expected {enabled:false}, got %v", got)
+	}
+	if len(got) != 1 {
+		t.Errorf("expected only enabled, got %v", got)
+	}
+
+	// Empty retrieval sub-block collapses to nothing.
+	got = buildMemorySpec(&MemoryConfig{
+		Retrieval: &MemoryRetrievalConfig{AccessFilter: &MemoryAccessFilterConfig{}},
+	})
+	if _, present := got["retrieval"]; present {
+		t.Errorf("expected retrieval omitted when its sub-block is empty, got %v", got)
+	}
+
+	// accessFilter with a denyCEL emits under retrieval.
+	got = buildMemorySpec(&MemoryConfig{
+		Retrieval: &MemoryRetrievalConfig{AccessFilter: &MemoryAccessFilterConfig{DenyCEL: "x == 1"}},
+	})
+	rv := got["retrieval"].(map[string]interface{})
+	af := rv["accessFilter"].(map[string]interface{})
+	if af["denyCEL"] != "x == 1" {
+		t.Errorf("accessFilter.denyCEL = %v, want x == 1", af["denyCEL"])
+	}
+
+	// strategy + limit emit under retrieval.
+	limit := int32(7)
+	got = buildMemorySpec(&MemoryConfig{
+		Retrieval: &MemoryRetrievalConfig{Strategy: memoryStrategyKeyword, Limit: &limit},
+	})
+	rv = got["retrieval"].(map[string]interface{})
+	if rv["strategy"] != "keyword" {
+		t.Errorf("retrieval.strategy = %v, want keyword", rv["strategy"])
+	}
+	if rv["limit"].(int32) != 7 {
+		t.Errorf("retrieval.limit = %v, want 7", rv["limit"])
+	}
+}

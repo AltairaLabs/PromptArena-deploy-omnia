@@ -74,6 +74,11 @@ deploy:
       sharedToken:
         secretRef: agent-shared-token
         trustEndUserHeader: true
+    memory:
+      enabled: true
+      retrieval:
+        strategy: semantic
+        limit: 10
     labels:
       team: platform
       environment: production
@@ -245,6 +250,31 @@ externalAuth:
 
 At least **one** validator is required to serve external traffic. Any `Secret` referenced by `sharedToken.secretRef` (and the API-key Secrets) must already exist in the workspace — the adapter does not pre-flight them at plan time. The omnia controller validates Secret existence and fetches the OIDC discovery document at reconcile time.
 
+### `memory` (optional)
+
+Cross-session memory for the deployed agent, projected onto the AgentRuntime's `spec.memory`. `retrieval` tunes the **ambient per-turn recall**: on every turn the runtime injects an always-on "profile" set (the user's identity / preferences / health memories, capped at 20) plus an **episodic** set from a per-turn search — your `retrieval` config controls that episodic set. (This is the automatic in-context path, separate from the explicit `memory__recall` tool.)
+
+```yaml
+memory:
+  enabled: true
+  retrieval:
+    strategy: semantic            # only `semantic` runs semantic search + applies accessFilter
+    limit: 10                     # max episodic hits per turn (profile set is capped separately)
+    accessFilter:
+      denyCEL: 'metadata.url.contains("restricted")'   # only enforced when strategy: semantic
+```
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `enabled` | boolean | Turn cross-session memory on. Defaults to `false`. Always emitted to the CRD. |
+| `retrieval.strategy` | string | Episodic recall mode. **`semantic`** = workspace-scoped hybrid semantic search, and the only mode that applies `accessFilter`. Any other value falls back to keyword search; `graph`/`composite` are accepted by the schema but **not yet implemented** (they behave as `keyword`). |
+| `retrieval.limit` | integer | Max **episodic** memories injected per turn (`1`–`50`, default `10`). Doesn't affect the always-on profile set. |
+| `retrieval.accessFilter` | object | `denyCEL` — a CEL expression over memory metadata; matching memories are dropped from recall. **Enforced only on the `semantic` strategy.** |
+
+:::note
+Embedding for semantic memory is configured at the **workspace** level (the workspace service group's memory-api uses a configured embedding `Provider`), not per agent — there is no per-agent embedding setting here.
+:::
+
 ### `runtime` (optional)
 
 Resource sizing and autoscaling for AgentRuntime CRDs.
@@ -321,5 +351,6 @@ The adapter validates the configuration before any operation. Validation checks:
 - Each `skills` binding's `source` matches the SkillSource pattern; `skillsConfig` selector/`maxActive` are valid
 - `runtime.replicas` is >= 1 and any `runtime.autoscaling` values are within range (if runtime is specified)
 - If `externalAuth` is specified, each configured validator is structurally valid (`sharedToken.secretRef` non-empty, `apiKeys.defaultRole` a valid role, `oidc.issuer`/`oidc.audience` non-empty). Secret existence and OIDC discovery are checked by the controller at reconcile time, not at plan time.
+- If `memory` is specified, it is structurally valid: `retrieval.strategy` (if set) is valid; `retrieval.limit` (if set) is between 1 and 50.
 
 Validation errors are returned as a list of human-readable messages.

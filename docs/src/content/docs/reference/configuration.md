@@ -230,6 +230,31 @@ The adapter validates configuration against the following JSON Schema:
       },
       "additionalProperties": false
     },
+    "memory": {
+      "type": "object",
+      "description": "Cross-session memory / RAG (AgentRuntime spec.memory). Enabled is the on/off switch. Optional.",
+      "properties": {
+        "enabled": { "type": "boolean", "description": "Turn cross-session memory on for the agent." },
+        "retrieval": {
+          "type": "object",
+          "description": "Recall strategy, result limit, and access filter.",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "enum": ["keyword", "semantic", "graph", "composite"]
+            },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "accessFilter": {
+              "type": "object",
+              "properties": { "denyCEL": { "type": "string" } },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "labels": {
       "type": "object",
       "additionalProperties": { "type": "string" },
@@ -556,6 +581,46 @@ externalAuth:
     trustEndUserHeader: true
 ```
 
+### `memory`
+
+| | |
+|---|---|
+| **Type** | `object` |
+| **Required** | No |
+
+Cross-session memory / RAG for the deployed agent. Faithful passthrough to the AgentRuntime `spec.memory` — the adapter emits only the fields you set, so omitted sub-blocks fall back to CRD defaults at admission time.
+
+**Enabled is the on/off switch.** `enabled` is always emitted. The adapter validates only structure — the retrieval strategy enum and the retrieval limit range.
+
+:::note
+Embedding for semantic memory is configured at the **workspace** level (the workspace service group's memory-api uses a configured embedding `Provider`), not per agent — there is no per-agent embedding setting here.
+:::
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `enabled` | boolean | No | Turn cross-session memory on for the agent. Defaults to `false`. |
+| `retrieval` | object | No | Recall strategy, result limit, and access filter (see below). |
+
+#### `memory.retrieval`
+
+`retrieval` tunes the **ambient per-turn recall** — cross-session memories the runtime pulls and injects into the prompt automatically on every turn (distinct from the explicit `memory__recall` tool). Each turn the runtime always includes a small "profile" set (the user's identity / preferences / health memories, capped at 20), then adds an **episodic** set from a per-turn search; `retrieval` controls that episodic set.
+
+| Sub-field | Type | Required | Description |
+|---|---|---|---|
+| `strategy` | string | No | Episodic recall mode. **`semantic`** runs workspace-scoped hybrid semantic search and is the only mode that applies `accessFilter`. Any other value falls back to keyword full-text search; `graph` and `composite` are accepted by the schema but **not yet implemented** (they currently behave as `keyword`). |
+| `limit` | integer | No | Max **episodic** memories injected per turn (`1`–`50`, default `10`). Does not affect the always-included profile set (capped separately at 20). |
+| `accessFilter` | object | No | `denyCEL` (string) — a CEL expression over memory metadata; matching memories are dropped from recall. **Enforced only on the `semantic` strategy** — the keyword fallback ignores it. |
+
+```yaml
+memory:
+  enabled: true
+  retrieval:
+    strategy: semantic            # only semantic applies accessFilter; other values = keyword FTS
+    limit: 10                     # episodic hits per turn; the profile set is capped separately
+    accessFilter:
+      denyCEL: 'metadata.url.contains("restricted")'   # only enforced when strategy: semantic
+```
+
 ### `labels`
 
 | | |
@@ -588,6 +653,7 @@ The adapter validates the config before every operation. The following checks ar
 6. Each `skills` binding's `source` must be non-empty and match the SkillSource name pattern; `skillsConfig.selector` (if set) must be a valid selector and `skillsConfig.maxActive` (if set) must be >= 1.
 7. If `runtime` is specified, `runtime.replicas` must be >= 1, and any `runtime.autoscaling` values must be within the documented ranges (`type` is `hpa`/`keda`, utilization targets 1-100, `min_replicas` <= `max_replicas`).
 8. If `externalAuth` is specified, each configured validator is structurally valid: `sharedToken.secretRef` is non-empty, `apiKeys.defaultRole` (if set) is one of `viewer`/`editor`/`admin`, and `oidc.issuer` and `oidc.audience` are both non-empty. Secret existence and OIDC discovery are validated by the controller at reconcile time, not at plan time.
-9. No additional properties are allowed (enforced by the JSON Schema).
+9. If `memory` is specified, it is structurally valid: `retrieval.strategy` (if set) is one of `keyword`/`semantic`/`graph`/`composite`, and `retrieval.limit` (if set) is between `1` and `50`.
+10. No additional properties are allowed (enforced by the JSON Schema).
 
 Validation errors are returned as a list of human-readable strings.

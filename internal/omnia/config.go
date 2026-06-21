@@ -82,6 +82,23 @@ var validSkillSelectors = map[string]bool{
 // skillSourceNamePattern is the omnia SkillSource name pattern (RFC1123 label).
 var skillSourceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
+// Memory retrieval strategy constants. They select how recall queries the
+// memory store.
+const (
+	memoryStrategyKeyword   = "keyword"
+	memoryStrategySemantic  = "semantic"
+	memoryStrategyGraph     = "graph"
+	memoryStrategyComposite = "composite"
+)
+
+// validMemoryStrategies is the set of accepted retrieval strategies.
+var validMemoryStrategies = map[string]bool{
+	memoryStrategyKeyword:   true,
+	memoryStrategySemantic:  true,
+	memoryStrategyGraph:     true,
+	memoryStrategyComposite: true,
+}
+
 // API-key role constants. An APIKeysAuth defaultRole selects the role applied
 // to keys that don't specify one; it must be one of these.
 const (
@@ -416,6 +433,31 @@ const configSchema = `{
       },
       "additionalProperties": false
     },
+    "memory": {
+      "type": "object",
+      "description": "Cross-session memory / RAG (AgentRuntime spec.memory). Enabled is the on/off switch. Optional.",
+      "properties": {
+        "enabled": { "type": "boolean", "description": "Turn cross-session memory on for the agent." },
+        "retrieval": {
+          "type": "object",
+          "description": "Recall strategy, result limit, and access filter.",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "enum": ["keyword", "semantic", "graph", "composite"]
+            },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "accessFilter": {
+              "type": "object",
+              "properties": { "denyCEL": { "type": "string" } },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "labels": {
       "type": "object",
       "additionalProperties": { "type": "string" },
@@ -443,6 +485,7 @@ type Config struct {
 	SkillsConfig *SkillsConfig       `json:"skillsConfig,omitempty"`
 	Runtime      *RuntimeConfig      `json:"runtime,omitempty"`
 	ExternalAuth *ExternalAuthConfig `json:"externalAuth,omitempty"`
+	Memory       *MemoryConfig       `json:"memory,omitempty"`
 	Labels       map[string]string   `json:"labels,omitempty"`
 	DryRun       bool                `json:"dry_run,omitempty"`
 
@@ -534,6 +577,33 @@ type EdgeTrustHeaderMappingConfig struct {
 	Email   string `json:"email,omitempty"`
 }
 
+// MemoryConfig is the deploy-config memory block. It maps faithfully to the
+// AgentRuntime spec.memory (MemoryConfig): cross-session memory / RAG for the
+// agent. Enabled is the on/off switch; Retrieval tunes how recall queries the
+// store. The adapter does structural validation only — deep retrieval checks
+// are the omnia controller's job. Embedding for semantic memory is configured
+// at the workspace level (the workspace service group's memory-api uses a
+// configured embedding Provider), not per agent — there is no per-agent
+// embedding setting.
+type MemoryConfig struct {
+	Enabled   bool                   `json:"enabled,omitempty"`
+	Retrieval *MemoryRetrievalConfig `json:"retrieval,omitempty"`
+}
+
+// MemoryRetrievalConfig controls how memories are recalled: the strategy, the
+// result limit (1–50), and an optional access filter. All fields optional.
+type MemoryRetrievalConfig struct {
+	Strategy     string                    `json:"strategy,omitempty"`
+	Limit        *int32                    `json:"limit,omitempty"`
+	AccessFilter *MemoryAccessFilterConfig `json:"accessFilter,omitempty"`
+}
+
+// MemoryAccessFilterConfig carries a CEL expression that denies recall when it
+// evaluates true. Optional.
+type MemoryAccessFilterConfig struct {
+	DenyCEL string `json:"denyCEL,omitempty"`
+}
+
 // parseConfig unmarshals JSON config into Config.
 func parseConfig(raw string) (*Config, error) {
 	var cfg Config
@@ -580,6 +650,8 @@ func (c *Config) validate() []string {
 	errs = append(errs, validateSkills(c.Skills, c.SkillsConfig)...)
 
 	errs = append(errs, validateExternalAuth(c.ExternalAuth)...)
+
+	errs = append(errs, validateMemory(c.Memory)...)
 
 	if c.resolveToken() == "" {
 		errs = append(errs, "api_token is required (set in config or OMNIA_API_TOKEN env var)")
@@ -677,6 +749,30 @@ func validateExternalAuth(ea *ExternalAuthConfig) []string {
 		}
 		if ea.OIDC.Audience == "" {
 			errs = append(errs, "externalAuth.oidc.audience is required")
+		}
+	}
+
+	return errs
+}
+
+// validateMemory checks the optional memory block. Structural only — the
+// adapter rejects only what the AgentRuntime spec.memory CRD would also reject,
+// so a valid adapter config produces an admissible spec. A nil block is valid
+// (no memory is configured). Any set retrieval enum/limit must be within its
+// allowed set/range.
+func validateMemory(m *MemoryConfig) []string {
+	if m == nil {
+		return nil
+	}
+	var errs []string
+
+	if r := m.Retrieval; r != nil {
+		if r.Strategy != "" && !validMemoryStrategies[r.Strategy] {
+			errs = append(errs, fmt.Sprintf(
+				"memory.retrieval.strategy %q must be one of keyword, semantic, graph, composite", r.Strategy))
+		}
+		if r.Limit != nil && (*r.Limit < 1 || *r.Limit > 50) {
+			errs = append(errs, "memory.retrieval.limit must be between 1 and 50")
 		}
 	}
 
