@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -29,6 +30,64 @@ var validProviderRoles = map[string]bool{
 	roleSTT:       true,
 	roleImage:     true,
 	roleInference: true,
+}
+
+// Handler type constants. A ToolRegistry handler's type selects which
+// type-specific config block (httpConfig/openAPIConfig/...) applies.
+const (
+	handlerTypeHTTP    = "http"
+	handlerTypeOpenAPI = "openapi"
+	handlerTypeGRPC    = "grpc"
+	handlerTypeMCP     = "mcp"
+	handlerTypeClient  = "client"
+)
+
+// validHandlerTypes is the set of accepted handler types.
+var validHandlerTypes = map[string]bool{
+	handlerTypeHTTP:    true,
+	handlerTypeOpenAPI: true,
+	handlerTypeGRPC:    true,
+	handlerTypeMCP:     true,
+	handlerTypeClient:  true,
+}
+
+// handlerConfigField maps each handler type to the JSON name of its
+// type-specific config block, used in validation messages.
+var handlerConfigField = map[string]string{
+	handlerTypeHTTP:    "httpConfig",
+	handlerTypeOpenAPI: "openAPIConfig",
+	handlerTypeGRPC:    "grpcConfig",
+	handlerTypeMCP:     "mcpConfig",
+	handlerTypeClient:  "clientConfig",
+}
+
+// handlerNamePattern is the omnia tool/handler name pattern (RFC1123-ish label).
+var handlerNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// HandlerTool is the schema-only tool descriptor carried by a ToolHandler. It
+// is a faithful passthrough to spec.handlers[].tool in the omnia ToolRegistry.
+type HandlerTool struct {
+	Name         string      `json:"name"`
+	Description  string      `json:"description"`
+	InputSchema  interface{} `json:"inputSchema"`
+	OutputSchema interface{} `json:"outputSchema,omitempty"`
+}
+
+// ToolHandler is one entry in the deploy-config tools block. It maps faithfully
+// to an omnia ToolRegistry spec.handlers[] HandlerDefinition. The type-specific
+// config blocks are passed through verbatim — the adapter does not model their
+// inner fields; the omnia CRD/controller validates those deeply.
+type ToolHandler struct {
+	Name          string                 `json:"name"`
+	Type          string                 `json:"type"` // http|openapi|grpc|mcp|client
+	Tool          *HandlerTool           `json:"tool,omitempty"`
+	Selector      map[string]interface{} `json:"selector,omitempty"`
+	HTTPConfig    map[string]interface{} `json:"httpConfig,omitempty"`
+	OpenAPIConfig map[string]interface{} `json:"openAPIConfig,omitempty"`
+	GRPCConfig    map[string]interface{} `json:"grpcConfig,omitempty"`
+	MCPConfig     map[string]interface{} `json:"mcpConfig,omitempty"`
+	ClientConfig  map[string]interface{} `json:"clientConfig,omitempty"`
+	Timeout       string                 `json:"timeout,omitempty"`
 }
 
 // ProviderBinding maps a logical provider name to an Omnia Provider CRD for a
@@ -131,6 +190,46 @@ const configSchema = `{
         }
       ]
     },
+    "tools": {
+      "type": "array",
+      "description": "Tool handlers for the omnia ToolRegistry spec.handlers[]. Optional.",
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "description": "Handler name (unique across handlers)"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["http", "openapi", "grpc", "mcp", "client"],
+            "description": "Handler type; selects the type-specific config block"
+          },
+          "tool": {
+            "type": "object",
+            "description": "Tool schema (required for http and grpc handlers).",
+            "required": ["name", "description", "inputSchema"],
+            "properties": {
+              "name": { "type": "string" },
+              "description": { "type": "string" },
+              "inputSchema": { "type": "object" },
+              "outputSchema": { "type": "object" }
+            },
+            "additionalProperties": false
+          },
+          "selector": { "type": "object" },
+          "httpConfig": { "type": "object" },
+          "openAPIConfig": { "type": "object" },
+          "grpcConfig": { "type": "object" },
+          "mcpConfig": { "type": "object" },
+          "clientConfig": { "type": "object" },
+          "timeout": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
     "runtime": {
       "type": "object",
       "properties": {
@@ -180,6 +279,7 @@ type Config struct {
 	Workspace   string            `json:"workspace"`
 	APIToken    string            `json:"api_token,omitempty"`
 	Providers   Providers         `json:"providers"`
+	Tools       []ToolHandler     `json:"tools,omitempty"`
 	Runtime     *RuntimeConfig    `json:"runtime,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	DryRun      bool              `json:"dry_run,omitempty"`
@@ -251,6 +351,8 @@ func (c *Config) validate() []string {
 	}
 
 	errs = append(errs, validateProviderBindings(c.Providers)...)
+
+	errs = append(errs, validateToolHandlers(c.Tools)...)
 
 	if c.resolveToken() == "" {
 		errs = append(errs, "api_token is required (set in config or OMNIA_API_TOKEN env var)")
@@ -324,4 +426,97 @@ func validatePercent(field string, v *int) []string {
 		return []string{field + " must be between 1 and 100"}
 	}
 	return nil
+}
+
+// validateToolHandlers checks the optional tools block. Light structural
+// validation only — name pattern/uniqueness, type enum, and the
+// tool/config-or-selector presence rules per type. The omnia CRD/controller
+// validates inner config fields (endpoint URLs etc.) deeply, so this mirrors
+// the philosophy of validateProviderBindings: reject only what omnia would.
+// An empty tools block is valid (no ToolRegistry is created).
+func validateToolHandlers(handlers []ToolHandler) []string {
+	var errs []string
+	seen := make(map[string]bool, len(handlers))
+	for i := range handlers {
+		errs = append(errs, validateToolHandler(&handlers[i], seen)...)
+	}
+	return errs
+}
+
+// validateToolHandler validates a single handler and records its name in seen.
+func validateToolHandler(h *ToolHandler, seen map[string]bool) []string {
+	var errs []string
+
+	switch {
+	case h.Name == "":
+		errs = append(errs, "tool handler: name is required")
+	case !handlerNamePattern.MatchString(h.Name):
+		errs = append(errs, fmt.Sprintf("tool handler %q: name must match %s", h.Name, handlerNamePattern.String()))
+	case seen[h.Name]:
+		errs = append(errs, fmt.Sprintf("tool handler name %q is duplicated", h.Name))
+	}
+	seen[h.Name] = true
+
+	if !validHandlerTypes[h.Type] {
+		errs = append(errs, fmt.Sprintf("tool handler %q: invalid type %q", h.Name, h.Type))
+		return errs
+	}
+
+	return append(errs, validateHandlerByType(h)...)
+}
+
+// validateHandlerByType applies the per-type tool/config requirements.
+func validateHandlerByType(h *ToolHandler) []string {
+	switch h.Type {
+	case handlerTypeHTTP, handlerTypeGRPC:
+		return validateHandlerWithTool(h)
+	case handlerTypeOpenAPI:
+		return requireConfigOrSelector(h, h.OpenAPIConfig)
+	case handlerTypeMCP:
+		return requireConfigOrSelector(h, h.MCPConfig)
+	default: // handlerTypeClient: clientConfig is optional, no hard requirement.
+		return nil
+	}
+}
+
+// validateHandlerWithTool enforces the http/grpc rules: a complete tool block
+// plus either the matching config block or a selector.
+func validateHandlerWithTool(h *ToolHandler) []string {
+	var errs []string
+	errs = append(errs, validateRequiredTool(h)...)
+
+	var cfg map[string]interface{}
+	if h.Type == handlerTypeHTTP {
+		cfg = h.HTTPConfig
+	} else {
+		cfg = h.GRPCConfig
+	}
+	return append(errs, requireConfigOrSelector(h, cfg)...)
+}
+
+// validateRequiredTool enforces a non-empty tool block for handlers that need it.
+func validateRequiredTool(h *ToolHandler) []string {
+	if h.Tool == nil {
+		return []string{fmt.Sprintf("tool handler %q: tool is required for type %q", h.Name, h.Type)}
+	}
+	var errs []string
+	if h.Tool.Name == "" {
+		errs = append(errs, fmt.Sprintf("tool handler %q: tool.name is required", h.Name))
+	}
+	if h.Tool.Description == "" {
+		errs = append(errs, fmt.Sprintf("tool handler %q: tool.description is required", h.Name))
+	}
+	if h.Tool.InputSchema == nil {
+		errs = append(errs, fmt.Sprintf("tool handler %q: tool.inputSchema is required", h.Name))
+	}
+	return errs
+}
+
+// requireConfigOrSelector requires the type's config block OR a selector.
+func requireConfigOrSelector(h *ToolHandler, cfg map[string]interface{}) []string {
+	if len(cfg) > 0 || len(h.Selector) > 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"tool handler %q: %s or selector is required", h.Name, handlerConfigField[h.Type])}
 }

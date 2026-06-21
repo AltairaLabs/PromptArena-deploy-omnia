@@ -19,6 +19,7 @@ const (
 	keyLabels   = "labels"
 	keyMetadata = "metadata"
 	keyName     = "name"
+	keyType     = "type"
 )
 
 // buildPromptPackRequest builds the JSON body for creating/updating a PromptPack.
@@ -50,7 +51,7 @@ func buildAgentRuntimeRequest(
 			keyName: sanitizeName(pack.ID),
 		},
 		"facade": map[string]interface{}{
-			"type":    "websocket",
+			keyType:   "websocket",
 			"handler": "runtime",
 		},
 	}
@@ -74,7 +75,7 @@ func buildAgentRuntimeRequest(
 	}
 
 	// Tool registry reference (CRD created by the ToolRegistry phase).
-	if len(pack.Tools) > 0 {
+	if len(cfg.Tools) > 0 {
 		spec["toolRegistryRef"] = map[string]interface{}{
 			keyName: sanitizeName(pack.ID + "-tools"),
 		}
@@ -161,27 +162,14 @@ func buildAutoscalingSpec(a *AutoscalingConfig) map[string]interface{} {
 	return as
 }
 
-// buildToolRegistryRequest builds the JSON body for creating/updating a ToolRegistry CRD.
+// buildToolRegistryRequest builds the JSON body for creating/updating a
+// ToolRegistry CRD. The handlers are a faithful passthrough of the explicit
+// deploy-config tools block to spec.handlers[], preserving order; the inline
+// pack.Tools schemas reach the runtime via the PromptPack content fold instead.
 func buildToolRegistryRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, error) {
-	toolNames := make([]string, 0, len(pack.Tools))
-	for name := range pack.Tools {
-		toolNames = append(toolNames, name)
-	}
-	sort.Strings(toolNames)
-
-	tools := make([]map[string]interface{}, 0, len(toolNames))
-	for _, name := range toolNames {
-		tool := pack.Tools[name]
-		entry := map[string]interface{}{
-			keyName: name,
-		}
-		if tool.Description != "" {
-			entry["description"] = tool.Description
-		}
-		if tool.Parameters != nil {
-			entry["inputSchema"] = tool.Parameters
-		}
-		tools = append(tools, entry)
+	handlers := make([]map[string]interface{}, 0, len(cfg.Tools))
+	for i := range cfg.Tools {
+		handlers = append(handlers, buildHandlerEntry(&cfg.Tools[i]))
 	}
 
 	req := map[string]interface{}{
@@ -190,10 +178,47 @@ func buildToolRegistryRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, 
 			keyLabels: buildResourceLabels(pack.ID, pack.Version, ResTypeToolRegistry, cfg.Labels),
 		},
 		keySpec: map[string]interface{}{
-			"tools": tools,
+			"handlers": handlers,
 		},
 	}
 	return json.Marshal(req)
+}
+
+// buildHandlerEntry maps one ToolHandler to a spec.handlers[] entry, emitting
+// only the present optional blocks.
+func buildHandlerEntry(h *ToolHandler) map[string]interface{} {
+	entry := map[string]interface{}{
+		keyName: h.Name,
+		keyType: h.Type,
+	}
+	if h.Tool != nil {
+		tool := map[string]interface{}{
+			keyName:       h.Tool.Name,
+			"description": h.Tool.Description,
+			"inputSchema": h.Tool.InputSchema,
+		}
+		if h.Tool.OutputSchema != nil {
+			tool["outputSchema"] = h.Tool.OutputSchema
+		}
+		entry["tool"] = tool
+	}
+	addIfPresent(entry, "selector", h.Selector)
+	addIfPresent(entry, "httpConfig", h.HTTPConfig)
+	addIfPresent(entry, "openAPIConfig", h.OpenAPIConfig)
+	addIfPresent(entry, "grpcConfig", h.GRPCConfig)
+	addIfPresent(entry, "mcpConfig", h.MCPConfig)
+	addIfPresent(entry, "clientConfig", h.ClientConfig)
+	if h.Timeout != "" {
+		entry["timeout"] = h.Timeout
+	}
+	return entry
+}
+
+// addIfPresent sets key=m on entry only when m is non-empty.
+func addIfPresent(entry map[string]interface{}, key string, m map[string]interface{}) {
+	if len(m) > 0 {
+		entry[key] = m
+	}
 }
 
 // buildAgentPolicyRequest builds the JSON body for creating/updating an AgentPolicy CRD.

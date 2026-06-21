@@ -312,6 +312,11 @@ func TestBuildAgentRuntimeRequest(t *testing.T) {
 		Workspace:   "test-ws",
 		APIToken:    "test-token",
 		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		Tools: []ToolHandler{{
+			Name: "search", Type: handlerTypeHTTP,
+			Tool:       &HandlerTool{Name: "search", Description: "Search tool", InputSchema: map[string]interface{}{"type": "object"}},
+			HTTPConfig: map[string]interface{}{"endpoint": "https://api.example.com"},
+		}},
 	}
 
 	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
@@ -361,19 +366,38 @@ func TestBuildAgentRuntimeRequest(t *testing.T) {
 	}
 }
 
+// toolsCfg builds a Config carrying an http handler (with tool+httpConfig) and
+// an mcp handler (mcpConfig only, no tool), order preserved.
+func toolsCfg() *Config {
+	return &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		Tools: []ToolHandler{
+			{
+				Name: "search", Type: handlerTypeHTTP,
+				Tool: &HandlerTool{
+					Name: "search", Description: "Search tool",
+					InputSchema: map[string]interface{}{"type": "object"},
+				},
+				HTTPConfig: map[string]interface{}{"endpoint": "https://api.example.com/search"},
+			},
+			{
+				Name: "knowledge", Type: handlerTypeMCP,
+				MCPConfig: map[string]interface{}{"server": "knowledge-mcp"},
+			},
+		},
+	}
+}
+
 func TestBuildToolRegistryRequest(t *testing.T) {
 	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
 	if err != nil {
 		t.Fatalf("failed to parse pack: %v", err)
 	}
-	cfg := &Config{
-		APIEndpoint: "https://omnia.test.com",
-		Workspace:   "test-ws",
-		APIToken:    "test-token",
-		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
-	}
 
-	body, err := buildToolRegistryRequest(pack, cfg)
+	body, err := buildToolRegistryRequest(pack, toolsCfg())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -387,23 +411,70 @@ func TestBuildToolRegistryRequest(t *testing.T) {
 	if !ok {
 		t.Fatal("expected spec to be an object")
 	}
-	tools, ok := spec["tools"].([]interface{})
-	if !ok {
-		t.Fatal("expected spec.tools to be an array")
+	if _, present := spec["tools"]; present {
+		t.Error("spec must not contain a 'tools' key; handlers replaced it")
 	}
-	if len(tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(tools))
+	handlers, ok := spec["handlers"].([]interface{})
+	if !ok {
+		t.Fatal("expected spec.handlers to be an array")
+	}
+	if len(handlers) != 2 {
+		t.Fatalf("expected 2 handlers, got %d", len(handlers))
 	}
 
-	tool, ok := tools[0].(map[string]interface{})
+	// Order preserved: http handler first, with tool + httpConfig.
+	h0 := handlers[0].(map[string]interface{})
+	if h0["name"] != "search" || h0["type"] != handlerTypeHTTP {
+		t.Errorf("handler[0] = %v, want name=search type=http", h0)
+	}
+	tool, ok := h0["tool"].(map[string]interface{})
 	if !ok {
-		t.Fatal("expected tool entry to be an object")
+		t.Fatal("expected handler[0].tool to be an object")
 	}
-	if tool["name"] != "search" {
-		t.Errorf("expected tool name %q, got %q", "search", tool["name"])
+	if tool["name"] != "search" || tool["description"] != "Search tool" {
+		t.Errorf("handler[0].tool = %v", tool)
 	}
-	if tool["description"] != "Search tool" {
-		t.Errorf("expected tool description %q, got %q", "Search tool", tool["description"])
+	if _, ok := h0["httpConfig"].(map[string]interface{}); !ok {
+		t.Error("expected handler[0].httpConfig to be present")
+	}
+
+	// mcp handler second: mcpConfig only, no tool.
+	h1 := handlers[1].(map[string]interface{})
+	if h1["name"] != "knowledge" || h1["type"] != handlerTypeMCP {
+		t.Errorf("handler[1] = %v, want name=knowledge type=mcp", h1)
+	}
+	if _, present := h1["tool"]; present {
+		t.Error("expected mcp handler[1] to have no tool block")
+	}
+	if _, ok := h1["mcpConfig"].(map[string]interface{}); !ok {
+		t.Error("expected handler[1].mcpConfig to be present")
+	}
+}
+
+// TestBuildAgentRuntimeRequest_NoTools verifies that a pack with inline
+// pack.Tools but NO cfg.Tools produces no toolRegistryRef — the ToolRegistry is
+// now driven exclusively from the deploy-config tools block.
+func TestBuildAgentRuntimeRequest_NoTools(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("failed to parse pack: %v", err)
+	}
+	if len(pack.Tools) == 0 {
+		t.Fatal("test fixture should carry inline pack.Tools")
+	}
+	cfg := &Config{Providers: Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}}}
+
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	spec := result["spec"].(map[string]interface{})
+	if _, present := spec["toolRegistryRef"]; present {
+		t.Error("expected no toolRegistryRef when cfg.Tools is empty")
 	}
 }
 

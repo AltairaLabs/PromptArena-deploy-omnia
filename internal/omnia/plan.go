@@ -42,7 +42,7 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		}
 	}
 
-	desired := generateDesiredResources(pack)
+	desired := generateDesiredResources(pack, cfg)
 	changes := diffResources(desired, prior)
 	summary := buildSummary(changes)
 
@@ -52,8 +52,9 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	}, nil
 }
 
-// generateDesiredResources builds the list of desired Omnia resources from the pack.
-func generateDesiredResources(pack *prompt.Pack) []deploy.ResourceChange {
+// generateDesiredResources builds the list of desired Omnia resources from the
+// pack and deploy config.
+func generateDesiredResources(pack *prompt.Pack, cfg *Config) []deploy.ResourceChange {
 	// Step 0: PromptPack CRD (dashboard folds pack content into a managed ConfigMap).
 	desired := []deploy.ResourceChange{
 		{
@@ -64,13 +65,13 @@ func generateDesiredResources(pack *prompt.Pack) []deploy.ResourceChange {
 		},
 	}
 
-	// Step 1: ToolRegistry (if pack has tools).
-	if len(pack.Tools) > 0 {
+	// Step 1: ToolRegistry (if the deploy config declares tool handlers).
+	if len(cfg.Tools) > 0 {
 		desired = append(desired, deploy.ResourceChange{
 			Type:   ResTypeToolRegistry,
 			Name:   sanitizeName(pack.ID + "-tools"),
 			Action: deploy.ActionCreate,
-			Detail: fmt.Sprintf("Create ToolRegistry with %d tools", len(pack.Tools)),
+			Detail: fmt.Sprintf("Create ToolRegistry with %d handlers", len(cfg.Tools)),
 		})
 	}
 

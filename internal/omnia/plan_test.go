@@ -32,7 +32,19 @@ const testDeployConfig = `{
 	"api_endpoint": "https://omnia.test.com",
 	"workspace": "test-ws",
 	"api_token": "test-token",
-	"providers": {"default": "claude-prod"}
+	"providers": {"default": "claude-prod"},
+	"tools": [
+		{
+			"name": "search",
+			"type": "http",
+			"tool": {
+				"name": "search",
+				"description": "Search tool",
+				"inputSchema": {"type": "object"}
+			},
+			"httpConfig": {"endpoint": "https://api.example.com/search"}
+		}
+	]
 }`
 
 func newPlanTestProvider() (*Provider, *simulatedClient) {
