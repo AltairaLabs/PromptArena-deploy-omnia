@@ -124,7 +124,17 @@ The adapter creates resources in dependency order:
 4. **AgentPolicy** -- enforces tool blocklists (if the pack defines a tool policy)
 5. **AgentRuntime** -- the running agent, with its provider bindings, referencing the PromptPack and ToolRegistry
 
-Progress events are streamed as each resource is created.
+Progress events are streamed as each resource is created. After each
+AgentRuntime is created or updated, the adapter emits a progress message with a
+dashboard deep-link so you can open the agent immediately:
+
+```
+Agent "my-pack" ready — open: https://omnia.example.com/agents/my-pack?workspace=dev-workspace
+```
+
+The URL has the shape `<api_endpoint>/agents/<name>?workspace=<workspace>`,
+where `<name>` is the sanitized AgentRuntime name. A multi-agent pack prints one
+URL per agent.
 
 ## Step 4: Check status
 
@@ -155,6 +165,20 @@ promptarena deploy destroy
 ```
 
 Resources are deleted in reverse dependency order (AgentRuntime first, ConfigMap last) to avoid orphaned references.
+
+## Troubleshooting
+
+When an `apply` fails, the adapter classifies the failure from the HTTP status
+the Omnia API returned (rather than guessing from the message text) and attaches
+a one-line remediation hint. The categories are:
+
+| Category | HTTP status | What it usually means | Remediation |
+|---|---|---|---|
+| `permission` | 401, 403 | The token is missing or lacks workspace access | Verify the `omnia_sk_` API token (config `api_token` or `OMNIA_API_TOKEN`) is valid and has permission for the workspace |
+| `not_found` | 404 | The workspace or a referenced resource does not exist | Check the workspace and resource name; the API path is `/api/workspaces/{workspace}` |
+| `conflict` | 409 | The resource already exists, or the request body was rejected as invalid | Update the existing resource instead of creating it; check the deploy-config values against the Omnia API requirements |
+| `network` | 5xx | The Omnia API returned a server error | Retry after a short wait |
+| `network` (connection) | (no HTTP response) | The endpoint was unreachable — connection refused, timeout, or DNS failure | Verify `api_endpoint` is correct and reachable |
 
 ## Next steps
 
