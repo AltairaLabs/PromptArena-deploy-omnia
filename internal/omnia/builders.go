@@ -21,10 +21,6 @@ const (
 	keyName     = "name"
 )
 
-// defaultProviderName is the NamedProviderRef name treated as the runtime's
-// primary provider by the AgentRuntime CRD.
-const defaultProviderName = "default"
-
 // buildPromptPackRequest builds the JSON body for creating/updating a PromptPack.
 // The dashboard's promptpacks route folds body.content into a managed
 // ConfigMap and sets spec.source itself, so the adapter only sends the pack
@@ -59,16 +55,22 @@ func buildAgentRuntimeRequest(
 		},
 	}
 
-	// Primary provider mapping for this agent. The "default" entry is the
-	// runtime's primary provider.
-	if providerRef, ok := resolveProviderForAgent(agentName, cfg); ok {
-		spec["providers"] = []map[string]interface{}{
-			{
-				keyName:       defaultProviderName,
-				"providerRef": map[string]interface{}{keyName: providerRef},
-				"role":        "llm",
-			},
+	// Emit one NamedProviderRef per binding, preserving order. The binding
+	// named "default" is the runtime's primary provider.
+	if len(cfg.Providers) > 0 {
+		refs := make([]map[string]interface{}, 0, len(cfg.Providers))
+		for _, b := range cfg.Providers {
+			role := b.Role
+			if role == "" {
+				role = roleLLM
+			}
+			refs = append(refs, map[string]interface{}{
+				keyName:       b.Name,
+				"providerRef": map[string]interface{}{keyName: b.Ref},
+				"role":        role,
+			})
 		}
+		spec["providers"] = refs
 	}
 
 	// Tool registry reference (CRD created by the ToolRegistry phase).
@@ -219,20 +221,6 @@ func buildAgentPolicyRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, e
 		keySpec: spec,
 	}
 	return json.Marshal(req)
-}
-
-// resolveProviderForAgent returns the Omnia provider CRD name for an agent.
-// It first checks for agent-specific mappings, then falls back to "default".
-func resolveProviderForAgent(agentName string, cfg *Config) (string, bool) {
-	// Check for agent-specific provider mapping.
-	if ref, ok := cfg.Providers[agentName]; ok {
-		return ref, true
-	}
-	// Fall back to default provider.
-	if ref, ok := cfg.Providers[defaultProviderName]; ok {
-		return ref, true
-	}
-	return "", false
 }
 
 // hasToolPolicy returns true if any prompt in the pack defines a tool policy.
