@@ -704,6 +704,101 @@ func TestValidateExternalAuth(t *testing.T) {
 	}
 }
 
+func int32Ptr(v int32) *int32 { return &v }
+
+func TestParseConfig_Memory(t *testing.T) {
+	raw := `{
+		"api_endpoint": "https://omnia.example.com",
+		"workspace": "ws",
+		"api_token": "tok",
+		"providers": {"default": "claude-prod"},
+		"memory": {
+			"enabled": true,
+			"retrieval": {
+				"strategy": "semantic",
+				"limit": 10,
+				"accessFilter": {"denyCEL": "user.tier == 'free'"}
+			}
+		}
+	}`
+
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	m := cfg.Memory
+	if m == nil {
+		t.Fatal("expected Memory to be populated")
+	}
+	if !m.Enabled {
+		t.Fatalf("memory enabled = %v", m.Enabled)
+	}
+	if m.Retrieval == nil || m.Retrieval.Strategy != memoryStrategySemantic {
+		t.Fatalf("retrieval = %+v", m.Retrieval)
+	}
+	if m.Retrieval.Limit == nil || *m.Retrieval.Limit != 10 {
+		t.Errorf("retrieval.limit = %v, want 10", m.Retrieval.Limit)
+	}
+	if m.Retrieval.AccessFilter == nil || m.Retrieval.AccessFilter.DenyCEL != "user.tier == 'free'" {
+		t.Errorf("retrieval.accessFilter = %+v", m.Retrieval.AccessFilter)
+	}
+}
+
+func memoryBaseConfig(m *MemoryConfig) *Config {
+	return &Config{
+		APIEndpoint: "https://omnia.example.com",
+		Workspace:   "ws",
+		APIToken:    "tok",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		Memory:      m,
+	}
+}
+
+func TestValidateMemory(t *testing.T) {
+	tests := []struct {
+		name      string
+		m         *MemoryConfig
+		wantError string // substring; "" = expect no error
+	}{
+		{"nil block is valid", nil, ""},
+		{"disabled empty block is valid", &MemoryConfig{}, ""},
+		{"enabled with no retrieval is valid", &MemoryConfig{Enabled: true}, ""},
+		{
+			name:      "invalid retrieval strategy",
+			m:         &MemoryConfig{Retrieval: &MemoryRetrievalConfig{Strategy: "fuzzy"}},
+			wantError: "memory.retrieval.strategy",
+		},
+		{
+			name:      "retrieval limit out of range",
+			m:         &MemoryConfig{Retrieval: &MemoryRetrievalConfig{Limit: int32Ptr(99)}},
+			wantError: "memory.retrieval.limit must be between 1 and 50",
+		},
+		{
+			name: "valid enabled block",
+			m: &MemoryConfig{
+				Enabled:   true,
+				Retrieval: &MemoryRetrievalConfig{Strategy: memoryStrategyComposite, Limit: int32Ptr(25)},
+			},
+			wantError: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := memoryBaseConfig(tt.m).validate()
+			if tt.wantError == "" {
+				if len(errs) != 0 {
+					t.Errorf("expected no errors, got %v", errs)
+				}
+				return
+			}
+			if !strings.Contains(strings.Join(errs, "; "), tt.wantError) {
+				t.Errorf("expected an error containing %q, got %v", tt.wantError, errs)
+			}
+		})
+	}
+}
+
 func TestBaseURL(t *testing.T) {
 	tests := []struct {
 		name     string

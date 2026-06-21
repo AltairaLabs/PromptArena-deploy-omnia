@@ -74,6 +74,11 @@ deploy:
       sharedToken:
         secretRef: agent-shared-token
         trustEndUserHeader: true
+    memory:
+      enabled: true
+      retrieval:
+        strategy: semantic
+        limit: 10
     labels:
       team: platform
       environment: production
@@ -245,6 +250,29 @@ externalAuth:
 
 At least **one** validator is required to serve external traffic. Any `Secret` referenced by `sharedToken.secretRef` (and the API-key Secrets) must already exist in the workspace — the adapter does not pre-flight them at plan time. The omnia controller validates Secret existence and fetches the OIDC discovery document at reconcile time.
 
+### `memory` (optional)
+
+Cross-session memory / RAG for the deployed agent, projected onto the AgentRuntime's `spec.memory`. It lets the agent retain and recall information across sessions. The adapter emits only the fields you set; omitted sub-blocks fall back to CRD defaults.
+
+```yaml
+memory:
+  enabled: true
+  retrieval:
+    strategy: semantic
+    limit: 10
+    accessFilter:
+      denyCEL: "user.tier == 'free'"
+```
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `enabled` | boolean | Turn cross-session memory on. Defaults to `false`. Always emitted to the CRD. |
+| `retrieval` | object | `strategy` (`keyword`/`semantic`/`graph`/`composite`), `limit` (1–50), and `accessFilter.denyCEL` (a CEL deny expression). |
+
+:::note
+Embedding for semantic memory is configured at the **workspace** level (the workspace service group's memory-api uses a configured embedding `Provider`), not per agent — there is no per-agent embedding setting here.
+:::
+
 ### `runtime` (optional)
 
 Resource sizing and autoscaling for AgentRuntime CRDs.
@@ -321,5 +349,6 @@ The adapter validates the configuration before any operation. Validation checks:
 - Each `skills` binding's `source` matches the SkillSource pattern; `skillsConfig` selector/`maxActive` are valid
 - `runtime.replicas` is >= 1 and any `runtime.autoscaling` values are within range (if runtime is specified)
 - If `externalAuth` is specified, each configured validator is structurally valid (`sharedToken.secretRef` non-empty, `apiKeys.defaultRole` a valid role, `oidc.issuer`/`oidc.audience` non-empty). Secret existence and OIDC discovery are checked by the controller at reconcile time, not at plan time.
+- If `memory` is specified, it is structurally valid: `retrieval.strategy` (if set) is valid; `retrieval.limit` (if set) is between 1 and 50.
 
 Validation errors are returned as a list of human-readable messages.

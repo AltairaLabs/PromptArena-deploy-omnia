@@ -20,6 +20,7 @@ const (
 	keyMetadata = "metadata"
 	keyName     = "name"
 	keyType     = "type"
+	keyEnabled  = "enabled"
 )
 
 // buildPromptPackRequest builds the JSON body for creating/updating a PromptPack.
@@ -133,6 +134,10 @@ func buildAgentRuntimeRequest(
 		spec["externalAuth"] = ea
 	}
 
+	if m := buildMemorySpec(cfg.Memory); m != nil {
+		spec["memory"] = m
+	}
+
 	req := map[string]interface{}{
 		keyMetadata: map[string]interface{}{
 			keyName:   sanitizeName(agentName),
@@ -188,7 +193,7 @@ func buildAutoscalingSpec(a *AutoscalingConfig) map[string]interface{} {
 	if a == nil {
 		return nil
 	}
-	as := map[string]interface{}{"enabled": a.Enabled}
+	as := map[string]interface{}{keyEnabled: a.Enabled}
 	if a.Type != "" {
 		as["type"] = a.Type
 	}
@@ -347,6 +352,49 @@ func addStr(m map[string]interface{}, key, v string) {
 	if v != "" {
 		m[key] = v
 	}
+}
+
+// buildMemorySpec maps the adapter's memory config to spec.memory, a faithful
+// passthrough that omits any unset/empty sub-block. enabled is always emitted
+// (it is the on/off switch). Returns nil when nothing is configured.
+func buildMemorySpec(m *MemoryConfig) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := map[string]interface{}{keyEnabled: m.Enabled}
+	if rv := buildMemoryRetrievalSpec(m.Retrieval); rv != nil {
+		out["retrieval"] = rv
+	}
+	return out
+}
+
+// buildMemoryRetrievalSpec maps the retrieval block (strategy, limit, and the
+// optional accessFilter), emitting only set fields. Returns nil when empty.
+func buildMemoryRetrievalSpec(r *MemoryRetrievalConfig) map[string]interface{} {
+	if r == nil {
+		return nil
+	}
+	out := map[string]interface{}{}
+	addStr(out, "strategy", r.Strategy)
+	if r.Limit != nil {
+		out["limit"] = *r.Limit
+	}
+	if af := buildMemoryAccessFilterSpec(r.AccessFilter); af != nil {
+		out["accessFilter"] = af
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// buildMemoryAccessFilterSpec maps the optional accessFilter. Returns nil when
+// the block has no content.
+func buildMemoryAccessFilterSpec(af *MemoryAccessFilterConfig) map[string]interface{} {
+	if af == nil || af.DenyCEL == "" {
+		return nil
+	}
+	return map[string]interface{}{"denyCEL": af.DenyCEL}
 }
 
 // buildToolRegistryRequest builds the JSON body for creating/updating a
