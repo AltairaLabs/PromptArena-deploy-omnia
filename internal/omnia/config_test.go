@@ -1,6 +1,7 @@
 package omnia
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -957,6 +958,66 @@ func TestParseConfig_WithSkills(t *testing.T) {
 	}
 	if cfg.SkillsConfig.Selector != skillSelectorEmbedding {
 		t.Errorf("SkillsConfig.Selector = %q, want %q", cfg.SkillsConfig.Selector, skillSelectorEmbedding)
+	}
+}
+
+func TestSkillBindingUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    SkillBinding
+		wantErr bool
+	}{
+		{
+			name: "bare string shorthand",
+			raw:  `"anthropic-skills"`,
+			want: SkillBinding{Source: "anthropic-skills"},
+		},
+		{
+			name: "full object form",
+			raw:  `{"source":"company-skills","include":["refund-policy"],"mountAs":"support"}`,
+			want: SkillBinding{Source: "company-skills", Include: []string{"refund-policy"}, MountAs: "support"},
+		},
+		{
+			name:    "neither string nor object",
+			raw:     `123`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got SkillBinding
+			err := json.Unmarshal([]byte(tt.raw), &got)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Source != tt.want.Source || got.MountAs != tt.want.MountAs ||
+				len(got.Include) != len(tt.want.Include) {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestConfigUnmarshalSkillsShorthand proves the bare-string shorthand survives a
+// full Config unmarshal — the path the Omnia dashboard's exported profile takes.
+func TestConfigUnmarshalSkillsShorthand(t *testing.T) {
+	raw := `{"api_endpoint":"https://x","workspace":"demo",` +
+		`"providers":[{"name":"default","ref":"p","role":"llm"}],` +
+		`"skills":["anthropic-skills"]}`
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if len(cfg.Skills) != 1 || cfg.Skills[0].Source != "anthropic-skills" {
+		t.Fatalf("skills = %+v, want [{Source:anthropic-skills}]", cfg.Skills)
 	}
 }
 

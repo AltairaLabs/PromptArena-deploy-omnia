@@ -3,6 +3,7 @@ package omnia
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -257,8 +258,9 @@ func TestHTTPClient_ValidateSkillSource_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing skill source")
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected not-found error, got: %v", err)
+	var he *HTTPError
+	if !errors.As(err, &he) || he.StatusCode != http.StatusNotFound {
+		t.Errorf("expected typed *HTTPError with status 404, got: %v", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package omnia
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,6 +12,19 @@ import (
 	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
+
+// describeRefValidationError renders a CRD-reference validation failure. A
+// genuine 404 keeps the familiar "<kind> <name> not found in workspace"
+// wording; any other failure (notably a 401/403 where the token lacks
+// read permission on the resource) surfaces the underlying error — including
+// its remediation hint — instead of being mislabeled as "not found".
+func describeRefValidationError(kind, name string, err error) string {
+	var he *HTTPError
+	if errors.As(err, &he) && he.StatusCode == httpStatusNotFound {
+		return fmt.Sprintf("%s %q not found in workspace", kind, name)
+	}
+	return fmt.Sprintf("%s %q: %v", kind, name, err)
+}
 
 // Plan generates a deployment plan for the given pack and config.
 func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.PlanResponse, error) {
@@ -189,7 +203,7 @@ func (p *Provider) validateProviders(ctx context.Context, cfg *Config) error {
 		seen[b.Ref] = true
 
 		if err := client.ValidateProvider(ctx, b.Ref); err != nil {
-			errs = append(errs, fmt.Sprintf("provider %q not found in workspace", b.Ref))
+			errs = append(errs, describeRefValidationError("provider", b.Ref, err))
 		}
 	}
 

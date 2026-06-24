@@ -123,6 +123,31 @@ type SkillBinding struct {
 	MountAs string   `json:"mountAs,omitempty"`
 }
 
+// UnmarshalJSON accepts BOTH skill-entry shapes, mirroring Providers:
+//   - the bare-string shorthand: "anthropic-skills" — the SkillSource name,
+//     with no include filter or mountAs rename. This is what the Omnia
+//     dashboard emits in an exported deploy profile.
+//   - the full object form: {"source":..,"include":..,"mountAs":..}.
+func (s *SkillBinding) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var source string
+		if err := json.Unmarshal(trimmed, &source); err != nil {
+			return fmt.Errorf("skill: invalid string form: %w", err)
+		}
+		s.Source = source
+		return nil
+	}
+	// Alias to avoid recursing into this method on the object form.
+	type skillBindingObject SkillBinding
+	var obj skillBindingObject
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		return fmt.Errorf("skill: invalid object form: %w", err)
+	}
+	*s = SkillBinding(obj)
+	return nil
+}
+
 // SkillsConfig is the deploy-config skillsConfig block. It maps faithfully to
 // the PromptPack spec.skillsConfig: maxActive caps concurrently-active skills;
 // selector chooses the activation strategy.
@@ -299,24 +324,33 @@ const configSchema = `{
     },
     "skills": {
       "type": "array",
-      "description": "Skill bindings for the PromptPack spec.skills[]. Each references a SkillSource. Optional.",
+      "description": "Skill bindings: each item is a bare SkillSource name or a {source,include,mountAs} object.",
       "items": {
-        "type": "object",
-        "required": ["source"],
-        "properties": {
-          "source": {
+        "oneOf": [
+          {
             "type": "string",
             "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
-            "description": "SkillSource CRD name"
+            "description": "SkillSource CRD name (shorthand for {source: <name>})"
           },
-          "include": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Skill names to include from the source (all when omitted)"
-          },
-          "mountAs": { "type": "string", "description": "Rename the mounted skill set" }
-        },
-        "additionalProperties": false
+          {
+            "type": "object",
+            "required": ["source"],
+            "properties": {
+              "source": {
+                "type": "string",
+                "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+                "description": "SkillSource CRD name"
+              },
+              "include": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Skill names to include from the source (all when omitted)"
+              },
+              "mountAs": { "type": "string", "description": "Rename the mounted skill set" }
+            },
+            "additionalProperties": false
+          }
+        ]
       }
     },
     "skillsConfig": {

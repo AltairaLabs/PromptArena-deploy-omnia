@@ -293,6 +293,30 @@ func TestPlan_SkipsSkillValidationOnDryRun(t *testing.T) {
 	}
 }
 
+func TestDescribeRefValidationError(t *testing.T) {
+	notFound := &HTTPError{StatusCode: 404, Category: ErrCategoryNotFound}
+	forbidden := &HTTPError{
+		StatusCode:  403,
+		Category:    ErrCategoryPermission,
+		Remediation: "verify the API token has sufficient permissions for the workspace",
+	}
+
+	// A genuine 404 keeps the familiar wording.
+	msg := describeRefValidationError("provider", "ollama", notFound)
+	if !strings.Contains(msg, "not found in workspace") {
+		t.Errorf("404 should read as not found, got: %q", msg)
+	}
+
+	// A 403 must NOT be mislabeled as not-found; it surfaces the real cause + hint.
+	msg = describeRefValidationError("provider", "ollama", forbidden)
+	if strings.Contains(msg, "not found in workspace") {
+		t.Errorf("403 must not be reported as not found, got: %q", msg)
+	}
+	if !strings.Contains(msg, "403") || !strings.Contains(msg, "permissions") {
+		t.Errorf("403 should surface status and remediation, got: %q", msg)
+	}
+}
+
 func TestBuildSummary(t *testing.T) {
 	changes := []deploy.ResourceChange{
 		{Action: deploy.ActionCreate},
