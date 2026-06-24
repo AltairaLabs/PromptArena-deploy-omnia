@@ -64,8 +64,9 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	summary := buildSummary(changes)
 
 	return &deploy.PlanResponse{
-		Changes: changes,
-		Summary: summary,
+		Changes:  changes,
+		Summary:  summary,
+		Warnings: providerWarnings(cfg.Providers),
 	}, nil
 }
 

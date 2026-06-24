@@ -775,6 +775,36 @@ func validateProviderBindings(bindings Providers) []string {
 	return errs
 }
 
+// defaultProviderName is the logical binding name the omnia runtime treats as
+// the primary provider (see defaultProviderIndex in the omnia runtime).
+const defaultProviderName = "default"
+
+// providerWarnings returns non-blocking advisories about the provider bindings.
+// When no binding is named "default", the runtime falls back to the
+// lexicographically-first binding as the primary — which is rarely deliberate —
+// so we warn and name the exact binding the runtime would pick, mirroring
+// defaultProviderIndex in the omnia runtime.
+func providerWarnings(bindings Providers) []string {
+	if len(bindings) == 0 {
+		return nil
+	}
+	first := bindings[0]
+	for _, b := range bindings {
+		if b.Name == defaultProviderName {
+			return nil
+		}
+		if b.Name < first.Name {
+			first = b
+		}
+	}
+	return []string{fmt.Sprintf(
+		"no provider binding is named %q — the runtime will use the "+
+			"alphabetically-first binding (%q → ref %q) as the primary. "+
+			"Set name: default on the binding you intend as primary to choose deliberately.",
+		defaultProviderName, first.Name, first.Ref,
+	)}
+}
+
 // validateSkills checks the optional skills block and skillsConfig. Skills are
 // optional (zero is fine). Each binding's source must be non-empty and match
 // the SkillSource name pattern. If skillsConfig is set, the selector (when
