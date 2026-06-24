@@ -1021,6 +1021,39 @@ func TestConfigUnmarshalSkillsShorthand(t *testing.T) {
 	}
 }
 
+func TestProviderWarnings(t *testing.T) {
+	t.Run("no bindings: no warning", func(t *testing.T) {
+		if w := providerWarnings(nil); w != nil {
+			t.Errorf("want nil, got %v", w)
+		}
+	})
+
+	t.Run("a default binding present: no warning", func(t *testing.T) {
+		w := providerWarnings(Providers{
+			{Name: "ollama", Ref: "ollama", Role: roleLLM},
+			{Name: "default", Ref: "rag-hero-candidate", Role: roleLLM},
+		})
+		if w != nil {
+			t.Errorf("want nil, got %v", w)
+		}
+	})
+
+	t.Run("no default: warns naming the lexicographically-first binding", func(t *testing.T) {
+		w := providerWarnings(Providers{
+			{Name: "rag-hero-candidate", Ref: "rag-hero-candidate", Role: roleLLM},
+			{Name: "ollama", Ref: "ollama", Role: roleLLM},
+			{Name: "ollama-composition", Ref: "ollama-composition", Role: roleLLM},
+		})
+		if len(w) != 1 {
+			t.Fatalf("want 1 warning, got %d: %v", len(w), w)
+		}
+		// "ollama" sorts first; the warning must name it (and its ref).
+		if !strings.Contains(w[0], `"ollama"`) || !strings.Contains(w[0], "default") {
+			t.Errorf("warning should name the fallback 'ollama' and mention default, got: %q", w[0])
+		}
+	})
+}
+
 func TestValidateSkills(t *testing.T) {
 	maxActiveZero := 0
 	maxActiveOK := 2

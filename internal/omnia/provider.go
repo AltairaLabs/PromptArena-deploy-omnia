@@ -44,8 +44,9 @@ func (p *Provider) ValidateConfig(
 
 	errs := cfg.validate()
 	return &deploy.ValidateResponse{
-		Valid:  len(errs) == 0,
-		Errors: errs,
+		Valid:    len(errs) == 0,
+		Errors:   errs,
+		Warnings: providerWarnings(cfg.Providers),
 	}, nil
 }
 
