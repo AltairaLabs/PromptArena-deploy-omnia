@@ -5,6 +5,17 @@ description: All configuration options for the Omnia deploy adapter
 
 The Omnia adapter is configured through the `deploy.config` section of your arena configuration file. This guide covers every available option.
 
+:::tip[Prefer the `OMNIA_API_TOKEN` environment variable for the token]
+The recommended way to supply the API token is the **`OMNIA_API_TOKEN`** environment variable — leave `api_token` out of the config entirely so the secret never lands in a committed file:
+
+```bash
+export OMNIA_API_TOKEN="omnia_sk_…"
+promptarena deploy plan
+```
+
+The CLI passes the variable through to the adapter subprocess, so nothing else is needed. A dashboard-exported deploy profile includes `api_token` inline for convenience; **delete that line and set the env var instead** for anything you commit or share. The examples below show `api_token` only to document the field.
+:::
+
 ## Minimal configuration
 
 ```yaml
@@ -25,7 +36,7 @@ deploy:
   config:
     api_endpoint: "https://omnia.example.com"
     workspace: "my-workspace"
-    api_token: "optional-inline-token"
+    api_token: "optional-inline-token"   # prefer the OMNIA_API_TOKEN env var instead
     providers:
       - name: default
         ref: claude-sonnet-4-20250514
