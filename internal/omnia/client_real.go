@@ -105,7 +105,10 @@ func (c *httpClient) ValidateProvider(ctx context.Context, name string) error {
 	}
 	defer resp.Body.Close() //nolint:errcheck // response body close
 	if resp.StatusCode >= http.StatusBadRequest {
-		return fmt.Errorf("provider %q not found (HTTP %d)", name, resp.StatusCode)
+		// Return the typed *HTTPError so callers can tell a genuine 404
+		// (provider absent) from a 401/403 (token lacks provider-read
+		// permission) instead of reporting every failure as "not found".
+		return c.readError(resp)
 	}
 	return nil
 }
@@ -126,7 +129,9 @@ func (c *httpClient) ValidateSkillSource(ctx context.Context, name string) error
 	}
 	defer resp.Body.Close() //nolint:errcheck // response body close
 	if resp.StatusCode >= http.StatusBadRequest {
-		return fmt.Errorf("skillsource %q not found (HTTP %d)", name, resp.StatusCode)
+		// Typed *HTTPError so a 401/403 (token lacks skill-read permission)
+		// is distinguishable from a genuine 404 (SkillSource absent).
+		return c.readError(resp)
 	}
 	var result ResourceResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
