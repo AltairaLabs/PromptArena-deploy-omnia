@@ -556,6 +556,11 @@ type Config struct {
 	// PackJSON holds the raw pack JSON content. Populated at apply-time.
 	// NOT serialized — transient computed field.
 	PackJSON string `json:"-"`
+
+	// workspaceNormalizedFrom records the original workspace value when it was
+	// case-normalized to a slug (e.g. "Default" → "default"), so the change can
+	// be surfaced as a warning. NOT serialized.
+	workspaceNormalizedFrom string
 }
 
 // RuntimeConfig holds optional resource sizing for agent runtimes.
@@ -696,7 +701,36 @@ func parseConfig(raw string) (*Config, error) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return nil, fmt.Errorf("invalid config JSON: %w", err)
 	}
+	cfg.normalizeWorkspace()
 	return &cfg, nil
+}
+
+// normalizeWorkspace lowercases the workspace name so the common "Default"
+// (display name) vs "default" (slug) case slip just works: workspace slugs are
+// always lowercase k8s names, so an uppercase input has exactly one valid
+// reading. It records the original for a transparency warning. A name that is
+// still not a valid slug once lowercased (e.g. it contains spaces) is left
+// untouched for validate() to reject with a clear message.
+func (c *Config) normalizeWorkspace() {
+	if c.Workspace == "" {
+		return
+	}
+	lower := strings.ToLower(c.Workspace)
+	if lower != c.Workspace && workspaceNamePattern.MatchString(lower) {
+		c.workspaceNormalizedFrom = c.Workspace
+		c.Workspace = lower
+	}
+}
+
+// normalizationWarnings returns a transparency advisory when the workspace name
+// was case-normalized to its slug, so the user can clean up the source config.
+func (c *Config) normalizationWarnings() []string {
+	if c.workspaceNormalizedFrom == "" {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"workspace %q normalized to %q — workspace names are lowercase slugs, "+
+			"not display names", c.workspaceNormalizedFrom, c.Workspace)}
 }
 
 // resolveToken returns the API token from config or the environment variable.

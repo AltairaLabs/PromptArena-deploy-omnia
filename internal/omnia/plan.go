@@ -63,7 +63,8 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	changes := diffResources(desired, prior)
 	summary := buildSummary(changes)
 
-	warnings := providerWarnings(cfg.Providers)
+	warnings := cfg.normalizationWarnings()
+	warnings = append(warnings, providerWarnings(cfg.Providers)...)
 	warnings = append(warnings, toolCoverageWarnings(pack, cfg)...)
 
 	return &deploy.PlanResponse{

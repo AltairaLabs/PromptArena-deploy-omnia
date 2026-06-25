@@ -43,10 +43,12 @@ func (p *Provider) ValidateConfig(
 	}
 
 	errs := cfg.validate()
+	warnings := cfg.normalizationWarnings()
+	warnings = append(warnings, providerWarnings(cfg.Providers)...)
 	return &deploy.ValidateResponse{
 		Valid:    len(errs) == 0,
 		Errors:   errs,
-		Warnings: providerWarnings(cfg.Providers),
+		Warnings: warnings,
 	}, nil
 }
 

@@ -116,6 +116,34 @@ func TestParseConfig_InvalidProvidersShape(t *testing.T) {
 	}
 }
 
+func TestParseConfig_NormalizesWorkspaceCase(t *testing.T) {
+	cfg, err := parseConfig(`{"api_endpoint":"https://x","workspace":"Default",` +
+		`"providers":{"default":"claude-prod"},"api_token":"t"}`)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.Workspace != "default" {
+		t.Errorf("workspace = %q, want normalized %q", cfg.Workspace, "default")
+	}
+	w := cfg.normalizationWarnings()
+	if len(w) != 1 || !strings.Contains(w[0], `"Default"`) || !strings.Contains(w[0], `"default"`) {
+		t.Errorf("expected a normalization warning naming both forms, got %v", w)
+	}
+
+	// A name that can't be salvaged by lowercasing is left untouched (validate rejects it).
+	bad, err := parseConfig(`{"api_endpoint":"https://x","workspace":"demo workspace",` +
+		`"providers":{"default":"claude-prod"},"api_token":"t"}`)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if bad.Workspace != "demo workspace" {
+		t.Errorf("un-normalizable workspace mutated to %q", bad.Workspace)
+	}
+	if bad.normalizationWarnings() != nil {
+		t.Errorf("expected no normalization warning for un-normalizable name")
+	}
+}
+
 func TestValidateConfig_WorkspaceSlug(t *testing.T) {
 	mk := func(ws string) *Config {
 		return &Config{
@@ -125,9 +153,9 @@ func TestValidateConfig_WorkspaceSlug(t *testing.T) {
 		}
 	}
 
-	t.Run("display name (uppercase) rejected", func(t *testing.T) {
+	t.Run("un-normalizable name rejected", func(t *testing.T) {
 		t.Setenv("OMNIA_API_TOKEN", "tok")
-		errs := mk("Default").validate()
+		errs := mk("demo workspace").validate()
 		found := false
 		for _, e := range errs {
 			if strings.Contains(e, "not a valid name") {
