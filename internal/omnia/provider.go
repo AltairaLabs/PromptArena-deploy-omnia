@@ -25,7 +25,7 @@ func (p *Provider) GetProviderInfo(_ context.Context) (*deploy.ProviderInfo, err
 	return &deploy.ProviderInfo{
 		Name:         "omnia",
 		Version:      Version,
-		Capabilities: []string{"plan", "apply", "destroy", "status"},
+		Capabilities: []string{"plan", "apply", "destroy", "status", deploy.LoginCapability},
 		ConfigSchema: configSchema,
 	}, nil
 }
