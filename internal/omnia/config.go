@@ -82,6 +82,11 @@ var validSkillSelectors = map[string]bool{
 // skillSourceNamePattern is the omnia SkillSource name pattern (RFC1123 label).
 var skillSourceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
+// workspaceNamePattern is the Omnia workspace slug (RFC1123 label). The deploy
+// config must use the workspace's lowercase name, not its display name (e.g.
+// "default", not "Default") — the display name 404s at the API.
+var workspaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
 // Memory retrieval strategy constants. They select how recall queries the
 // memory store.
 const (
@@ -722,6 +727,10 @@ func (c *Config) validate() []string {
 
 	if c.Workspace == "" {
 		errs = append(errs, "workspace is required")
+	} else if !workspaceNamePattern.MatchString(c.Workspace) {
+		errs = append(errs, fmt.Sprintf(
+			"workspace %q is not a valid name — use the lowercase workspace slug "+
+				"(e.g. \"default\"), not the display name", c.Workspace))
 	}
 
 	errs = append(errs, validateProviderBindings(c.Providers)...)

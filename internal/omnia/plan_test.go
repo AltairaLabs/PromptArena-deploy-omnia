@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
+	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
 const testPackJSON = `{
@@ -315,6 +316,33 @@ func TestDescribeRefValidationError(t *testing.T) {
 	if !strings.Contains(msg, "403") || !strings.Contains(msg, "permissions") {
 		t.Errorf("403 should surface status and remediation, got: %q", msg)
 	}
+}
+
+func TestToolCoverageWarnings(t *testing.T) {
+	userTools := &prompt.Pack{Tools: map[string]*prompt.PackTool{"refund": {}, "lookup": {}}}
+
+	t.Run("declared tools, no handlers warns", func(t *testing.T) {
+		w := toolCoverageWarnings(userTools, &Config{})
+		if len(w) != 1 || !strings.Contains(w[0], "lookup, refund") {
+			t.Errorf("want one warning naming [lookup, refund], got %v", w)
+		}
+	})
+	t.Run("handlers present, no warning", func(t *testing.T) {
+		if w := toolCoverageWarnings(userTools, &Config{Tools: []ToolHandler{{}}}); w != nil {
+			t.Errorf("want nil, got %v", w)
+		}
+	})
+	t.Run("no declared tools, no warning", func(t *testing.T) {
+		if w := toolCoverageWarnings(&prompt.Pack{}, &Config{}); w != nil {
+			t.Errorf("want nil, got %v", w)
+		}
+	})
+	t.Run("system tools only, no warning", func(t *testing.T) {
+		sys := &prompt.Pack{Tools: map[string]*prompt.PackTool{"image__generate": {}}}
+		if w := toolCoverageWarnings(sys, &Config{}); w != nil {
+			t.Errorf("want nil, got %v", w)
+		}
+	})
 }
 
 func TestBuildSummary(t *testing.T) {

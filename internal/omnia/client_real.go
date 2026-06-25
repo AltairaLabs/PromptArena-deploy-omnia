@@ -209,9 +209,12 @@ func (c *httpClient) newRequest(
 // classification (newDeployError) does not have to re-guess from the message.
 func (c *httpClient) readError(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
-	category, hint := classifyHTTPError(resp.StatusCode)
+	// The dashboard re-wraps non-404 k8s errors (409/422) as a bodyless-looking
+	// 500; recover the real code so the classification (and "retry" hint) is right.
+	code := effectiveStatusCode(resp.StatusCode, string(body))
+	category, hint := classifyHTTPError(code)
 	return &HTTPError{
-		StatusCode:  resp.StatusCode,
+		StatusCode:  code,
 		Body:        string(body),
 		Category:    category,
 		Remediation: hint,

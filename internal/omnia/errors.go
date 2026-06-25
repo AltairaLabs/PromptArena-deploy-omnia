@@ -3,6 +3,8 @@ package omnia
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -74,11 +76,12 @@ func (e *HTTPError) Error() string {
 
 // HTTP status code ranges for error classification.
 const (
-	httpStatusUnauthorized = 401
-	httpStatusForbidden    = 403
-	httpStatusNotFound     = 404
-	httpStatusConflict     = 409
-	httpStatusServerError  = 500
+	httpStatusUnauthorized  = 401
+	httpStatusForbidden     = 403
+	httpStatusNotFound      = 404
+	httpStatusConflict      = 409
+	httpStatusUnprocessable = 422
+	httpStatusServerError   = 500
 )
 
 // classifyHTTPError maps an HTTP status code to an error category and remediation hint.
@@ -90,6 +93,8 @@ func classifyHTTPError(statusCode int) (category, remediation string) {
 		return ErrCategoryNotFound, "verify the resource exists and the workspace/name are correct"
 	case statusCode == httpStatusConflict:
 		return ErrCategoryConflict, "resource already exists; consider updating instead of creating"
+	case statusCode == httpStatusUnprocessable:
+		return ErrCategoryConfiguration, "the resource was rejected as invalid — check required fields and config values"
 	case statusCode >= httpStatusServerError:
 		return ErrCategoryNetwork, "Omnia API server error; retry after a short wait"
 	default:
@@ -186,6 +191,33 @@ func IsDeployError(err error) *DeployError {
 		return de
 	}
 	return nil
+}
+
+// wrappedStatusCodeRe extracts a Kubernetes API status code that the Omnia
+// dashboard embedded inside a 5xx response. The dashboard currently re-wraps
+// non-404 k8s errors (409 AlreadyExists, 422 Invalid) as a generic 500, carrying
+// the real code in the body — both in its own "HTTP-Code: <n>" framing and the
+// nested Status object's "code" field. We anchor on those prefixes so arbitrary
+// numbers in the body (content-length, IDs) never match.
+var wrappedStatusCodeRe = regexp.MustCompile(`(?:HTTP-Code:\s*|\\*"code\\*"\s*:\s*)(\d{3})`)
+
+// effectiveStatusCode reclassifies a 5xx response whose body reveals a more
+// specific 4xx Kubernetes status, so a non-retryable 409/422 stops being
+// reported as a transient "server error, retry" (the outer 500). Genuine 5xx
+// errors and any non-wrapped body are returned unchanged.
+func effectiveStatusCode(status int, body string) int {
+	if status < httpStatusServerError {
+		return status
+	}
+	m := wrappedStatusCodeRe.FindStringSubmatch(body)
+	if m == nil {
+		return status
+	}
+	code, err := strconv.Atoi(m[1])
+	if err != nil || code < 400 || code >= httpStatusServerError {
+		return status
+	}
+	return code
 }
 
 // combineErrors joins two errors, preferring the first non-nil.

@@ -38,7 +38,7 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		return nil, fmt.Errorf("omnia: invalid deploy config: %w", err)
 	}
 	if errs := cfg.validate(); len(errs) > 0 {
-		return nil, fmt.Errorf("omnia: config validation failed: %s", errs[0])
+		return nil, fmt.Errorf("omnia: config validation failed: %s", strings.Join(errs, "; "))
 	}
 
 	// Validate that referenced providers and skill sources exist (skip in dry-run mode).
@@ -63,11 +63,40 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	changes := diffResources(desired, prior)
 	summary := buildSummary(changes)
 
+	warnings := providerWarnings(cfg.Providers)
+	warnings = append(warnings, toolCoverageWarnings(pack, cfg)...)
+
 	return &deploy.PlanResponse{
 		Changes:  changes,
 		Summary:  summary,
-		Warnings: providerWarnings(cfg.Providers),
+		Warnings: warnings,
 	}, nil
+}
+
+// toolCoverageWarnings warns when the pack declares tool(s) but the deploy
+// config provides no handlers: the adapter then creates no ToolRegistry, so
+// those tools have no execution wiring and silently won't run. System-namespaced
+// tools (names containing "__", e.g. image__generate) are runtime-provided and
+// need no handler, so they're excluded.
+func toolCoverageWarnings(pack *prompt.Pack, cfg *Config) []string {
+	if len(cfg.Tools) > 0 || len(pack.Tools) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(pack.Tools))
+	for name := range pack.Tools {
+		if !strings.Contains(name, "__") {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	return []string{fmt.Sprintf(
+		"pack declares tool(s) [%s] but deploy.config.tools has no handlers — no "+
+			"ToolRegistry will be created and these tools won't execute. Add a "+
+			"tools: block with handlers, or remove them from the pack.",
+		strings.Join(names, ", "))}
 }
 
 // generateDesiredResources builds the list of desired Omnia resources from the
