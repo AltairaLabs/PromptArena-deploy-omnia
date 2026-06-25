@@ -120,7 +120,13 @@ func (s *simulatedClient) GetResource(
 	key := simKey(resType, name)
 	res, ok := s.resources[key]
 	if !ok {
-		return nil, fmt.Errorf("resource %s not found", key)
+		// Mirror the real HTTP client: a missing resource is a typed 404 so
+		// callers can distinguish "does not exist" from a transport failure.
+		return nil, &HTTPError{
+			StatusCode: httpStatusNotFound,
+			Body:       fmt.Sprintf("resource %s not found", key),
+			Category:   ErrCategoryNotFound,
+		}
 	}
 	return res, nil
 }

@@ -35,6 +35,7 @@ const (
 
 // applyContext holds parsed inputs for the Apply method.
 type applyContext struct {
+	provider *Provider
 	pack     *prompt.Pack
 	cfg      *Config
 	reporter *adaptersdk.ProgressReporter
@@ -90,6 +91,7 @@ func (p *Provider) Apply(
 	cfg.resolvedRegistryName = binding.RegistryName
 
 	ac := &applyContext{
+		provider: p,
 		pack:     pack,
 		cfg:      cfg,
 		reporter: adaptersdk.NewProgressReporter(callback),
@@ -130,13 +132,26 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	applyErr = combineErrors(applyErr, err)
 
 	// Phase 1: ToolRegistry — created only in create mode (same decision plan
-	// reached). Bind/none modes reference an existing registry (or none).
+	// reached). Bind/none modes reference an existing registry (or none). The
+	// live registry's handlers are fetched first so the merge preserves an
+	// operator's completed handlers verbatim; a non-404 fetch failure fails the
+	// phase (we must not silently clobber operator edits we couldn't read).
 	if ac.binding.Mode == toolModeCreate {
-		res, err = applyResourcePhase(ctx, ac, stepToolRegistry, ResTypeToolRegistry,
-			ac.binding.RegistryName,
-			func() (json.RawMessage, error) { return buildToolRegistryRequest(ac.pack, ac.cfg) })
-		resources = append(resources, res...)
-		applyErr = combineErrors(applyErr, err)
+		existing, ferr := ac.provider.currentRegistryHandlers(ctx, ac.client, ac.pack)
+		if ferr != nil {
+			deployErr := newDeployError("read", ResTypeToolRegistry, ac.binding.RegistryName, ferr)
+			_ = ac.reporter.Error(deployErr)
+			resources = append(resources, ResourceState{
+				Type: ResTypeToolRegistry, Name: ac.binding.RegistryName, Status: ResStatusFailed,
+			})
+			applyErr = combineErrors(applyErr, deployErr)
+		} else {
+			res, err = applyResourcePhase(ctx, ac, stepToolRegistry, ResTypeToolRegistry,
+				ac.binding.RegistryName,
+				func() (json.RawMessage, error) { return buildToolRegistryRequest(ac.pack, ac.cfg, existing) })
+			resources = append(resources, res...)
+			applyErr = combineErrors(applyErr, err)
+		}
 	}
 
 	// Phase 2: AgentPolicy (if pack has tool policy)

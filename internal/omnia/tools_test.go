@@ -80,7 +80,26 @@ func TestResolveToolBinding_Discover_DynamicCandidate(t *testing.T) {
 
 // --- Create mode -----------------------------------------------------------
 
-func TestResolveToolBinding_CreateMode_StubWarning(t *testing.T) {
+// seedToolRegistry stores a <pack>-tools ToolRegistry whose spec.handlers are
+// the given maps, carrying the adapter's managed-by + pack-id labels so adopt
+// reconciles it as prior state (apply then UPDATEs rather than CREATEs). The
+// merge reads these handlers back and preserves operator-owned ones.
+func seedToolRegistry(sim *simulatedClient, packID string, handlers []map[string]interface{}) {
+	spec, _ := json.Marshal(map[string]interface{}{"handlers": handlers})
+	sim.mu.Lock()
+	defer sim.mu.Unlock()
+	name := sanitizeName(packID + "-tools")
+	sim.resources[simKey(ResTypeToolRegistry, name)] = &ResourceResponse{
+		Kind: ResTypeToolRegistry,
+		Metadata: ResourceMetadata{
+			Name: name, UID: "uid-" + name, ResourceVersion: "1",
+			Labels: map[string]string{LabelManagedBy: managedByValue, LabelPackID: packID},
+		},
+		Spec: spec,
+	}
+}
+
+func TestResolveToolBinding_CreateMode_PlaceholderWarning(t *testing.T) {
 	pack := resolverPack("issue_refund", "lookup_order")
 	cfg := &Config{
 		Tools: []ToolHandler{{
@@ -88,7 +107,7 @@ func TestResolveToolBinding_CreateMode_StubWarning(t *testing.T) {
 			Tool: &HandlerTool{Name: "issue_refund"},
 		}},
 	}
-	sim := newSimulatedClient()
+	sim := newSimulatedClient() // empty store → registry 404s → placeholder path
 	binding, warnings, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -96,10 +115,10 @@ func TestResolveToolBinding_CreateMode_StubWarning(t *testing.T) {
 	if binding.Mode != toolModeCreate || binding.RegistryName != "test-pack-tools" {
 		t.Fatalf("want create/test-pack-tools, got %+v", binding)
 	}
-	// lookup_order has no handler → exactly one stub warning naming it.
+	// lookup_order has no handler and no existing → one created-placeholder warning.
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "lookup_order") ||
-		!strings.Contains(warnings[0], "completed in Omnia") {
-		t.Errorf("want one stub warning naming lookup_order, got %v", warnings)
+		!strings.Contains(warnings[0], "placeholder handler") {
+		t.Errorf("want one created-placeholder warning naming lookup_order, got %v", warnings)
 	}
 }
 
@@ -111,12 +130,40 @@ func TestResolveToolBinding_CreateMode_AllHandlersNoWarning(t *testing.T) {
 			Tool: &HandlerTool{Name: "issue_refund"},
 		}},
 	}
-	_, warnings, err := resolveToolBinding(context.Background(), resolverProvider(newSimulatedClient()), pack, cfg)
+	sim := newSimulatedClient() // empty store → registry 404s
+	_, warnings, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if warnings != nil {
 		t.Errorf("want no warnings when every tool has a handler, got %v", warnings)
+	}
+}
+
+func TestResolveToolBinding_CreateMode_PreservesOperatorHandler(t *testing.T) {
+	pack := resolverPack("issue_refund", "lookup_order")
+	cfg := &Config{
+		Tools: []ToolHandler{{
+			Name: "issue-refund", Type: handlerTypeHTTP,
+			Tool: &HandlerTool{Name: "issue_refund"},
+		}},
+	}
+	sim := newSimulatedClient()
+	// The operator completed lookup_order's handler in Omnia (real URL). Its
+	// inputSchema matches the pack so only the preserved warning fires (no drift).
+	seedToolRegistry(sim, "test-pack", []map[string]interface{}{{
+		keyName: "lookup-order", keyType: handlerTypeHTTP,
+		"tool": map[string]interface{}{
+			keyName: "lookup_order", "inputSchema": map[string]interface{}{"type": "object"},
+		},
+		"httpConfig": map[string]interface{}{"endpoint": "https://real.example.com/lookup"},
+	}})
+	_, warnings, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "preserved 1 operator-managed") {
+		t.Errorf("want one preserved-handler warning, got %v", warnings)
 	}
 }
 

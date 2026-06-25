@@ -21,6 +21,8 @@ const (
 	keyName     = "name"
 	keyType     = "type"
 	keyEnabled  = "enabled"
+
+	keyHTTPConfig = "httpConfig"
 )
 
 // buildPromptPackRequest builds the JSON body for creating/updating a PromptPack.
@@ -431,14 +433,15 @@ func buildEvalPathSpec(p *EvalPathConfig) map[string]interface{} {
 }
 
 // buildToolRegistryRequest builds the JSON body for creating/updating a
-// ToolRegistry CRD. The handlers are a faithful passthrough of the explicit
-// deploy-config tools block to spec.handlers[], preserving order; the inline
-// pack.Tools schemas reach the runtime via the PromptPack content fold instead.
-func buildToolRegistryRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, error) {
-	handlers := make([]map[string]interface{}, 0, len(cfg.Tools))
-	for i := range cfg.Tools {
-		handlers = append(handlers, buildHandlerEntry(&cfg.Tools[i]))
-	}
+// ToolRegistry CRD. The handlers are the merge of the explicit deploy-config
+// tools block (authoritative) with a handler for every other non-system pack
+// tool — a placeholder the operator completes in Omnia, or the operator's
+// existing handler preserved verbatim. existing is the live registry's handlers
+// (nil when it doesn't exist yet); the merge never clobbers operator edits.
+func buildToolRegistryRequest(
+	pack *prompt.Pack, cfg *Config, existing []map[string]interface{},
+) (json.RawMessage, error) {
+	handlers, _ := mergeRegistryHandlers(pack, cfg, existing)
 
 	req := map[string]interface{}{
 		keyMetadata: map[string]interface{}{
@@ -471,7 +474,7 @@ func buildHandlerEntry(h *ToolHandler) map[string]interface{} {
 		entry["tool"] = tool
 	}
 	addIfPresent(entry, "selector", h.Selector)
-	addIfPresent(entry, "httpConfig", h.HTTPConfig)
+	addIfPresent(entry, keyHTTPConfig, h.HTTPConfig)
 	addIfPresent(entry, "openAPIConfig", h.OpenAPIConfig)
 	addIfPresent(entry, "grpcConfig", h.GRPCConfig)
 	addIfPresent(entry, "mcpConfig", h.MCPConfig)

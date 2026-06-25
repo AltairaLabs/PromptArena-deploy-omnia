@@ -54,7 +54,7 @@ var validHandlerTypes = map[string]bool{
 // handlerConfigField maps each handler type to the JSON name of its
 // type-specific config block, used in validation messages.
 var handlerConfigField = map[string]string{
-	handlerTypeHTTP:    "httpConfig",
+	handlerTypeHTTP:    keyHTTPConfig,
 	handlerTypeOpenAPI: "openAPIConfig",
 	handlerTypeGRPC:    "grpcConfig",
 	handlerTypeMCP:     "mcpConfig",
