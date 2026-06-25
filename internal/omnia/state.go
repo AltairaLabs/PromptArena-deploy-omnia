@@ -10,11 +10,12 @@ const (
 
 // Resource lifecycle status constants used in ResourceState.Status.
 const (
-	ResStatusCreated = "created"
-	ResStatusUpdated = "updated"
-	ResStatusFailed  = "failed"
-	ResStatusPlanned = "planned"
-	ResStatusDeleted = "deleted"
+	ResStatusCreated   = "created"
+	ResStatusUpdated   = "updated"
+	ResStatusFailed    = "failed"
+	ResStatusPlanned   = "planned"
+	ResStatusDeleted   = "deleted"
+	ResStatusUnchanged = "unchanged"
 )
 
 // Health status constants returned by resource checks.

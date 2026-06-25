@@ -38,41 +38,148 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		return nil, fmt.Errorf("omnia: invalid deploy config: %w", err)
 	}
 	if errs := cfg.validate(); len(errs) > 0 {
-		return nil, fmt.Errorf("omnia: config validation failed: %s", errs[0])
+		return nil, fmt.Errorf("omnia: config validation failed: %s", strings.Join(errs, "; "))
 	}
+
+	// Carry the arena source's HTTP methods so create-mode placeholders use the
+	// real method (GET tools stay GET) rather than a hardcoded POST. Degrades to
+	// an empty map — placeholders then keep the POST default.
+	cfg.sourceToolMethods = extractSourceToolMethods(req.ArenaConfig)
 
 	// Validate that referenced providers and skill sources exist (skip in dry-run mode).
+	var providerPhaseWarnings []string
 	if !cfg.DryRun {
-		if err := p.validateProviders(ctx, cfg); err != nil {
-			return nil, err
+		pw, verr := p.validateProviders(ctx, cfg)
+		if verr != nil {
+			return nil, verr
 		}
-		if err := p.validateSkillSources(ctx, cfg); err != nil {
-			return nil, err
-		}
-	}
-
-	var prior *AdapterState
-	if req.PriorState != "" {
-		prior = &AdapterState{}
-		if err := json.Unmarshal([]byte(req.PriorState), prior); err != nil {
-			return nil, fmt.Errorf("omnia: failed to parse prior state: %w", err)
+		providerPhaseWarnings = pw
+		if verr := p.validateSkillSources(ctx, cfg); verr != nil {
+			return nil, verr
 		}
 	}
 
-	desired := generateDesiredResources(pack, cfg)
+	// Resolve the tool-registry binding once. Apply runs the SAME resolution, so
+	// the decision and its warnings are deterministic across plan and apply.
+	binding, toolWarnings, err := p.resolveToolBindingForPhase(ctx, pack, cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.resolvedRegistryName = binding.RegistryName
+
+	prior, perr := p.planPriorState(ctx, pack, cfg, req)
+	if perr != nil {
+		return nil, perr
+	}
+
+	desired := generateDesiredResources(pack, cfg, binding)
 	changes := diffResources(desired, prior)
 	summary := buildSummary(changes)
+
+	warnings := cfg.normalizationWarnings()
+	warnings = append(warnings, providerPhaseWarnings...)
+	warnings = append(warnings, providerWarnings(cfg.Providers)...)
+	warnings = append(warnings, promptWarnings(pack)...)
+	warnings = append(warnings, toolWarnings...)
 
 	return &deploy.PlanResponse{
 		Changes:  changes,
 		Summary:  summary,
-		Warnings: providerWarnings(cfg.Providers),
+		Warnings: warnings,
 	}, nil
 }
 
+// defaultEntryName is the prompt name the Omnia runtime currently hardcodes as
+// the entry point (Omnia#1595 will replace this with the pack's declared entry).
+const defaultEntryName = "default"
+
+// promptWarnings warns when a plain-prompt pack (no workflow, no multi-agent
+// config) has no prompt named "default". The Omnia runtime currently hardcodes
+// the prompt entry to "default" (Omnia#1595), so such a pack deploys healthy but
+// fails its first request — the runtime can't resolve a prompt. Workflow and
+// multi-agent packs declare their own entry (workflow.entry / agents.entry), so
+// they are exempt. Non-blocking, mirroring the no-default-provider guardrail.
+func promptWarnings(pack *prompt.Pack) []string {
+	if pack.Workflow != nil || adaptersdk.IsMultiAgent(pack) {
+		return nil
+	}
+	if len(pack.Prompts) == 0 {
+		return nil
+	}
+	if _, ok := pack.Prompts[defaultEntryName]; ok {
+		return nil
+	}
+	names := make([]string, 0, len(pack.Prompts))
+	for n := range pack.Prompts {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return []string{fmt.Sprintf(
+		"this pack has no prompt named %[1]q (prompts: %[2]s) — the Omnia runtime currently looks "+
+			"for %[1]q and the agent won't resolve its prompt. Name the entry prompt %[1]q, or wait "+
+			"for Omnia#1595 (runtime reads the pack's declared entry).",
+		defaultEntryName, strings.Join(names, ", "))}
+}
+
+// planPriorState resolves the prior state used to diff against. In the non
+// dry-run path it adopts THIS pack's live resources from the cluster (the source
+// of truth), superseding req.PriorState — so the plan shows the REAL
+// create/update/delete vs the cluster, not what a possibly-stale local state
+// file claims. If adoption fails (listing not permitted, transient error) it
+// falls back to parsing req.PriorState — the prior behavior. In dry-run it never
+// calls the API and uses req.PriorState alone.
+func (p *Provider) planPriorState(
+	ctx context.Context, pack *prompt.Pack, cfg *Config, req *deploy.PlanRequest,
+) (*AdapterState, error) {
+	if !cfg.DryRun {
+		adopted, aerr := p.adoptPriorState(ctx, pack, cfg)
+		if aerr == nil {
+			return &AdapterState{Resources: adopted, PackID: pack.ID, Version: pack.Version}, nil
+		}
+		// Fall through to the local state file on adopt failure.
+	}
+	if req.PriorState == "" {
+		return nil, nil
+	}
+	prior := &AdapterState{}
+	if err := json.Unmarshal([]byte(req.PriorState), prior); err != nil {
+		return nil, fmt.Errorf("omnia: failed to parse prior state: %w", err)
+	}
+	return prior, nil
+}
+
+// resolveToolBindingForPhase runs the shared tool resolver, except in dry-run
+// mode where it derives the binding from config alone (no API calls — mirroring
+// how provider/skill validation is skipped in dry-run). The full resolver's
+// discovery and verification need a live workspace, so dry-run reports only what
+// config can state on its own.
+func (p *Provider) resolveToolBindingForPhase(
+	ctx context.Context, pack *prompt.Pack, cfg *Config,
+) (ToolBinding, []string, error) {
+	if cfg.DryRun {
+		return dryRunToolBinding(pack, cfg), nil, nil
+	}
+	return resolveToolBinding(ctx, p, pack, cfg)
+}
+
+// dryRunToolBinding decides the binding from config alone, without listing
+// workspace registries: tools → create, tool_registry_ref → bind, else none.
+func dryRunToolBinding(pack *prompt.Pack, cfg *Config) ToolBinding {
+	switch {
+	case len(cfg.Tools) > 0:
+		return ToolBinding{Mode: toolModeCreate, RegistryName: sanitizeName(pack.ID + "-tools")}
+	case cfg.ToolRegistryRef != "":
+		return ToolBinding{Mode: toolModeBind, RegistryName: cfg.ToolRegistryRef}
+	default:
+		return ToolBinding{Mode: toolModeNone}
+	}
+}
+
 // generateDesiredResources builds the list of desired Omnia resources from the
-// pack and deploy config.
-func generateDesiredResources(pack *prompt.Pack, cfg *Config) []deploy.ResourceChange {
+// pack, deploy config, and the resolved tool binding.
+func generateDesiredResources(
+	pack *prompt.Pack, cfg *Config, binding ToolBinding,
+) []deploy.ResourceChange {
 	// Step 0: PromptPack CRD (dashboard folds pack content into a managed ConfigMap).
 	desired := []deploy.ResourceChange{
 		{
@@ -83,13 +190,17 @@ func generateDesiredResources(pack *prompt.Pack, cfg *Config) []deploy.ResourceC
 		},
 	}
 
-	// Step 1: ToolRegistry (if the deploy config declares tool handlers).
-	if len(cfg.Tools) > 0 {
+	// Step 1: ToolRegistry — created only in create mode (cfg.Tools present).
+	// Bind/none modes reference an existing registry (or none) and create nothing.
+	if binding.Mode == toolModeCreate {
+		configured := len(cfg.Tools)
+		placeholders := countUncoveredPackTools(pack, cfg)
 		desired = append(desired, deploy.ResourceChange{
 			Type:   ResTypeToolRegistry,
-			Name:   sanitizeName(pack.ID + "-tools"),
+			Name:   binding.RegistryName,
 			Action: deploy.ActionCreate,
-			Detail: fmt.Sprintf("Create ToolRegistry with %d handlers", len(cfg.Tools)),
+			Detail: fmt.Sprintf("Create ToolRegistry: %d handlers (%d configured, %d placeholder)",
+				configured+placeholders, configured, placeholders),
 		})
 	}
 
@@ -134,7 +245,14 @@ func diffResources(desired []deploy.ResourceChange, prior *AdapterState) []deplo
 		key := resourceKey(d.Type, d.Name)
 		seen[key] = true
 
-		if _, exists := priorMap[key]; exists {
+		_, exists := priorMap[key]
+		// The ToolRegistry is CREATE-ONLY: once it exists it is operator-owned and
+		// never updated, so an existing one emits no change at all (apply skips it).
+		// Absent → fall through to the normal Create below.
+		if exists && d.Type == ResTypeToolRegistry {
+			continue
+		}
+		if exists {
 			changes = append(changes, deploy.ResourceChange{
 				Type:   d.Type,
 				Name:   d.Name,
@@ -186,15 +304,58 @@ func buildSummary(changes []deploy.ResourceChange) string {
 	return fmt.Sprintf("Plan: %d to create, %d to update, %d to delete", create, update, del)
 }
 
-// validateProviders creates a client and checks that every unique provider
-// referenced in cfg.Providers exists in the Omnia workspace.
-func (p *Provider) validateProviders(ctx context.Context, cfg *Config) error {
+// validateProviders checks that every provider ref in cfg.Providers exists in
+// the Omnia workspace. It prefers a single workspace-provider listing — which
+// validates every ref in one call and lets a miss report what IS available —
+// and falls back to per-ref existence checks if listing isn't permitted.
+func (p *Provider) validateProviders(ctx context.Context, cfg *Config) ([]string, error) {
 	client, err := p.clientFunc(cfg)
 	if err != nil {
-		return fmt.Errorf("omnia: failed to create client for provider validation: %w", err)
+		return nil, fmt.Errorf("omnia: failed to create client for provider validation: %w", err)
 	}
 
-	// Deduplicate provider refs.
+	available, listErr := client.ListProviders(ctx)
+	if listErr != nil {
+		return nil, validateProvidersByName(ctx, client, cfg)
+	}
+
+	byName := make(map[string]ProviderSummary, len(available))
+	for _, pr := range available {
+		byName[pr.Name] = pr
+	}
+
+	seen := make(map[string]bool, len(cfg.Providers))
+	var errs, warnings []string
+	for _, b := range cfg.Providers {
+		if seen[b.Ref] {
+			continue
+		}
+		seen[b.Ref] = true
+		pr, ok := byName[b.Ref]
+		if !ok {
+			errs = append(errs, providerNotFoundMessage(b.Ref, cfg.Workspace, b.Role, available))
+			continue
+		}
+		// Existence isn't readiness: a bound provider in Error/Unavailable will
+		// reconcile the agent but never serve. Surface it as a plan-time warning.
+		if pr.Phase != "" && !strings.EqualFold(pr.Phase, providerPhaseReady) {
+			warnings = append(warnings, fmt.Sprintf(
+				"provider %q is not ready (phase: %s) — the agent will deploy but won't serve "+
+					"until the provider is healthy in the workspace", b.Ref, pr.Phase))
+		}
+	}
+	if len(errs) > 0 {
+		return warnings, fmt.Errorf("omnia: provider validation failed: %s", strings.Join(errs, "; "))
+	}
+	return warnings, nil
+}
+
+// providerPhaseReady is the Provider status.phase value meaning healthy.
+const providerPhaseReady = "Ready"
+
+// validateProvidersByName checks each unique provider ref exists via a per-ref
+// lookup. Used as a fallback when the workspace provider list can't be fetched.
+func validateProvidersByName(ctx context.Context, client omniaClient, cfg *Config) error {
 	seen := make(map[string]bool, len(cfg.Providers))
 	var errs []string
 	for _, b := range cfg.Providers {
@@ -202,16 +363,51 @@ func (p *Provider) validateProviders(ctx context.Context, cfg *Config) error {
 			continue
 		}
 		seen[b.Ref] = true
-
 		if err := client.ValidateProvider(ctx, b.Ref); err != nil {
 			errs = append(errs, describeRefValidationError("provider", b.Ref, err))
 		}
 	}
-
 	if len(errs) > 0 {
 		return fmt.Errorf("omnia: provider validation failed: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// providerNotFoundMessage explains a missing provider ref by listing what the
+// workspace actually has, and which providers could fill the binding's role.
+func providerNotFoundMessage(ref, workspace, role string, available []ProviderSummary) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "provider %q not found in workspace %q", ref, workspace)
+	if len(available) == 0 {
+		return b.String()
+	}
+
+	sorted := append([]ProviderSummary(nil), available...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	parts := make([]string, 0, len(sorted))
+	for _, pr := range sorted {
+		desc := pr.Type
+		if pr.Model != "" {
+			desc += "/" + pr.Model
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s, role=%s)", pr.Name, desc, pr.Role))
+	}
+	fmt.Fprintf(&b, ". Available providers: %s", strings.Join(parts, ", "))
+
+	if role == "" {
+		role = "llm" // an unset role binds the primary LLM
+	}
+	var sameRole []string
+	for _, pr := range sorted {
+		if pr.Role == role {
+			sameRole = append(sameRole, pr.Name)
+		}
+	}
+	if len(sameRole) > 0 {
+		fmt.Fprintf(&b, ". For role=%s try: %s", role, strings.Join(sameRole, ", "))
+	}
+	return b.String()
 }
 
 // validateSkillSources creates a client and checks that every unique

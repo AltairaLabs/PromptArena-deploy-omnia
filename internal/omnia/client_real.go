@@ -113,6 +113,101 @@ func (c *httpClient) ValidateProvider(ctx context.Context, name string) error {
 	return nil
 }
 
+//nolint:revive // interface implementation
+func (c *httpClient) ListProviders(ctx context.Context) ([]ProviderSummary, error) {
+	url := fmt.Sprintf("%s/providers", c.baseURL)
+	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list providers: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, c.readError(resp)
+	}
+	var items []ResourceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, fmt.Errorf("decode providers: %w", err)
+	}
+	out := make([]ProviderSummary, 0, len(items))
+	for _, it := range items {
+		var spec struct {
+			Type  string `json:"type"`
+			Model string `json:"model"`
+			Role  string `json:"role"`
+		}
+		_ = json.Unmarshal(it.Spec, &spec) // spec fields are advisory; name is what matters
+		phase := ""
+		if it.Status != nil {
+			phase = it.Status.Phase
+		}
+		out = append(out, ProviderSummary{
+			Name: it.Metadata.Name, Type: spec.Type, Model: spec.Model, Role: spec.Role, Phase: phase,
+		})
+	}
+	return out, nil
+}
+
+//nolint:revive // interface implementation
+func (c *httpClient) ListToolRegistries(ctx context.Context) ([]ToolRegistrySummary, error) {
+	url := fmt.Sprintf("%s/toolregistries", c.baseURL)
+	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list toolregistries: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, c.readError(resp)
+	}
+	var items []ResourceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, fmt.Errorf("decode toolregistries: %w", err)
+	}
+	out := make([]ToolRegistrySummary, 0, len(items))
+	for _, it := range items {
+		tools, dynamic := extractRegistryTools(it.Spec)
+		out = append(out, ToolRegistrySummary{
+			Name:    it.Metadata.Name,
+			Tools:   tools,
+			Dynamic: dynamic,
+		})
+	}
+	return out, nil
+}
+
+// extractRegistryTools pulls the LLM-facing tool name + input schema from each
+// of a ToolRegistry's spec.handlers[] that declares an inline tool. It also
+// reports whether the registry is "dynamic": a handler with no inline tool
+// (e.g. an openapi handler with a specURL, or an mcp handler) resolves its tools
+// externally, so its tool set can't be enumerated or schema-checked here.
+func extractRegistryTools(spec json.RawMessage) (tools []RegistryTool, dynamic bool) {
+	var s struct {
+		Handlers []struct {
+			Tool *struct {
+				Name        string          `json:"name"`
+				InputSchema json.RawMessage `json:"inputSchema"`
+			} `json:"tool"`
+		} `json:"handlers"`
+	}
+	_ = json.Unmarshal(spec, &s) // a malformed/empty spec simply yields no tools
+	tools = make([]RegistryTool, 0, len(s.Handlers))
+	for _, h := range s.Handlers {
+		if h.Tool == nil || h.Tool.Name == "" {
+			dynamic = true // tools resolved externally (openapi/mcp) — not enumerable here
+			continue
+		}
+		tools = append(tools, RegistryTool{Name: h.Tool.Name, InputSchema: h.Tool.InputSchema})
+	}
+	return tools, dynamic
+}
+
 // skillSourceReadyPhase is the SkillSource status.phase value meaning synced.
 const skillSourceReadyPhase = "Ready"
 
@@ -209,9 +304,12 @@ func (c *httpClient) newRequest(
 // classification (newDeployError) does not have to re-guess from the message.
 func (c *httpClient) readError(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
-	category, hint := classifyHTTPError(resp.StatusCode)
+	// The dashboard re-wraps non-404 k8s errors (409/422) as a bodyless-looking
+	// 500; recover the real code so the classification (and "retry" hint) is right.
+	code := effectiveStatusCode(resp.StatusCode, string(body))
+	category, hint := classifyHTTPError(code)
 	return &HTTPError{
-		StatusCode:  resp.StatusCode,
+		StatusCode:  code,
 		Body:        string(body),
 		Category:    category,
 		Remediation: hint,

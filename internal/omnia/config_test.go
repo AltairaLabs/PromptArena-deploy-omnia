@@ -116,6 +116,69 @@ func TestParseConfig_InvalidProvidersShape(t *testing.T) {
 	}
 }
 
+func TestParseConfig_NormalizesWorkspaceCase(t *testing.T) {
+	cfg, err := parseConfig(`{"api_endpoint":"https://x","workspace":"Default",` +
+		`"providers":{"default":"claude-prod"},"api_token":"t"}`)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if cfg.Workspace != "default" {
+		t.Errorf("workspace = %q, want normalized %q", cfg.Workspace, "default")
+	}
+	w := cfg.normalizationWarnings()
+	if len(w) != 1 || !strings.Contains(w[0], `"Default"`) || !strings.Contains(w[0], `"default"`) {
+		t.Errorf("expected a normalization warning naming both forms, got %v", w)
+	}
+
+	// A name that can't be salvaged by lowercasing is left untouched (validate rejects it).
+	bad, err := parseConfig(`{"api_endpoint":"https://x","workspace":"demo workspace",` +
+		`"providers":{"default":"claude-prod"},"api_token":"t"}`)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	if bad.Workspace != "demo workspace" {
+		t.Errorf("un-normalizable workspace mutated to %q", bad.Workspace)
+	}
+	if bad.normalizationWarnings() != nil {
+		t.Errorf("expected no normalization warning for un-normalizable name")
+	}
+}
+
+func TestValidateConfig_WorkspaceSlug(t *testing.T) {
+	mk := func(ws string) *Config {
+		return &Config{
+			APIEndpoint: "https://omnia.example.com",
+			Workspace:   ws,
+			Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		}
+	}
+
+	t.Run("un-normalizable name rejected", func(t *testing.T) {
+		t.Setenv("OMNIA_API_TOKEN", "tok")
+		errs := mk("demo workspace").validate()
+		found := false
+		for _, e := range errs {
+			if strings.Contains(e, "not a valid name") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected workspace slug error, got %v", errs)
+		}
+	})
+
+	t.Run("lowercase slug accepted", func(t *testing.T) {
+		t.Setenv("OMNIA_API_TOKEN", "tok")
+		for _, ws := range []string{"default", "demo", "my-ws-1"} {
+			for _, e := range mk(ws).validate() {
+				if strings.Contains(e, "workspace") {
+					t.Errorf("workspace %q: unexpected error %v", ws, e)
+				}
+			}
+		}
+	})
+}
+
 func TestValidateConfig_InvalidRole(t *testing.T) {
 	t.Setenv("OMNIA_API_TOKEN", "tok")
 	cfg := &Config{
@@ -173,6 +236,44 @@ func TestValidateConfig_DuplicateNames(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a duplicate-name error, got %v", errs)
+	}
+}
+
+func TestValidateConfig_ToolsAndRegistryRefMutuallyExclusive(t *testing.T) {
+	t.Setenv("OMNIA_API_TOKEN", "tok")
+	cfg := &Config{
+		APIEndpoint:     "https://omnia.example.com",
+		Workspace:       "ws",
+		Providers:       Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		ToolRegistryRef: "shared-tools",
+		Tools: []ToolHandler{{
+			Name: "search", Type: handlerTypeHTTP,
+			Tool:       &HandlerTool{Name: "search", Description: "Search", InputSchema: map[string]interface{}{"type": "object"}},
+			HTTPConfig: map[string]interface{}{"endpoint": "https://x"},
+		}},
+	}
+	errs := cfg.validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "mutually exclusive") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a mutual-exclusion error, got %v", errs)
+	}
+}
+
+func TestValidateConfig_RegistryRefAloneValid(t *testing.T) {
+	t.Setenv("OMNIA_API_TOKEN", "tok")
+	cfg := &Config{
+		APIEndpoint:     "https://omnia.example.com",
+		Workspace:       "ws",
+		Providers:       Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		ToolRegistryRef: "shared-tools",
+	}
+	if errs := cfg.validate(); len(errs) != 0 {
+		t.Errorf("expected tool_registry_ref alone to be valid, got %v", errs)
 	}
 }
 

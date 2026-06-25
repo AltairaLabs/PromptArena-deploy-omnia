@@ -19,6 +19,15 @@ type omniaClient interface {
 	// ValidateProvider checks that a Provider CRD exists.
 	ValidateProvider(ctx context.Context, name string) error
 
+	// ListProviders returns the workspace's Provider CRDs (name/type/model/role),
+	// for validating refs against what's actually available and reporting it.
+	ListProviders(ctx context.Context) ([]ProviderSummary, error)
+
+	// ListToolRegistries returns the workspace's ToolRegistry CRDs reduced to the
+	// LLM-facing tool names + input schemas they expose, for matching a pack's
+	// declared tools against what a registry actually provides.
+	ListToolRegistries(ctx context.Context) ([]ToolRegistrySummary, error)
+
 	// ValidateSkillSource checks that a SkillSource CRD exists and is synced.
 	ValidateSkillSource(ctx context.Context, name string) error
 
@@ -28,6 +37,36 @@ type omniaClient interface {
 
 // omniaClientFactory creates an omniaClient for the given config.
 type omniaClientFactory func(cfg *Config) (omniaClient, error)
+
+// ProviderSummary is a workspace Provider CRD reduced to the fields useful for
+// validating and reporting deploy bindings.
+type ProviderSummary struct {
+	Name  string // the CRD name — what a binding's ref must match
+	Type  string // e.g. openai, anthropic, ollama
+	Model string // e.g. gpt-4o (may be empty)
+	Role  string // llm, embedding, tts, …
+	Phase string // status.phase: Ready, Error, Unavailable, … (empty if unknown)
+}
+
+// ToolRegistrySummary is a workspace ToolRegistry CRD reduced to the LLM-facing
+// tools it exposes — what a pack's declared tool names are matched against.
+type ToolRegistrySummary struct {
+	Name  string         // the CRD name — what a tool_registry_ref binds to
+	Tools []RegistryTool // one per spec.handlers[] that carries an inline tool block
+	// Dynamic is true when the registry has a handler that resolves its tools
+	// externally (an openapi specURL, an mcp server) rather than declaring them
+	// inline. Such tools can't be enumerated or schema-checked statically, so
+	// coverage against them is unverifiable rather than absent.
+	Dynamic bool
+}
+
+// RegistryTool is one tool a ToolRegistry exposes: the LLM-facing name
+// (handler.tool.name, snake_case — what the pack references) and its input
+// schema (handler.tool.inputSchema), kept raw for a normalized schema compare.
+type RegistryTool struct {
+	Name        string
+	InputSchema json.RawMessage
+}
 
 // ResourceResponse is the envelope returned by the Omnia API for a single resource.
 type ResourceResponse struct {

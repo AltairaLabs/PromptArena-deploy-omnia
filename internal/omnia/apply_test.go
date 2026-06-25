@@ -12,6 +12,51 @@ import (
 
 func noopApplyCallback(_ *deploy.ApplyEvent) error { return nil }
 
+func TestUpdateWithRetry_RetriesOnConflict(t *testing.T) {
+	orig := updateConflictBackoff
+	updateConflictBackoff = 0
+	defer func() { updateConflictBackoff = orig }()
+
+	sim := newSimulatedClient()
+	sim.resources[simKey(ResTypePromptPack, "p")] =
+		&ResourceResponse{Metadata: ResourceMetadata{Name: "p", ResourceVersion: "1"}}
+	sim.updateConflictsRemaining = 2 // conflict twice, then succeed
+
+	resp, err := updateWithRetry(context.Background(), sim, ResTypePromptPack, "p", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	if resp == nil || sim.updateConflictsRemaining != 0 {
+		t.Errorf("expected both conflicts consumed, remaining=%d", sim.updateConflictsRemaining)
+	}
+}
+
+func TestUpdateWithRetry_GivesUpAfterMax(t *testing.T) {
+	orig := updateConflictBackoff
+	updateConflictBackoff = 0
+	defer func() { updateConflictBackoff = orig }()
+
+	sim := newSimulatedClient()
+	sim.resources[simKey(ResTypePromptPack, "p")] = &ResourceResponse{Metadata: ResourceMetadata{Name: "p"}}
+	sim.updateConflictsRemaining = 99 // always conflicts
+
+	if _, err := updateWithRetry(context.Background(), sim, ResTypePromptPack, "p", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+}
+
+func TestIsRetryableConflict(t *testing.T) {
+	if !isRetryableConflict(&HTTPError{StatusCode: 409, Body: `{"reason":"Conflict"}`}) {
+		t.Error("Conflict (409) should be retryable")
+	}
+	if isRetryableConflict(&HTTPError{StatusCode: 409, Body: `{"reason":"AlreadyExists","message":"already exists"}`}) {
+		t.Error("AlreadyExists (409) must NOT be retried")
+	}
+	if isRetryableConflict(fmt.Errorf("transport boom")) {
+		t.Error("non-HTTP error must not be retryable")
+	}
+}
+
 // capturingCallback records every ApplyEvent so tests can assert on emitted
 // progress/resource messages.
 func capturingCallback(events *[]*deploy.ApplyEvent) deploy.ApplyCallback {
@@ -203,6 +248,54 @@ func TestApply_SingleAgent(t *testing.T) {
 	}
 }
 
+func TestApply_BindMode_EchoesWarningsNoRegistry(t *testing.T) {
+	sim := newSimulatedClient()
+	// Registry exists but doesn't provide the pack's "search" tool → missing warning.
+	sim.toolRegistries = []ToolRegistrySummary{{Name: "shared-tools"}}
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	cfg := `{
+		"api_endpoint": "https://omnia.test.com",
+		"workspace": "test-ws",
+		"api_token": "test-token",
+		"providers": {"default": "claude-prod"},
+		"tool_registry_ref": "shared-tools"
+	}`
+
+	var events []*deploy.ApplyEvent
+	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON: testPackJSON, DeployConfig: cfg,
+	}, capturingCallback(&events))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The missing-tool advisory must be re-echoed through the progress stream.
+	if got := countContaining(progressMessages(events), "does not provide pack tool \"search\""); got != 1 {
+		t.Errorf("expected the resolver warning echoed once, messages: %v", progressMessages(events))
+	}
+
+	// Bind mode must not create a ToolRegistry resource.
+	var state AdapterState
+	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		t.Fatalf("failed to parse state: %v", err)
+	}
+	for _, r := range state.Resources {
+		if r.Type == ResTypeToolRegistry {
+			t.Errorf("bind mode must not create a ToolRegistry, got %+v", r)
+		}
+	}
+	// The AgentRuntime must still be bound to the named registry (verified via
+	// the stored body on the simulated client).
+	ar := sim.resources[simKey(ResTypeAgentRuntime, "test-pack")]
+	if ar == nil {
+		t.Fatal("expected AgentRuntime to be created")
+	}
+	if !strings.Contains(string(ar.Spec), "shared-tools") {
+		t.Errorf("expected AgentRuntime spec to bind shared-tools, got %s", ar.Spec)
+	}
+}
+
 func TestApply_DryRun(t *testing.T) {
 	sim := newSimulatedClient()
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
@@ -243,34 +336,17 @@ func TestApply_DryRun(t *testing.T) {
 
 func TestApply_WithPriorState(t *testing.T) {
 	sim := newSimulatedClient()
-	// Pre-populate the simulated client with existing resources so updates succeed.
-	for _, r := range []struct{ typ, name string }{
-		{ResTypePromptPack, "test-pack"},
-		{ResTypeToolRegistry, "test-pack-tools"},
-		{ResTypeAgentRuntime, "test-pack"},
-	} {
-		sim.resources[simKey(r.typ, r.name)] = &ResourceResponse{
-			Kind:     r.typ,
-			Metadata: ResourceMetadata{Name: r.name, UID: "old-uid", ResourceVersion: "1"},
-		}
-	}
+	// Pre-populate the simulated client with existing LABELED resources so adopt
+	// reconciles them as the prior state (the cluster is the source of truth) and
+	// apply updates rather than creates — req.PriorState is intentionally empty.
+	seedManagedResource(sim, ResTypePromptPack, "test-pack", "test-pack")
+	seedManagedResource(sim, ResTypeToolRegistry, "test-pack-tools", "test-pack")
+	seedManagedResource(sim, ResTypeAgentRuntime, "test-pack", "test-pack")
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
-
-	priorState := AdapterState{
-		Resources: []ResourceState{
-			{Type: ResTypePromptPack, Name: "test-pack", UID: "old-uid-2"},
-			{Type: ResTypeToolRegistry, Name: "test-pack-tools", UID: "old-uid-3"},
-			{Type: ResTypeAgentRuntime, Name: "test-pack", UID: "old-uid-4"},
-		},
-		PackID:  "test-pack",
-		Version: "0.9.0",
-	}
-	priorJSON, _ := json.Marshal(priorState)
 
 	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
 		PackJSON:     testPackJSON,
 		DeployConfig: testDeployConfig,
-		PriorState:   string(priorJSON),
 	}, noopApplyCallback)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -281,10 +357,15 @@ func TestApply_WithPriorState(t *testing.T) {
 		t.Fatalf("failed to parse state: %v", err)
 	}
 
-	// All resources should have "updated" status since they existed before.
+	// All resources existed before, so they update — EXCEPT the tool_registry,
+	// which is CREATE-ONLY and is left unchanged (operator-owned) once it exists.
 	for _, r := range state.Resources {
-		if r.Status != ResStatusUpdated {
-			t.Errorf("expected status %q for %s %q, got %q", ResStatusUpdated, r.Type, r.Name, r.Status)
+		want := ResStatusUpdated
+		if r.Type == ResTypeToolRegistry {
+			want = ResStatusUnchanged
+		}
+		if r.Status != want {
+			t.Errorf("expected status %q for %s %q, got %q", want, r.Type, r.Name, r.Status)
 		}
 	}
 }
