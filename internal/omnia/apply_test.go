@@ -12,6 +12,51 @@ import (
 
 func noopApplyCallback(_ *deploy.ApplyEvent) error { return nil }
 
+func TestUpdateWithRetry_RetriesOnConflict(t *testing.T) {
+	orig := updateConflictBackoff
+	updateConflictBackoff = 0
+	defer func() { updateConflictBackoff = orig }()
+
+	sim := newSimulatedClient()
+	sim.resources[simKey(ResTypePromptPack, "p")] =
+		&ResourceResponse{Metadata: ResourceMetadata{Name: "p", ResourceVersion: "1"}}
+	sim.updateConflictsRemaining = 2 // conflict twice, then succeed
+
+	resp, err := updateWithRetry(context.Background(), sim, ResTypePromptPack, "p", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	if resp == nil || sim.updateConflictsRemaining != 0 {
+		t.Errorf("expected both conflicts consumed, remaining=%d", sim.updateConflictsRemaining)
+	}
+}
+
+func TestUpdateWithRetry_GivesUpAfterMax(t *testing.T) {
+	orig := updateConflictBackoff
+	updateConflictBackoff = 0
+	defer func() { updateConflictBackoff = orig }()
+
+	sim := newSimulatedClient()
+	sim.resources[simKey(ResTypePromptPack, "p")] = &ResourceResponse{Metadata: ResourceMetadata{Name: "p"}}
+	sim.updateConflictsRemaining = 99 // always conflicts
+
+	if _, err := updateWithRetry(context.Background(), sim, ResTypePromptPack, "p", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+}
+
+func TestIsRetryableConflict(t *testing.T) {
+	if !isRetryableConflict(&HTTPError{StatusCode: 409, Body: `{"reason":"Conflict"}`}) {
+		t.Error("Conflict (409) should be retryable")
+	}
+	if isRetryableConflict(&HTTPError{StatusCode: 409, Body: `{"reason":"AlreadyExists","message":"already exists"}`}) {
+		t.Error("AlreadyExists (409) must NOT be retried")
+	}
+	if isRetryableConflict(fmt.Errorf("transport boom")) {
+		t.Error("non-HTTP error must not be retryable")
+	}
+}
+
 // capturingCallback records every ApplyEvent so tests can assert on emitted
 // progress/resource messages.
 func capturingCallback(events *[]*deploy.ApplyEvent) deploy.ApplyCallback {

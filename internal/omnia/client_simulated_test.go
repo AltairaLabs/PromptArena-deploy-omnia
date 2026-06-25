@@ -29,6 +29,10 @@ type simulatedClient struct {
 	// listToolRegistriesErr forces it to fail (to exercise skip-on-list-error).
 	toolRegistries        []ToolRegistrySummary
 	listToolRegistriesErr error
+
+	// updateConflictsRemaining makes the next N UpdateResource calls return a
+	// 409 Conflict before succeeding (to exercise updateWithRetry).
+	updateConflictsRemaining int
 }
 
 // newSimulatedClient creates a simulatedClient with default healthy state.
@@ -104,6 +108,15 @@ func (s *simulatedClient) UpdateResource(
 ) (*ResourceResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.updateConflictsRemaining > 0 {
+		s.updateConflictsRemaining--
+		return nil, &HTTPError{
+			StatusCode: httpStatusConflict,
+			Body:       `{"reason":"Conflict","message":"the object has been modified"}`,
+			Category:   ErrCategoryConflict,
+		}
+	}
 
 	if err := s.injectedError(resType, name); err != nil {
 		return nil, err
