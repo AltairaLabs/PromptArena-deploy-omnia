@@ -168,18 +168,22 @@ func (c *httpClient) ListToolRegistries(ctx context.Context) ([]ToolRegistrySumm
 	}
 	out := make([]ToolRegistrySummary, 0, len(items))
 	for _, it := range items {
+		tools, dynamic := extractRegistryTools(it.Spec)
 		out = append(out, ToolRegistrySummary{
-			Name:  it.Metadata.Name,
-			Tools: extractRegistryTools(it.Spec),
+			Name:    it.Metadata.Name,
+			Tools:   tools,
+			Dynamic: dynamic,
 		})
 	}
 	return out, nil
 }
 
 // extractRegistryTools pulls the LLM-facing tool name + input schema from each
-// of a ToolRegistry's spec.handlers[]. Handlers without a tool block (e.g. a
-// selector-only entry) contribute nothing.
-func extractRegistryTools(spec json.RawMessage) []RegistryTool {
+// of a ToolRegistry's spec.handlers[] that declares an inline tool. It also
+// reports whether the registry is "dynamic": a handler with no inline tool
+// (e.g. an openapi handler with a specURL, or an mcp handler) resolves its tools
+// externally, so its tool set can't be enumerated or schema-checked here.
+func extractRegistryTools(spec json.RawMessage) (tools []RegistryTool, dynamic bool) {
 	var s struct {
 		Handlers []struct {
 			Tool *struct {
@@ -189,14 +193,15 @@ func extractRegistryTools(spec json.RawMessage) []RegistryTool {
 		} `json:"handlers"`
 	}
 	_ = json.Unmarshal(spec, &s) // a malformed/empty spec simply yields no tools
-	tools := make([]RegistryTool, 0, len(s.Handlers))
+	tools = make([]RegistryTool, 0, len(s.Handlers))
 	for _, h := range s.Handlers {
 		if h.Tool == nil || h.Tool.Name == "" {
+			dynamic = true // tools resolved externally (openapi/mcp) — not enumerable here
 			continue
 		}
 		tools = append(tools, RegistryTool{Name: h.Tool.Name, InputSchema: h.Tool.InputSchema})
 	}
-	return tools
+	return tools, dynamic
 }
 
 // skillSourceReadyPhase is the SkillSource status.phase value meaning synced.
