@@ -414,6 +414,79 @@ func TestApply_CreateMode_ReadErrorFailsPhase(t *testing.T) {
 	}
 }
 
+// twoToolArenaConfig is a valid arena source config declaring lookup_order as a
+// GET tool, so the create-mode placeholder for it must carry method GET.
+const twoToolArenaConfig = `{
+	"tool_specs": {
+		"lookup_order": {"description": "Lookup", "mode": "live", "http": {"url": "https://x/lookup", "method": "get"}}
+	}
+}`
+
+// placeholderMethodFor finds the create-mode placeholder for toolName in a
+// stored registry body and returns its httpConfig.method.
+func placeholderMethodFor(t *testing.T, spec json.RawMessage, toolName string) string {
+	t.Helper()
+	for _, raw := range registryHandlers(t, spec) {
+		h := raw.(map[string]interface{})
+		if handlerToolName(h) != toolName {
+			continue
+		}
+		hc, ok := h[keyHTTPConfig].(map[string]interface{})
+		if !ok {
+			t.Fatalf("handler for %q has no httpConfig: %v", toolName, h)
+		}
+		m, _ := hc[keyMethod].(string)
+		return m
+	}
+	t.Fatalf("no handler found for tool %q", toolName)
+	return ""
+}
+
+func TestApply_CreateMode_PlaceholderUsesSourceMethod(t *testing.T) {
+	sim := newSimulatedClient() // empty store → registry created fresh
+	sim.validProviders["claude-prod"] = true
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	_, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON: twoToolPackJSON, DeployConfig: twoToolDeployConfig, ArenaConfig: twoToolArenaConfig,
+	}, noopApplyCallback)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	reg := sim.resources[simKey(ResTypeToolRegistry, "test-pack-tools")]
+	if reg == nil {
+		t.Fatal("expected the ToolRegistry to be created")
+	}
+	// lookup_order is GET in the arena source → its placeholder must be GET, not
+	// the hardcoded POST default.
+	if m := placeholderMethodFor(t, reg.Spec, "lookup_order"); m != "GET" {
+		t.Errorf("lookup_order placeholder method = %q, want GET", m)
+	}
+}
+
+func TestApply_CreateMode_PlaceholderDefaultsPOSTWithoutArenaConfig(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	// No ArenaConfig → sourceToolMethods is empty → placeholder keeps POST.
+	_, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON: twoToolPackJSON, DeployConfig: twoToolDeployConfig,
+	}, noopApplyCallback)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	reg := sim.resources[simKey(ResTypeToolRegistry, "test-pack-tools")]
+	if reg == nil {
+		t.Fatal("expected the ToolRegistry to be created")
+	}
+	if m := placeholderMethodFor(t, reg.Spec, "lookup_order"); m != defaultHTTPMethod {
+		t.Errorf("lookup_order placeholder method = %q, want %q (POST default)", m, defaultHTTPMethod)
+	}
+}
+
 // registryHandlers extracts spec.handlers[] from a stored registry body.
 func registryHandlers(t *testing.T, spec json.RawMessage) []interface{} {
 	t.Helper()

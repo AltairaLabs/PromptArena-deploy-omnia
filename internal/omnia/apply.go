@@ -69,6 +69,11 @@ func (p *Provider) Apply(
 		return p.applyDryRun(req, callback)
 	}
 
+	// Carry the arena source's HTTP methods onto the cfg that builds the
+	// registry, so create-mode placeholders use the real method (GET stays GET)
+	// rather than a hardcoded POST. Mirrors Plan; degrades to the POST default.
+	cfg.sourceToolMethods = extractSourceToolMethods(req.ArenaConfig)
+
 	pack, err := adaptersdk.ParsePack([]byte(req.PackJSON))
 	if err != nil {
 		return "", fmt.Errorf("omnia: failed to parse pack: %w", err)

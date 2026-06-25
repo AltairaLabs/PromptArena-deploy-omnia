@@ -8,8 +8,38 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
+
+// HTTP-handler config keys and the default method a placeholder handler uses
+// when the source declares no method (or the tool isn't HTTP-backed).
+const (
+	keyEndpoint       = "endpoint"
+	keyMethod         = "method"
+	defaultHTTPMethod = "POST"
+)
+
+// extractSourceToolMethods reads the arena source config (the JSON-serialized
+// arena config the CLI threads through req.ArenaConfig) and returns a map from
+// each tool's LLM-facing name to its declared HTTP method (upper-cased). It
+// degrades gracefully: a parse failure, empty input, or a tool with no method
+// yields a (non-nil) map omitting that entry — it NEVER fails the deploy, since
+// the real method is an enhancement over the POST default, not a requirement.
+func extractSourceToolMethods(arenaConfigJSON string) map[string]string {
+	methods := make(map[string]string)
+	infos, err := adaptersdk.ExtractToolInfo(arenaConfigJSON)
+	if err != nil {
+		return methods
+	}
+	for _, info := range infos {
+		if info.HTTPMethod == "" {
+			continue
+		}
+		methods[info.Name] = strings.ToUpper(info.HTTPMethod)
+	}
+	return methods
+}
 
 // ToolBinding is the deterministic decision the resolver reaches about how a
 // deployment's tools should be wired. It is computed once at plan time and
@@ -139,7 +169,7 @@ func mergeRegistryHandlers(
 			}
 			continue
 		}
-		handlers = append(handlers, placeholderHandler(pack.Tools[name], name))
+		handlers = append(handlers, placeholderHandler(pack.Tools[name], name, cfg.sourceToolMethods[name]))
 		created = append(created, name)
 	}
 
@@ -189,19 +219,26 @@ func removedHandlerTools(
 // placeholderHandler synthesizes an http handler whose endpoint is an
 // RFC-2606 .invalid URL — it never resolves and fails loudly, so the operator
 // knows to set the real URL in Omnia. The pack tool's schema is carried through.
-func placeholderHandler(packTool *prompt.PackTool, toolName string) map[string]interface{} {
+// method is the HTTP method from the arena source (e.g. "GET" for a read tool);
+// when empty (the tool isn't HTTP-backed, or no method was declared) it falls
+// back to defaultHTTPMethod so existing behavior is unchanged.
+func placeholderHandler(packTool *prompt.PackTool, toolName, method string) map[string]interface{} {
 	tool := map[string]interface{}{keyName: toolName}
 	if packTool != nil {
 		tool["description"] = packTool.Description
 		tool["inputSchema"] = packTool.Parameters
+	}
+	httpMethod := defaultHTTPMethod
+	if method != "" {
+		httpMethod = method
 	}
 	return map[string]interface{}{
 		keyName: sanitizeName(toolName),
 		keyType: handlerTypeHTTP,
 		"tool":  tool,
 		keyHTTPConfig: map[string]interface{}{
-			"endpoint": placeholderEndpoint + toolName,
-			"method":   "POST",
+			keyEndpoint: placeholderEndpoint + toolName,
+			keyMethod:   httpMethod,
 		},
 	}
 }

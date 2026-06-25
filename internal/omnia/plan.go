@@ -41,6 +41,11 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		return nil, fmt.Errorf("omnia: config validation failed: %s", strings.Join(errs, "; "))
 	}
 
+	// Carry the arena source's HTTP methods so create-mode placeholders use the
+	// real method (GET tools stay GET) rather than a hardcoded POST. Degrades to
+	// an empty map — placeholders then keep the POST default.
+	cfg.sourceToolMethods = extractSourceToolMethods(req.ArenaConfig)
+
 	// Validate that referenced providers and skill sources exist (skip in dry-run mode).
 	var providerPhaseWarnings []string
 	if !cfg.DryRun {
