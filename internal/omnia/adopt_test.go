@@ -202,10 +202,16 @@ func TestApply_AdoptError_FallsBackToPriorState(t *testing.T) {
 	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
 		t.Fatalf("parse state: %v", err)
 	}
-	// Falling back to prior state, all three are known → all UPDATED.
+	// Falling back to prior state, all three are known → UPDATED, except the
+	// tool_registry which is CREATE-ONLY: a known (existing) registry is left
+	// unchanged, never updated, even on the prior-state fallback path.
 	for _, r := range state.Resources {
-		if r.Status != ResStatusUpdated {
-			t.Errorf("expected %s %q to UPDATE via fallback, got %q", r.Type, r.Name, r.Status)
+		want := ResStatusUpdated
+		if r.Type == ResTypeToolRegistry {
+			want = ResStatusUnchanged
+		}
+		if r.Status != want {
+			t.Errorf("expected %s %q to be %q via fallback, got %q", r.Type, r.Name, want, r.Status)
 		}
 	}
 }
