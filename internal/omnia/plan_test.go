@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
-	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
 const testPackJSON = `{
@@ -392,31 +391,106 @@ func TestValidateProviders_FallbackError(t *testing.T) {
 	}
 }
 
-func TestToolCoverageWarnings(t *testing.T) {
-	userTools := &prompt.Pack{Tools: map[string]*prompt.PackTool{"refund": {}, "lookup": {}}}
+// packNoConfigTools is a pack declaring one tool, with a deploy config that has
+// neither a tools block nor a tool_registry_ref — exercising discover mode.
+const discoverPackJSON = `{
+	"id": "test-pack",
+	"version": "1.0.0",
+	"prompts": {"main": {"system": "hi", "description": "main"}},
+	"tools": {"refund": {"name": "refund", "description": "Refund", "parameters": {"type": "object"}}}
+}`
 
-	t.Run("declared tools, no handlers warns", func(t *testing.T) {
-		w := toolCoverageWarnings(userTools, &Config{})
-		if len(w) != 1 || !strings.Contains(w[0], "lookup, refund") {
-			t.Errorf("want one warning naming [lookup, refund], got %v", w)
-		}
+const discoverDeployConfig = `{
+	"api_endpoint": "https://omnia.test.com",
+	"workspace": "test-ws",
+	"api_token": "test-token",
+	"providers": {"default": "claude-prod"}
+}`
+
+func TestPlan_BindMode_NoToolRegistryCreated(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	sim.toolRegistries = []ToolRegistrySummary{{
+		Name:  "shared-tools",
+		Tools: []RegistryTool{{Name: "refund", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	}}
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	cfg := `{
+		"api_endpoint": "https://omnia.test.com",
+		"workspace": "test-ws",
+		"api_token": "test-token",
+		"providers": {"default": "claude-prod"},
+		"tool_registry_ref": "shared-tools"
+	}`
+	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON: discoverPackJSON, DeployConfig: cfg,
 	})
-	t.Run("handlers present, no warning", func(t *testing.T) {
-		if w := toolCoverageWarnings(userTools, &Config{Tools: []ToolHandler{{}}}); w != nil {
-			t.Errorf("want nil, got %v", w)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, c := range resp.Changes {
+		if c.Type == ResTypeToolRegistry {
+			t.Errorf("bind mode must NOT create a ToolRegistry, got change %+v", c)
 		}
-	})
-	t.Run("no declared tools, no warning", func(t *testing.T) {
-		if w := toolCoverageWarnings(&prompt.Pack{}, &Config{}); w != nil {
-			t.Errorf("want nil, got %v", w)
+	}
+	// Full coverage + matching schema → no tool warnings.
+	for _, w := range resp.Warnings {
+		if strings.Contains(w, "does not provide") || strings.Contains(w, "different input schema") {
+			t.Errorf("unexpected tool warning on full coverage: %q", w)
 		}
+	}
+}
+
+func TestPlan_DiscoverMode_AutoBindWarning(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	sim.toolRegistries = []ToolRegistrySummary{{
+		Name: "refunds", Tools: []RegistryTool{{Name: "refund"}},
+	}}
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON: discoverPackJSON, DeployConfig: discoverDeployConfig,
 	})
-	t.Run("system tools only, no warning", func(t *testing.T) {
-		sys := &prompt.Pack{Tools: map[string]*prompt.PackTool{"image__generate": {}}}
-		if w := toolCoverageWarnings(sys, &Config{}); w != nil {
-			t.Errorf("want nil, got %v", w)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var found bool
+	for _, w := range resp.Warnings {
+		if strings.Contains(w, "auto-bound tools to registry \"refunds\"") {
+			found = true
 		}
-	})
+	}
+	if !found {
+		t.Errorf("expected auto-bind warning in plan warnings, got %v", resp.Warnings)
+	}
+	// Auto-bind must not create a registry either.
+	for _, c := range resp.Changes {
+		if c.Type == ResTypeToolRegistry {
+			t.Errorf("auto-bind must NOT create a ToolRegistry, got %+v", c)
+		}
+	}
+}
+
+func TestPlan_DryRun_SkipsToolDiscovery(t *testing.T) {
+	sim := newSimulatedClient()
+	// A list error would surface if dry-run called ListToolRegistries.
+	sim.listToolRegistriesErr = fmt.Errorf("should not be called")
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	cfg := `{
+		"api_endpoint": "https://omnia.test.com",
+		"workspace": "test-ws",
+		"api_token": "test-token",
+		"providers": {"default": "claude-prod"},
+		"dry_run": true
+	}`
+	if _, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON: discoverPackJSON, DeployConfig: cfg,
+	}); err != nil {
+		t.Fatalf("dry-run plan must not touch the API, got: %v", err)
+	}
 }
 
 func TestBuildSummary(t *testing.T) {

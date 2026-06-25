@@ -147,6 +147,58 @@ func (c *httpClient) ListProviders(ctx context.Context) ([]ProviderSummary, erro
 	return out, nil
 }
 
+//nolint:revive // interface implementation
+func (c *httpClient) ListToolRegistries(ctx context.Context) ([]ToolRegistrySummary, error) {
+	url := fmt.Sprintf("%s/toolregistries", c.baseURL)
+	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list toolregistries: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, c.readError(resp)
+	}
+	var items []ResourceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, fmt.Errorf("decode toolregistries: %w", err)
+	}
+	out := make([]ToolRegistrySummary, 0, len(items))
+	for _, it := range items {
+		out = append(out, ToolRegistrySummary{
+			Name:  it.Metadata.Name,
+			Tools: extractRegistryTools(it.Spec),
+		})
+	}
+	return out, nil
+}
+
+// extractRegistryTools pulls the LLM-facing tool name + input schema from each
+// of a ToolRegistry's spec.handlers[]. Handlers without a tool block (e.g. a
+// selector-only entry) contribute nothing.
+func extractRegistryTools(spec json.RawMessage) []RegistryTool {
+	var s struct {
+		Handlers []struct {
+			Tool *struct {
+				Name        string          `json:"name"`
+				InputSchema json.RawMessage `json:"inputSchema"`
+			} `json:"tool"`
+		} `json:"handlers"`
+	}
+	_ = json.Unmarshal(spec, &s) // a malformed/empty spec simply yields no tools
+	tools := make([]RegistryTool, 0, len(s.Handlers))
+	for _, h := range s.Handlers {
+		if h.Tool == nil || h.Tool.Name == "" {
+			continue
+		}
+		tools = append(tools, RegistryTool{Name: h.Tool.Name, InputSchema: h.Tool.InputSchema})
+	}
+	return tools
+}
+
 // skillSourceReadyPhase is the SkillSource status.phase value meaning synced.
 const skillSourceReadyPhase = "Ready"
 

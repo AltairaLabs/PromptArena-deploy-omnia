@@ -24,6 +24,11 @@ type simulatedClient struct {
 	// forces ListProviders to fail (to exercise the per-ref fallback).
 	providerSummaries []ProviderSummary
 	listProvidersErr  error
+
+	// toolRegistries is returned by ListToolRegistries verbatim;
+	// listToolRegistriesErr forces it to fail (to exercise skip-on-list-error).
+	toolRegistries        []ToolRegistrySummary
+	listToolRegistriesErr error
 }
 
 // newSimulatedClient creates a simulatedClient with default healthy state.
@@ -182,6 +187,16 @@ func (s *simulatedClient) ListProviders(_ context.Context) ([]ProviderSummary, e
 		out = append(out, ProviderSummary{Name: name, Role: "llm"})
 	}
 	return out, nil
+}
+
+func (s *simulatedClient) ListToolRegistries(_ context.Context) ([]ToolRegistrySummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.listToolRegistriesErr != nil {
+		return nil, s.listToolRegistriesErr
+	}
+	return s.toolRegistries, nil
 }
 
 func (s *simulatedClient) ValidateSkillSource(ctx context.Context, name string) error {
