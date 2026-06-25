@@ -54,6 +54,26 @@ func newPlanTestProvider() (*Provider, *simulatedClient) {
 	return &Provider{clientFunc: newSimulatedClientFactory(sim)}, sim
 }
 
+// seedManagedResource stores a resource in the simulated client carrying the
+// adapter's managed-by + pack-id labels, so adoptPriorState lists it as part of
+// the named pack (the cluster is the source of truth for plan/apply).
+func seedManagedResource(sim *simulatedClient, resType, name, packID string) {
+	sim.mu.Lock()
+	defer sim.mu.Unlock()
+	sim.resources[simKey(resType, name)] = &ResourceResponse{
+		Kind: resType,
+		Metadata: ResourceMetadata{
+			Name:            name,
+			UID:             "uid-" + name,
+			ResourceVersion: "1",
+			Labels: map[string]string{
+				LabelManagedBy: managedByValue,
+				LabelPackID:    packID,
+			},
+		},
+	}
+}
+
 func TestPlan_SingleAgent(t *testing.T) {
 	p, _ := newPlanTestProvider()
 	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
@@ -149,22 +169,17 @@ func TestPlan_SkipsProviderValidationOnDryRun(t *testing.T) {
 }
 
 func TestPlan_WithPriorState(t *testing.T) {
-	priorState := AdapterState{
-		Resources: []ResourceState{
-			{Type: ResTypePromptPack, Name: "test-pack"},
-			{Type: ResTypeToolRegistry, Name: "test-pack-tools"},
-			{Type: ResTypeAgentRuntime, Name: "test-pack"},
-		},
-		PackID:  "test-pack",
-		Version: "0.9.0",
-	}
-	priorJSON, _ := json.Marshal(priorState)
+	// The cluster (adopted via labels) is the source of truth — these resources
+	// already exist, so the plan must show UPDATE even though req.PriorState is
+	// empty.
+	p, sim := newPlanTestProvider()
+	seedManagedResource(sim, ResTypePromptPack, "test-pack", "test-pack")
+	seedManagedResource(sim, ResTypeToolRegistry, "test-pack-tools", "test-pack")
+	seedManagedResource(sim, ResTypeAgentRuntime, "test-pack", "test-pack")
 
-	p, _ := newPlanTestProvider()
 	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
 		PackJSON:     testPackJSON,
 		DeployConfig: testDeployConfig,
-		PriorState:   string(priorJSON),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -178,24 +193,17 @@ func TestPlan_WithPriorState(t *testing.T) {
 }
 
 func TestPlan_WithDeletion(t *testing.T) {
-	// Prior state has an extra resource not in the desired set.
-	priorState := AdapterState{
-		Resources: []ResourceState{
-			{Type: ResTypePromptPack, Name: "test-pack"},
-			{Type: ResTypeToolRegistry, Name: "test-pack-tools"},
-			{Type: ResTypeAgentRuntime, Name: "test-pack"},
-			{Type: ResTypeAgentPolicy, Name: "test-pack-policy"},
-		},
-		PackID:  "test-pack",
-		Version: "1.0.0",
-	}
-	priorJSON, _ := json.Marshal(priorState)
+	// The cluster has an extra adopted resource not in the desired set — plan
+	// must show it as a DELETE (a real cluster orphan).
+	p, sim := newPlanTestProvider()
+	seedManagedResource(sim, ResTypePromptPack, "test-pack", "test-pack")
+	seedManagedResource(sim, ResTypeToolRegistry, "test-pack-tools", "test-pack")
+	seedManagedResource(sim, ResTypeAgentRuntime, "test-pack", "test-pack")
+	seedManagedResource(sim, ResTypeAgentPolicy, "test-pack-policy", "test-pack")
 
-	p, _ := newPlanTestProvider()
 	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
 		PackJSON:     testPackJSON,
 		DeployConfig: testDeployConfig,
-		PriorState:   string(priorJSON),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
