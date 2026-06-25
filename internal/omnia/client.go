@@ -45,6 +45,7 @@ type ProviderSummary struct {
 	Type  string // e.g. openai, anthropic, ollama
 	Model string // e.g. gpt-4o (may be empty)
 	Role  string // llm, embedding, tts, …
+	Phase string // status.phase: Ready, Error, Unavailable, … (empty if unknown)
 }
 
 // ToolRegistrySummary is a workspace ToolRegistry CRD reduced to the LLM-facing

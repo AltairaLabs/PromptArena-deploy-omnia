@@ -29,7 +29,7 @@ func TestHTTPClient_ListProviders(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[
-			{"metadata":{"name":"rag-hero-candidate"},"spec":{"type":"openai","model":"gpt-4o","role":"llm"}},
+			{"metadata":{"name":"rag-hero-candidate"},"spec":{"type":"openai","model":"gpt-4o","role":"llm"},"status":{"phase":"Ready"}},
 			{"metadata":{"name":"ollama"},"spec":{"type":"ollama","model":"llava:7b","role":"llm"}}
 		]`))
 	})
@@ -42,7 +42,7 @@ func TestHTTPClient_ListProviders(t *testing.T) {
 		t.Fatalf("want 2 providers, got %d", len(provs))
 	}
 	if provs[0].Name != "rag-hero-candidate" || provs[0].Type != "openai" ||
-		provs[0].Model != "gpt-4o" || provs[0].Role != "llm" {
+		provs[0].Model != "gpt-4o" || provs[0].Role != "llm" || provs[0].Phase != "Ready" {
 		t.Errorf("unexpected first provider: %+v", provs[0])
 	}
 }

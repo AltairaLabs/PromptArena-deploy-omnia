@@ -42,10 +42,13 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	}
 
 	// Validate that referenced providers and skill sources exist (skip in dry-run mode).
+	var providerPhaseWarnings []string
 	if !cfg.DryRun {
-		if verr := p.validateProviders(ctx, cfg); verr != nil {
+		pw, verr := p.validateProviders(ctx, cfg)
+		if verr != nil {
 			return nil, verr
 		}
+		providerPhaseWarnings = pw
 		if verr := p.validateSkillSources(ctx, cfg); verr != nil {
 			return nil, verr
 		}
@@ -72,6 +75,7 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	summary := buildSummary(changes)
 
 	warnings := cfg.normalizationWarnings()
+	warnings = append(warnings, providerPhaseWarnings...)
 	warnings = append(warnings, providerWarnings(cfg.Providers)...)
 	warnings = append(warnings, toolWarnings...)
 
@@ -232,38 +236,50 @@ func buildSummary(changes []deploy.ResourceChange) string {
 // the Omnia workspace. It prefers a single workspace-provider listing — which
 // validates every ref in one call and lets a miss report what IS available —
 // and falls back to per-ref existence checks if listing isn't permitted.
-func (p *Provider) validateProviders(ctx context.Context, cfg *Config) error {
+func (p *Provider) validateProviders(ctx context.Context, cfg *Config) ([]string, error) {
 	client, err := p.clientFunc(cfg)
 	if err != nil {
-		return fmt.Errorf("omnia: failed to create client for provider validation: %w", err)
+		return nil, fmt.Errorf("omnia: failed to create client for provider validation: %w", err)
 	}
 
 	available, listErr := client.ListProviders(ctx)
 	if listErr != nil {
-		return validateProvidersByName(ctx, client, cfg)
+		return nil, validateProvidersByName(ctx, client, cfg)
 	}
 
-	byName := make(map[string]bool, len(available))
+	byName := make(map[string]ProviderSummary, len(available))
 	for _, pr := range available {
-		byName[pr.Name] = true
+		byName[pr.Name] = pr
 	}
 
 	seen := make(map[string]bool, len(cfg.Providers))
-	var errs []string
+	var errs, warnings []string
 	for _, b := range cfg.Providers {
 		if seen[b.Ref] {
 			continue
 		}
 		seen[b.Ref] = true
-		if !byName[b.Ref] {
+		pr, ok := byName[b.Ref]
+		if !ok {
 			errs = append(errs, providerNotFoundMessage(b.Ref, cfg.Workspace, b.Role, available))
+			continue
+		}
+		// Existence isn't readiness: a bound provider in Error/Unavailable will
+		// reconcile the agent but never serve. Surface it as a plan-time warning.
+		if pr.Phase != "" && !strings.EqualFold(pr.Phase, providerPhaseReady) {
+			warnings = append(warnings, fmt.Sprintf(
+				"provider %q is not ready (phase: %s) — the agent will deploy but won't serve "+
+					"until the provider is healthy in the workspace", b.Ref, pr.Phase))
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("omnia: provider validation failed: %s", strings.Join(errs, "; "))
+		return warnings, fmt.Errorf("omnia: provider validation failed: %s", strings.Join(errs, "; "))
 	}
-	return nil
+	return warnings, nil
 }
+
+// providerPhaseReady is the Provider status.phase value meaning healthy.
+const providerPhaseReady = "Ready"
 
 // validateProvidersByName checks each unique provider ref exists via a per-ref
 // lookup. Used as a fallback when the workspace provider list can't be fetched.
