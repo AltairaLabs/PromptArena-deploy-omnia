@@ -3,7 +3,10 @@ package omnia
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
 	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
@@ -190,6 +193,47 @@ func reportAgentAccessURL(ac *applyContext, agentName string, pct float64) error
 		fmt.Sprintf("Agent %q ready — open: %s", agentName, url), pct)
 }
 
+// updateConflictRetries bounds the retry on a 409 Conflict. updateConflictBackoff
+// is a var so tests can zero it.
+const updateConflictRetries = 3
+
+var updateConflictBackoff = 300 * time.Millisecond
+
+// updateWithRetry issues an update, retrying on a 409 Conflict ("the object has
+// been modified") so a controller mutating the resource between the server's read
+// and write doesn't fail the apply. Each retry re-issues the update, prompting a
+// fresh read of the latest resourceVersion server-side. A 409 AlreadyExists is
+// NOT a conflict and is returned immediately.
+func updateWithRetry(
+	ctx context.Context, client omniaClient, resType, name string, body json.RawMessage,
+) (*ResourceResponse, error) {
+	var (
+		resp *ResourceResponse
+		err  error
+	)
+	for attempt := 0; ; attempt++ {
+		resp, err = client.UpdateResource(ctx, resType, name, body)
+		if err == nil || !isRetryableConflict(err) || attempt >= updateConflictRetries {
+			return resp, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(updateConflictBackoff):
+		}
+	}
+}
+
+// isRetryableConflict reports whether err is a 409 Conflict (optimistic-lock,
+// "object has been modified") — retryable — as distinct from a 409 AlreadyExists.
+func isRetryableConflict(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) || he.StatusCode != httpStatusConflict {
+		return false
+	}
+	return strings.Contains(he.Body, "Conflict") || strings.Contains(he.Body, "has been modified")
+}
+
 // applyResourcePhase creates or updates a single resource, reporting progress.
 func applyResourcePhase(
 	ctx context.Context,
@@ -222,7 +266,7 @@ func applyResourcePhase(
 
 	var resp *ResourceResponse
 	if hasPrior {
-		resp, err = ac.client.UpdateResource(ctx, resType, name, body)
+		resp, err = updateWithRetry(ctx, ac.client, resType, name, body)
 	} else {
 		resp, err = ac.client.CreateResource(ctx, resType, name, body)
 	}
