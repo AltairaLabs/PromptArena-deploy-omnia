@@ -336,34 +336,17 @@ func TestApply_DryRun(t *testing.T) {
 
 func TestApply_WithPriorState(t *testing.T) {
 	sim := newSimulatedClient()
-	// Pre-populate the simulated client with existing resources so updates succeed.
-	for _, r := range []struct{ typ, name string }{
-		{ResTypePromptPack, "test-pack"},
-		{ResTypeToolRegistry, "test-pack-tools"},
-		{ResTypeAgentRuntime, "test-pack"},
-	} {
-		sim.resources[simKey(r.typ, r.name)] = &ResourceResponse{
-			Kind:     r.typ,
-			Metadata: ResourceMetadata{Name: r.name, UID: "old-uid", ResourceVersion: "1"},
-		}
-	}
+	// Pre-populate the simulated client with existing LABELED resources so adopt
+	// reconciles them as the prior state (the cluster is the source of truth) and
+	// apply updates rather than creates — req.PriorState is intentionally empty.
+	seedManagedResource(sim, ResTypePromptPack, "test-pack", "test-pack")
+	seedManagedResource(sim, ResTypeToolRegistry, "test-pack-tools", "test-pack")
+	seedManagedResource(sim, ResTypeAgentRuntime, "test-pack", "test-pack")
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
-
-	priorState := AdapterState{
-		Resources: []ResourceState{
-			{Type: ResTypePromptPack, Name: "test-pack", UID: "old-uid-2"},
-			{Type: ResTypeToolRegistry, Name: "test-pack-tools", UID: "old-uid-3"},
-			{Type: ResTypeAgentRuntime, Name: "test-pack", UID: "old-uid-4"},
-		},
-		PackID:  "test-pack",
-		Version: "0.9.0",
-	}
-	priorJSON, _ := json.Marshal(priorState)
 
 	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
 		PackJSON:     testPackJSON,
 		DeployConfig: testDeployConfig,
-		PriorState:   string(priorJSON),
 	}, noopApplyCallback)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

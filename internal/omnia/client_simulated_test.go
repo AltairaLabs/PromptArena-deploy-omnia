@@ -33,6 +33,12 @@ type simulatedClient struct {
 	// updateConflictsRemaining makes the next N UpdateResource calls return a
 	// 409 Conflict before succeeding (to exercise updateWithRetry).
 	updateConflictsRemaining int
+
+	// createAlreadyExists, when keyed by simKey(resType, name), makes the next
+	// CreateResource call for that key return a 409 AlreadyExists HTTPError and
+	// seed the resource (so the subsequent update succeeds) — to exercise the
+	// create→AlreadyExists→update fallback in applyResourcePhase.
+	createAlreadyExists map[string]bool
 }
 
 // newSimulatedClient creates a simulatedClient with default healthy state.
@@ -68,6 +74,22 @@ func (s *simulatedClient) CreateResource(
 	}
 
 	key := simKey(resType, name)
+	if s.createAlreadyExists[key] {
+		// Simulate a resource that already exists in the cluster: seed it (so a
+		// follow-up update succeeds) and return a 409 AlreadyExists, exactly once.
+		delete(s.createAlreadyExists, key)
+		if _, exists := s.resources[key]; !exists {
+			s.resources[key] = &ResourceResponse{
+				Kind:     resType,
+				Metadata: ResourceMetadata{Name: name, UID: "uid-" + name, ResourceVersion: "1"},
+			}
+		}
+		return nil, &HTTPError{
+			StatusCode: httpStatusConflict,
+			Body:       `{"reason":"AlreadyExists","message":"object already exists"}`,
+			Category:   ErrCategoryConflict,
+		}
+	}
 	if _, exists := s.resources[key]; exists {
 		return nil, fmt.Errorf("resource %s already exists", key)
 	}

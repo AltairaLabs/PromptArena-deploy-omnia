@@ -16,6 +16,12 @@ import (
 // numApplyPhases is the total number of apply phases for progress tracking.
 const numApplyPhases = 4
 
+// Progress verbs for the create/update path.
+const (
+	verbCreating = "Creating"
+	verbUpdating = "Updating"
+)
+
 // progressStepSize is the fraction of the progress bar each phase occupies.
 const progressStepSize = 1.0 / numApplyPhases
 
@@ -88,7 +94,7 @@ func (p *Provider) Apply(
 		cfg:      cfg,
 		reporter: adaptersdk.NewProgressReporter(callback),
 		client:   client,
-		priorMap: parsePriorState(req.PriorState),
+		priorMap: p.applyPriorMap(ctx, pack, cfg, req),
 		binding:  binding,
 	}
 
@@ -234,6 +240,21 @@ func isRetryableConflict(err error) bool {
 	return strings.Contains(he.Body, "Conflict") || strings.Contains(he.Body, "has been modified")
 }
 
+// isAlreadyExists reports whether err is a 409 AlreadyExists — a resource the
+// adapter tried to CREATE that the cluster already has. This is distinct from
+// isRetryableConflict's optimistic-lock 409 ("the object has been modified"): an
+// AlreadyExists is not retried as a create, it is transparently converted to an
+// update by applyResourcePhase. It can arise from a race between the adopt-list
+// and the write, or when adoption itself failed and apply fell back to a stale
+// local state that didn't know the resource existed.
+func isAlreadyExists(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) || he.StatusCode != httpStatusConflict {
+		return false
+	}
+	return strings.Contains(he.Body, "AlreadyExists") || strings.Contains(he.Body, "already exists")
+}
+
 // applyResourcePhase creates or updates a single resource, reporting progress.
 func applyResourcePhase(
 	ctx context.Context,
@@ -245,11 +266,11 @@ func applyResourcePhase(
 	pct := float64(stepIndex) * progressStepSize
 	_, hasPrior := ac.priorMap[resourceKey(resType, name)]
 	action := deploy.ActionCreate
-	verb := "Creating"
+	verb := verbCreating
 	status := ResStatusCreated
 	if hasPrior {
 		action = deploy.ActionUpdate
-		verb = "Updating"
+		verb = verbUpdating
 		status = ResStatusUpdated
 	}
 
@@ -269,6 +290,13 @@ func applyResourcePhase(
 		resp, err = updateWithRetry(ctx, ac.client, resType, name, body)
 	} else {
 		resp, err = ac.client.CreateResource(ctx, resType, name, body)
+		// Belt-and-braces: if the resource already exists (adopt missed it, or a
+		// race between the adopt-list and this write created it), transparently
+		// switch to an update rather than failing the apply with a 409.
+		if err != nil && isAlreadyExists(err) {
+			action, verb, status = deploy.ActionUpdate, verbUpdating, ResStatusUpdated
+			resp, err = updateWithRetry(ctx, ac.client, resType, name, body)
+		}
 	}
 	if err != nil {
 		deployErr := newDeployError(verb, resType, name, err)
@@ -340,6 +368,25 @@ func (p *Provider) applyDryRun(
 		return "", fmt.Errorf("omnia: failed to marshal state: %w", err)
 	}
 	return string(stateJSON), nil
+}
+
+// applyPriorMap resolves the prior-state lookup map apply uses to decide
+// create-vs-update. It adopts THIS pack's live resources from the cluster (the
+// source of truth), superseding req.PriorState, so a lost/stale local state file
+// can't make apply blind-CREATE a resource that already exists. On adopt failure
+// it falls back to parsing req.PriorState — the prior behavior.
+func (p *Provider) applyPriorMap(
+	ctx context.Context, pack *prompt.Pack, cfg *Config, req *deploy.PlanRequest,
+) map[string]ResourceState {
+	adopted, aerr := p.adoptPriorState(ctx, pack, cfg)
+	if aerr != nil {
+		return parsePriorState(req.PriorState)
+	}
+	priorMap := make(map[string]ResourceState, len(adopted))
+	for _, r := range adopted {
+		priorMap[resourceKey(r.Type, r.Name)] = r
+	}
+	return priorMap
 }
 
 // parsePriorState deserializes the prior state string into a lookup map.

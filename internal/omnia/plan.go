@@ -62,12 +62,9 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	}
 	cfg.resolvedRegistryName = binding.RegistryName
 
-	var prior *AdapterState
-	if req.PriorState != "" {
-		prior = &AdapterState{}
-		if err := json.Unmarshal([]byte(req.PriorState), prior); err != nil {
-			return nil, fmt.Errorf("omnia: failed to parse prior state: %w", err)
-		}
+	prior, perr := p.planPriorState(ctx, pack, cfg, req)
+	if perr != nil {
+		return nil, perr
 	}
 
 	desired := generateDesiredResources(pack, cfg, binding)
@@ -84,6 +81,33 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		Summary:  summary,
 		Warnings: warnings,
 	}, nil
+}
+
+// planPriorState resolves the prior state used to diff against. In the non
+// dry-run path it adopts THIS pack's live resources from the cluster (the source
+// of truth), superseding req.PriorState — so the plan shows the REAL
+// create/update/delete vs the cluster, not what a possibly-stale local state
+// file claims. If adoption fails (listing not permitted, transient error) it
+// falls back to parsing req.PriorState — the prior behavior. In dry-run it never
+// calls the API and uses req.PriorState alone.
+func (p *Provider) planPriorState(
+	ctx context.Context, pack *prompt.Pack, cfg *Config, req *deploy.PlanRequest,
+) (*AdapterState, error) {
+	if !cfg.DryRun {
+		adopted, aerr := p.adoptPriorState(ctx, pack, cfg)
+		if aerr == nil {
+			return &AdapterState{Resources: adopted, PackID: pack.ID, Version: pack.Version}, nil
+		}
+		// Fall through to the local state file on adopt failure.
+	}
+	if req.PriorState == "" {
+		return nil, nil
+	}
+	prior := &AdapterState{}
+	if err := json.Unmarshal([]byte(req.PriorState), prior); err != nil {
+		return nil, fmt.Errorf("omnia: failed to parse prior state: %w", err)
+	}
+	return prior, nil
 }
 
 // resolveToolBindingForPhase runs the shared tool resolver, except in dry-run
