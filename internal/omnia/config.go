@@ -54,7 +54,7 @@ var validHandlerTypes = map[string]bool{
 // handlerConfigField maps each handler type to the JSON name of its
 // type-specific config block, used in validation messages.
 var handlerConfigField = map[string]string{
-	handlerTypeHTTP:    "httpConfig",
+	handlerTypeHTTP:    keyHTTPConfig,
 	handlerTypeOpenAPI: "openAPIConfig",
 	handlerTypeGRPC:    "grpcConfig",
 	handlerTypeMCP:     "mcpConfig",
@@ -327,6 +327,11 @@ const configSchema = `{
         "additionalProperties": false
       }
     },
+    "tool_registry_ref": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+      "description": "Bind an existing workspace ToolRegistry CRD by name. Mutually exclusive with tools."
+    },
     "skills": {
       "type": "array",
       "description": "Skill bindings: each item is a bare SkillSource name or a {source,include,mountAs} object.",
@@ -539,11 +544,17 @@ const envAPIToken = "OMNIA_API_TOKEN" //nolint:gosec // environment variable nam
 
 // Config holds Omnia-specific configuration.
 type Config struct {
-	APIEndpoint  string              `json:"api_endpoint"`
-	Workspace    string              `json:"workspace"`
-	APIToken     string              `json:"api_token,omitempty"`
-	Providers    Providers           `json:"providers"`
-	Tools        []ToolHandler       `json:"tools,omitempty"`
+	APIEndpoint string        `json:"api_endpoint"`
+	Workspace   string        `json:"workspace"`
+	APIToken    string        `json:"api_token,omitempty"`
+	Providers   Providers     `json:"providers"`
+	Tools       []ToolHandler `json:"tools,omitempty"`
+
+	// ToolRegistryRef binds the agent to an EXISTING workspace ToolRegistry CRD
+	// by name, instead of synthesizing a new one from the tools block. It is
+	// mutually exclusive with tools: tools creates a registry, this binds one.
+	ToolRegistryRef string `json:"tool_registry_ref,omitempty"`
+
 	Skills       []SkillBinding      `json:"skills,omitempty"`
 	SkillsConfig *SkillsConfig       `json:"skillsConfig,omitempty"`
 	Runtime      *RuntimeConfig      `json:"runtime,omitempty"`
@@ -561,6 +572,21 @@ type Config struct {
 	// case-normalized to a slug (e.g. "Default" → "default"), so the change can
 	// be surfaced as a warning. NOT serialized.
 	workspaceNormalizedFrom string
+
+	// resolvedRegistryName is the ToolRegistry name the resolver decided to bind
+	// on the AgentRuntime (see resolveToolBinding). Stashed so builders.go can
+	// thread the single deterministic decision through without re-deriving it.
+	// NOT serialized — transient computed field.
+	resolvedRegistryName string
+
+	// sourceToolMethods maps an LLM-facing pack tool name to the HTTP method
+	// declared for it in the arena source (extracted from req.ArenaConfig). It
+	// lets create-mode placeholder handlers carry the REAL method (GET tools stay
+	// GET) instead of a hardcoded POST. Populated in Plan/Apply via
+	// extractSourceToolMethods, NOT parsed from the deploy-config JSON — being
+	// unexported, encoding/json ignores it, so config round-trips are unaffected.
+	// A nil/empty map (graceful degradation) simply leaves placeholders on POST.
+	sourceToolMethods map[string]string
 }
 
 // RuntimeConfig holds optional resource sizing for agent runtimes.
@@ -770,6 +796,11 @@ func (c *Config) validate() []string {
 	errs = append(errs, validateProviderBindings(c.Providers)...)
 
 	errs = append(errs, validateToolHandlers(c.Tools)...)
+
+	if len(c.Tools) > 0 && c.ToolRegistryRef != "" {
+		errs = append(errs, "tools and tool_registry_ref are mutually exclusive — "+
+			"use tools to create a new ToolRegistry, or tool_registry_ref to bind an existing one")
+	}
 
 	errs = append(errs, validateSkills(c.Skills, c.SkillsConfig)...)
 

@@ -21,6 +21,8 @@ const (
 	keyName     = "name"
 	keyType     = "type"
 	keyEnabled  = "enabled"
+
+	keyHTTPConfig = "httpConfig"
 )
 
 // buildPromptPackRequest builds the JSON body for creating/updating a PromptPack.
@@ -119,10 +121,12 @@ func buildAgentRuntimeRequest(
 		spec["providers"] = refs
 	}
 
-	// Tool registry reference (CRD created by the ToolRegistry phase).
-	if len(cfg.Tools) > 0 {
+	// Tool registry reference — the single registry the resolver decided to bind
+	// (a created <pack-id>-tools registry, an existing one via tool_registry_ref,
+	// or an auto-discovered one). Omitted when the resolver bound none.
+	if cfg.resolvedRegistryName != "" {
 		spec["toolRegistryRef"] = map[string]interface{}{
-			keyName: sanitizeName(pack.ID + "-tools"),
+			keyName: cfg.resolvedRegistryName,
 		}
 	}
 
@@ -428,15 +432,16 @@ func buildEvalPathSpec(p *EvalPathConfig) map[string]interface{} {
 	return map[string]interface{}{"groups": p.Groups}
 }
 
-// buildToolRegistryRequest builds the JSON body for creating/updating a
-// ToolRegistry CRD. The handlers are a faithful passthrough of the explicit
-// deploy-config tools block to spec.handlers[], preserving order; the inline
-// pack.Tools schemas reach the runtime via the PromptPack content fold instead.
-func buildToolRegistryRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, error) {
-	handlers := make([]map[string]interface{}, 0, len(cfg.Tools))
-	for i := range cfg.Tools {
-		handlers = append(handlers, buildHandlerEntry(&cfg.Tools[i]))
-	}
+// buildToolRegistryRequest builds the JSON body for CREATING a ToolRegistry CRD.
+// The registry is create-only — written exactly once, when it does not yet
+// exist — so this body is only ever used on a fresh create (an existing registry
+// is operator-owned and never updated). The handlers are the explicit
+// deploy-config tools block (authoritative) plus a placeholder for every other
+// non-system pack tool, which the operator completes in Omnia.
+func buildToolRegistryRequest(
+	pack *prompt.Pack, cfg *Config,
+) (json.RawMessage, error) {
+	handlers, _ := buildCreateRegistryHandlers(pack, cfg)
 
 	req := map[string]interface{}{
 		keyMetadata: map[string]interface{}{
@@ -469,7 +474,7 @@ func buildHandlerEntry(h *ToolHandler) map[string]interface{} {
 		entry["tool"] = tool
 	}
 	addIfPresent(entry, "selector", h.Selector)
-	addIfPresent(entry, "httpConfig", h.HTTPConfig)
+	addIfPresent(entry, keyHTTPConfig, h.HTTPConfig)
 	addIfPresent(entry, "openAPIConfig", h.OpenAPIConfig)
 	addIfPresent(entry, "grpcConfig", h.GRPCConfig)
 	addIfPresent(entry, "mcpConfig", h.MCPConfig)

@@ -3,7 +3,10 @@ package omnia
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
 	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
@@ -12,6 +15,12 @@ import (
 
 // numApplyPhases is the total number of apply phases for progress tracking.
 const numApplyPhases = 4
+
+// Progress verbs for the create/update path.
+const (
+	verbCreating = "Creating"
+	verbUpdating = "Updating"
+)
 
 // progressStepSize is the fraction of the progress bar each phase occupies.
 const progressStepSize = 1.0 / numApplyPhases
@@ -26,11 +35,26 @@ const (
 
 // applyContext holds parsed inputs for the Apply method.
 type applyContext struct {
+	provider *Provider
 	pack     *prompt.Pack
 	cfg      *Config
 	reporter *adaptersdk.ProgressReporter
 	client   omniaClient
 	priorMap map[string]ResourceState
+	binding  ToolBinding
+}
+
+// echoToolWarnings re-emits the resolver's advisories through the progress
+// stream. Apply has no Warnings return field (the deploy.Provider.Apply
+// signature is (state string, err error)), so — like reportAgentAccessURL —
+// advisories surface as progress messages.
+func echoToolWarnings(reporter *adaptersdk.ProgressReporter, warnings []string) error {
+	for _, w := range warnings {
+		if err := reporter.Progress("warning: "+w, 0); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Apply executes a deployment plan, streaming progress events via the callback.
@@ -45,6 +69,11 @@ func (p *Provider) Apply(
 		return p.applyDryRun(req, callback)
 	}
 
+	// Carry the arena source's HTTP methods onto the cfg that builds the
+	// registry, so create-mode placeholders use the real method (GET stays GET)
+	// rather than a hardcoded POST. Mirrors Plan; degrades to the POST default.
+	cfg.sourceToolMethods = extractSourceToolMethods(req.ArenaConfig)
+
 	pack, err := adaptersdk.ParsePack([]byte(req.PackJSON))
 	if err != nil {
 		return "", fmt.Errorf("omnia: failed to parse pack: %w", err)
@@ -57,12 +86,27 @@ func (p *Provider) Apply(
 
 	cfg.PackJSON = req.PackJSON
 
+	// Run the SAME tool-registry resolution plan ran, so apply binds the same
+	// registry and re-echoes the same advisories without introducing new
+	// failures the plan didn't show.
+	binding, toolWarnings, err := resolveToolBinding(ctx, p, pack, cfg)
+	if err != nil {
+		return "", err
+	}
+	cfg.resolvedRegistryName = binding.RegistryName
+
 	ac := &applyContext{
+		provider: p,
 		pack:     pack,
 		cfg:      cfg,
 		reporter: adaptersdk.NewProgressReporter(callback),
 		client:   client,
-		priorMap: parsePriorState(req.PriorState),
+		priorMap: p.applyPriorMap(ctx, pack, cfg, req),
+		binding:  binding,
+	}
+
+	if cbErr := echoToolWarnings(ac.reporter, toolWarnings); cbErr != nil {
+		return "", cbErr
 	}
 
 	resources, applyErr := executeApplyPhases(ctx, ac)
@@ -92,11 +136,12 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	resources = append(resources, res...)
 	applyErr = combineErrors(applyErr, err)
 
-	// Phase 1: ToolRegistry (if the deploy config declares tool handlers)
-	if len(ac.cfg.Tools) > 0 {
-		res, err = applyResourcePhase(ctx, ac, stepToolRegistry, ResTypeToolRegistry,
-			sanitizeName(ac.pack.ID+"-tools"),
-			func() (json.RawMessage, error) { return buildToolRegistryRequest(ac.pack, ac.cfg) })
+	// Phase 1: ToolRegistry — created only in create mode, and CREATE-ONLY: the
+	// registry is written exactly once, when it does not yet exist. An existing
+	// one is operator-owned and never updated (unlike the other resource types).
+	// Bind/none modes reference an existing registry (or none) and create nothing.
+	if ac.binding.Mode == toolModeCreate {
+		res, err = applyToolRegistryCreate(ctx, ac)
 		resources = append(resources, res...)
 		applyErr = combineErrors(applyErr, err)
 	}
@@ -140,6 +185,78 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	return resources, applyErr
 }
 
+// applyToolRegistryCreate applies the create-mode ToolRegistry under the
+// CREATE-ONLY rule: it is written exactly once, when it does not yet exist, and
+// an existing registry is left entirely untouched (operator-owned). Existence is
+// determined two ways:
+//
+//   - the adopted prior state (priorMap) already carries the registry key — it
+//     was found in the cluster, so skip without any API call; or
+//   - the CreateResource call returns a 409 AlreadyExists (a race, or adoption
+//     missed it) — unlike the generic applyResourcePhase belt-and-braces, this
+//     does NOT fall back to an update; the registry becomes a no-op.
+//
+// In either skip case the registry is recorded as ResStatusUnchanged (never
+// updated) and an advisory is reported. A genuine create succeeds as today.
+func applyToolRegistryCreate(ctx context.Context, ac *applyContext) ([]ResourceState, error) {
+	name := ac.binding.RegistryName
+	pct := float64(stepToolRegistry) * progressStepSize
+
+	if _, hasPrior := ac.priorMap[resourceKey(ResTypeToolRegistry, name)]; hasPrior {
+		return reportRegistryUnchanged(ac, name, pct)
+	}
+
+	if cbErr := ac.reporter.Progress(
+		fmt.Sprintf("%s %s: %s", verbCreating, ResTypeToolRegistry, name), pct,
+	); cbErr != nil {
+		return nil, cbErr
+	}
+
+	body, berr := buildToolRegistryRequest(ac.pack, ac.cfg)
+	if berr != nil {
+		deployErr := newDeployError("build", ResTypeToolRegistry, name, berr)
+		_ = ac.reporter.Error(deployErr)
+		return []ResourceState{{Type: ResTypeToolRegistry, Name: name, Status: ResStatusFailed}}, deployErr
+	}
+
+	resp, cerr := ac.client.CreateResource(ctx, ResTypeToolRegistry, name, body)
+	if cerr != nil {
+		// CREATE-ONLY: an AlreadyExists is a no-op, never an update.
+		if isAlreadyExists(cerr) {
+			return reportRegistryUnchanged(ac, name, pct)
+		}
+		deployErr := newDeployError(verbCreating, ResTypeToolRegistry, name, cerr)
+		_ = ac.reporter.Error(deployErr)
+		return []ResourceState{{Type: ResTypeToolRegistry, Name: name, Status: ResStatusFailed}}, deployErr
+	}
+
+	if cbErr := ac.reporter.Resource(&deploy.ResourceResult{
+		Type: ResTypeToolRegistry, Name: name, Action: deploy.ActionCreate,
+		Status: ResStatusCreated, Detail: resp.Metadata.UID,
+	}); cbErr != nil {
+		return nil, cbErr
+	}
+	return []ResourceState{{
+		Type:            ResTypeToolRegistry,
+		Name:            name,
+		UID:             resp.Metadata.UID,
+		ResourceVersion: resp.Metadata.ResourceVersion,
+		Status:          ResStatusCreated,
+	}}, nil
+}
+
+// reportRegistryUnchanged records the create-mode ToolRegistry as left unchanged
+// (operator-owned) and reports the advisory through the progress stream. It
+// performs no API write.
+func reportRegistryUnchanged(ac *applyContext, name string, pct float64) ([]ResourceState, error) {
+	if cbErr := ac.reporter.Progress(
+		fmt.Sprintf("tool registry %q exists — left unchanged", name), pct,
+	); cbErr != nil {
+		return nil, cbErr
+	}
+	return []ResourceState{{Type: ResTypeToolRegistry, Name: name, Status: ResStatusUnchanged}}, nil
+}
+
 // agentRuntimeSucceeded reports whether the AgentRuntime phase produced a
 // created/updated resource (not failed/skipped).
 func agentRuntimeSucceeded(res []ResourceState) bool {
@@ -161,6 +278,62 @@ func reportAgentAccessURL(ac *applyContext, agentName string, pct float64) error
 		fmt.Sprintf("Agent %q ready — open: %s", agentName, url), pct)
 }
 
+// updateConflictRetries bounds the retry on a 409 Conflict. updateConflictBackoff
+// is a var so tests can zero it.
+const updateConflictRetries = 3
+
+var updateConflictBackoff = 300 * time.Millisecond
+
+// updateWithRetry issues an update, retrying on a 409 Conflict ("the object has
+// been modified") so a controller mutating the resource between the server's read
+// and write doesn't fail the apply. Each retry re-issues the update, prompting a
+// fresh read of the latest resourceVersion server-side. A 409 AlreadyExists is
+// NOT a conflict and is returned immediately.
+func updateWithRetry(
+	ctx context.Context, client omniaClient, resType, name string, body json.RawMessage,
+) (*ResourceResponse, error) {
+	var (
+		resp *ResourceResponse
+		err  error
+	)
+	for attempt := 0; ; attempt++ {
+		resp, err = client.UpdateResource(ctx, resType, name, body)
+		if err == nil || !isRetryableConflict(err) || attempt >= updateConflictRetries {
+			return resp, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(updateConflictBackoff):
+		}
+	}
+}
+
+// isRetryableConflict reports whether err is a 409 Conflict (optimistic-lock,
+// "object has been modified") — retryable — as distinct from a 409 AlreadyExists.
+func isRetryableConflict(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) || he.StatusCode != httpStatusConflict {
+		return false
+	}
+	return strings.Contains(he.Body, "Conflict") || strings.Contains(he.Body, "has been modified")
+}
+
+// isAlreadyExists reports whether err is a 409 AlreadyExists — a resource the
+// adapter tried to CREATE that the cluster already has. This is distinct from
+// isRetryableConflict's optimistic-lock 409 ("the object has been modified"): an
+// AlreadyExists is not retried as a create, it is transparently converted to an
+// update by applyResourcePhase. It can arise from a race between the adopt-list
+// and the write, or when adoption itself failed and apply fell back to a stale
+// local state that didn't know the resource existed.
+func isAlreadyExists(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) || he.StatusCode != httpStatusConflict {
+		return false
+	}
+	return strings.Contains(he.Body, "AlreadyExists") || strings.Contains(he.Body, "already exists")
+}
+
 // applyResourcePhase creates or updates a single resource, reporting progress.
 func applyResourcePhase(
 	ctx context.Context,
@@ -172,11 +345,11 @@ func applyResourcePhase(
 	pct := float64(stepIndex) * progressStepSize
 	_, hasPrior := ac.priorMap[resourceKey(resType, name)]
 	action := deploy.ActionCreate
-	verb := "Creating"
+	verb := verbCreating
 	status := ResStatusCreated
 	if hasPrior {
 		action = deploy.ActionUpdate
-		verb = "Updating"
+		verb = verbUpdating
 		status = ResStatusUpdated
 	}
 
@@ -193,9 +366,16 @@ func applyResourcePhase(
 
 	var resp *ResourceResponse
 	if hasPrior {
-		resp, err = ac.client.UpdateResource(ctx, resType, name, body)
+		resp, err = updateWithRetry(ctx, ac.client, resType, name, body)
 	} else {
 		resp, err = ac.client.CreateResource(ctx, resType, name, body)
+		// Belt-and-braces: if the resource already exists (adopt missed it, or a
+		// race between the adopt-list and this write created it), transparently
+		// switch to an update rather than failing the apply with a 409.
+		if err != nil && isAlreadyExists(err) {
+			action, verb, status = deploy.ActionUpdate, verbUpdating, ResStatusUpdated
+			resp, err = updateWithRetry(ctx, ac.client, resType, name, body)
+		}
 	}
 	if err != nil {
 		deployErr := newDeployError(verb, resType, name, err)
@@ -234,7 +414,9 @@ func (p *Provider) applyDryRun(
 	}
 
 	reporter := adaptersdk.NewProgressReporter(callback)
-	desired := generateDesiredResources(pack, cfg)
+	binding := dryRunToolBinding(pack, cfg)
+	cfg.resolvedRegistryName = binding.RegistryName
+	desired := generateDesiredResources(pack, cfg, binding)
 
 	resources := make([]ResourceState, 0, len(desired))
 	for i, d := range desired {
@@ -265,6 +447,25 @@ func (p *Provider) applyDryRun(
 		return "", fmt.Errorf("omnia: failed to marshal state: %w", err)
 	}
 	return string(stateJSON), nil
+}
+
+// applyPriorMap resolves the prior-state lookup map apply uses to decide
+// create-vs-update. It adopts THIS pack's live resources from the cluster (the
+// source of truth), superseding req.PriorState, so a lost/stale local state file
+// can't make apply blind-CREATE a resource that already exists. On adopt failure
+// it falls back to parsing req.PriorState — the prior behavior.
+func (p *Provider) applyPriorMap(
+	ctx context.Context, pack *prompt.Pack, cfg *Config, req *deploy.PlanRequest,
+) map[string]ResourceState {
+	adopted, aerr := p.adoptPriorState(ctx, pack, cfg)
+	if aerr != nil {
+		return parsePriorState(req.PriorState)
+	}
+	priorMap := make(map[string]ResourceState, len(adopted))
+	for _, r := range adopted {
+		priorMap[resourceKey(r.Type, r.Name)] = r
+	}
+	return priorMap
 }
 
 // parsePriorState deserializes the prior state string into a lookup map.

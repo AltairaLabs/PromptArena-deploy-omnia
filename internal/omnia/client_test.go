@@ -29,7 +29,7 @@ func TestHTTPClient_ListProviders(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[
-			{"metadata":{"name":"rag-hero-candidate"},"spec":{"type":"openai","model":"gpt-4o","role":"llm"}},
+			{"metadata":{"name":"rag-hero-candidate"},"spec":{"type":"openai","model":"gpt-4o","role":"llm"},"status":{"phase":"Ready"}},
 			{"metadata":{"name":"ollama"},"spec":{"type":"ollama","model":"llava:7b","role":"llm"}}
 		]`))
 	})
@@ -42,7 +42,7 @@ func TestHTTPClient_ListProviders(t *testing.T) {
 		t.Fatalf("want 2 providers, got %d", len(provs))
 	}
 	if provs[0].Name != "rag-hero-candidate" || provs[0].Type != "openai" ||
-		provs[0].Model != "gpt-4o" || provs[0].Role != "llm" {
+		provs[0].Model != "gpt-4o" || provs[0].Role != "llm" || provs[0].Phase != "Ready" {
 		t.Errorf("unexpected first provider: %+v", provs[0])
 	}
 }
@@ -54,6 +54,56 @@ func TestHTTPClient_ListProviders_Error(t *testing.T) {
 	})
 	hc := newTestHTTPClient(t, handler)
 	if _, err := hc.ListProviders(context.Background()); err == nil {
+		t.Fatal("expected error on 403 list")
+	}
+}
+
+func TestHTTPClient_ListToolRegistries(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/toolregistries") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"metadata":{"name":"refunds"},"spec":{"handlers":[
+				{"name":"issue-refund","tool":{"name":"issue_refund","inputSchema":{"type":"object"}}},
+				{"name":"backend","type":"openapi","openAPIConfig":{"specURL":"https://api.example.com/openapi.json"}}
+			]}},
+			{"metadata":{"name":"empty"},"spec":{"handlers":[]}}
+		]`))
+	})
+	hc := newTestHTTPClient(t, handler)
+	regs, err := hc.ListToolRegistries(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolRegistries: %v", err)
+	}
+	if len(regs) != 2 {
+		t.Fatalf("want 2 registries, got %d", len(regs))
+	}
+	if regs[0].Name != "refunds" || len(regs[0].Tools) != 1 {
+		t.Fatalf("unexpected first registry: %+v", regs[0])
+	}
+	if regs[0].Tools[0].Name != "issue_refund" {
+		t.Errorf("want LLM-facing tool name issue_refund, got %q", regs[0].Tools[0].Name)
+	}
+	if len(regs[1].Tools) != 0 {
+		t.Errorf("want empty registry to have no tools, got %v", regs[1].Tools)
+	}
+	if !regs[0].Dynamic {
+		t.Errorf("registry with an openapi handler should be Dynamic (tools resolved externally)")
+	}
+	if regs[1].Dynamic {
+		t.Errorf("empty registry should not be Dynamic")
+	}
+}
+
+func TestHTTPClient_ListToolRegistries_Error(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+	})
+	hc := newTestHTTPClient(t, handler)
+	if _, err := hc.ListToolRegistries(context.Background()); err == nil {
 		t.Fatal("expected error on 403 list")
 	}
 }

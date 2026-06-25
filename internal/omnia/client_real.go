@@ -140,11 +140,72 @@ func (c *httpClient) ListProviders(ctx context.Context) ([]ProviderSummary, erro
 			Role  string `json:"role"`
 		}
 		_ = json.Unmarshal(it.Spec, &spec) // spec fields are advisory; name is what matters
+		phase := ""
+		if it.Status != nil {
+			phase = it.Status.Phase
+		}
 		out = append(out, ProviderSummary{
-			Name: it.Metadata.Name, Type: spec.Type, Model: spec.Model, Role: spec.Role,
+			Name: it.Metadata.Name, Type: spec.Type, Model: spec.Model, Role: spec.Role, Phase: phase,
 		})
 	}
 	return out, nil
+}
+
+//nolint:revive // interface implementation
+func (c *httpClient) ListToolRegistries(ctx context.Context) ([]ToolRegistrySummary, error) {
+	url := fmt.Sprintf("%s/toolregistries", c.baseURL)
+	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list toolregistries: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, c.readError(resp)
+	}
+	var items []ResourceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, fmt.Errorf("decode toolregistries: %w", err)
+	}
+	out := make([]ToolRegistrySummary, 0, len(items))
+	for _, it := range items {
+		tools, dynamic := extractRegistryTools(it.Spec)
+		out = append(out, ToolRegistrySummary{
+			Name:    it.Metadata.Name,
+			Tools:   tools,
+			Dynamic: dynamic,
+		})
+	}
+	return out, nil
+}
+
+// extractRegistryTools pulls the LLM-facing tool name + input schema from each
+// of a ToolRegistry's spec.handlers[] that declares an inline tool. It also
+// reports whether the registry is "dynamic": a handler with no inline tool
+// (e.g. an openapi handler with a specURL, or an mcp handler) resolves its tools
+// externally, so its tool set can't be enumerated or schema-checked here.
+func extractRegistryTools(spec json.RawMessage) (tools []RegistryTool, dynamic bool) {
+	var s struct {
+		Handlers []struct {
+			Tool *struct {
+				Name        string          `json:"name"`
+				InputSchema json.RawMessage `json:"inputSchema"`
+			} `json:"tool"`
+		} `json:"handlers"`
+	}
+	_ = json.Unmarshal(spec, &s) // a malformed/empty spec simply yields no tools
+	tools = make([]RegistryTool, 0, len(s.Handlers))
+	for _, h := range s.Handlers {
+		if h.Tool == nil || h.Tool.Name == "" {
+			dynamic = true // tools resolved externally (openapi/mcp) — not enumerable here
+			continue
+		}
+		tools = append(tools, RegistryTool{Name: h.Tool.Name, InputSchema: h.Tool.InputSchema})
+	}
+	return tools, dynamic
 }
 
 // skillSourceReadyPhase is the SkillSource status.phase value meaning synced.
