@@ -318,6 +318,29 @@ func TestDescribeRefValidationError(t *testing.T) {
 	}
 }
 
+func TestValidateProviders_PhaseWarning(t *testing.T) {
+	sim := newSimulatedClient()
+	// claude EXISTS (no error) but is not Ready → expect a non-blocking warning.
+	sim.providerSummaries = []ProviderSummary{{Name: "claude", Role: "llm", Phase: "Error"}}
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	cfg := `{"api_endpoint":"https://x","workspace":"demo","api_token":"t",` +
+		`"providers":{"default":"claude"}}`
+	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{PackJSON: testPackJSON, DeployConfig: cfg})
+	if err != nil {
+		t.Fatalf("a present-but-unready provider must not error: %v", err)
+	}
+	found := false
+	for _, w := range resp.Warnings {
+		if strings.Contains(w, "claude") && strings.Contains(w, "not ready (phase: Error)") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want a provider phase warning, got %v", resp.Warnings)
+	}
+}
+
 func TestProviderNotFoundMessage(t *testing.T) {
 	available := []ProviderSummary{
 		{Name: "rag-hero-candidate", Type: "openai", Model: "gpt-4o", Role: "llm"},

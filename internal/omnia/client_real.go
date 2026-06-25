@@ -140,8 +140,12 @@ func (c *httpClient) ListProviders(ctx context.Context) ([]ProviderSummary, erro
 			Role  string `json:"role"`
 		}
 		_ = json.Unmarshal(it.Spec, &spec) // spec fields are advisory; name is what matters
+		phase := ""
+		if it.Status != nil {
+			phase = it.Status.Phase
+		}
 		out = append(out, ProviderSummary{
-			Name: it.Metadata.Name, Type: spec.Type, Model: spec.Model, Role: spec.Role,
+			Name: it.Metadata.Name, Type: spec.Type, Model: spec.Model, Role: spec.Role, Phase: phase,
 		})
 	}
 	return out, nil

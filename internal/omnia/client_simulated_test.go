@@ -184,7 +184,7 @@ func (s *simulatedClient) ListProviders(_ context.Context) ([]ProviderSummary, e
 	}
 	out := make([]ProviderSummary, 0, len(s.validProviders))
 	for name := range s.validProviders {
-		out = append(out, ProviderSummary{Name: name, Role: "llm"})
+		out = append(out, ProviderSummary{Name: name, Role: "llm", Phase: "Ready"})
 	}
 	return out, nil
 }
