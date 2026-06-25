@@ -61,6 +61,7 @@ func TestClassifyHTTPError(t *testing.T) {
 		{name: "403 forbidden", statusCode: 403, wantCategory: ErrCategoryPermission},
 		{name: "404 not found", statusCode: 404, wantCategory: ErrCategoryNotFound},
 		{name: "409 conflict", statusCode: 409, wantCategory: ErrCategoryConflict},
+		{name: "422 unprocessable", statusCode: 422, wantCategory: ErrCategoryConfiguration},
 		{name: "500 server error", statusCode: 500, wantCategory: ErrCategoryNetwork},
 	}
 
@@ -70,6 +71,37 @@ func TestClassifyHTTPError(t *testing.T) {
 			if category != tt.wantCategory {
 				t.Errorf("classifyHTTPError(%d) category = %q, want %q",
 					tt.statusCode, category, tt.wantCategory)
+			}
+		})
+	}
+}
+
+func TestEffectiveStatusCode(t *testing.T) {
+	// The dashboard re-wraps a non-404 k8s error as a 500, carrying the real
+	// code in "HTTP-Code: <n>" and the nested Status "code" field.
+	wrapped422 := `{"error":"Internal Server Error","message":"HTTP-Code: 422\nMessage: ` +
+		`Unknown API Status Code!\nBody: \"{\\\"kind\\\":\\\"Status\\\",\\\"message\\\":` +
+		`\\\"ToolRegistry is invalid: spec.handlers: Required value\\\",\\\"code\\\":422}\""}`
+	wrapped409 := `{"message":"HTTP-Code: 409\nBody: \"...already exists...\\\"code\\\":409\""}`
+
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   int
+	}{
+		{name: "500 wrapping 422", status: 500, body: wrapped422, want: 422},
+		{name: "500 wrapping 409", status: 500, body: wrapped409, want: 409},
+		{name: "500 wrapping 404", status: 500, body: `{"message":"HTTP-Code: 404\n..."}`, want: 404},
+		{name: "plain 500 unchanged", status: 500, body: `{"error":"boom"}`, want: 500},
+		{name: "embedded 500 stays 500", status: 500, body: `HTTP-Code: 500`, want: 500},
+		{name: "clean 404 unchanged", status: 404, body: `not found`, want: 404},
+		{name: "content-length not matched", status: 500, body: `{"content-length":"407"}`, want: 500},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveStatusCode(tt.status, tt.body); got != tt.want {
+				t.Errorf("effectiveStatusCode(%d, ...) = %d, want %d", tt.status, got, tt.want)
 			}
 		})
 	}

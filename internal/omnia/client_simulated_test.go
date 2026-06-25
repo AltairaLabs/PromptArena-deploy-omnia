@@ -18,6 +18,12 @@ type simulatedClient struct {
 	validProviders    map[string]bool
 	validSkillSources map[string]bool
 	healthy           bool
+
+	// providerSummaries, when set, is returned by ListProviders verbatim;
+	// otherwise ListProviders derives a list from validProviders. listProvidersErr
+	// forces ListProviders to fail (to exercise the per-ref fallback).
+	providerSummaries []ProviderSummary
+	listProvidersErr  error
 }
 
 // newSimulatedClient creates a simulatedClient with default healthy state.
@@ -159,6 +165,23 @@ func (s *simulatedClient) ValidateProvider(ctx context.Context, name string) err
 		return nil
 	}
 	return fmt.Errorf("provider %q not found", name)
+}
+
+func (s *simulatedClient) ListProviders(_ context.Context) ([]ProviderSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.listProvidersErr != nil {
+		return nil, s.listProvidersErr
+	}
+	if s.providerSummaries != nil {
+		return s.providerSummaries, nil
+	}
+	out := make([]ProviderSummary, 0, len(s.validProviders))
+	for name := range s.validProviders {
+		out = append(out, ProviderSummary{Name: name, Role: "llm"})
+	}
+	return out, nil
 }
 
 func (s *simulatedClient) ValidateSkillSource(ctx context.Context, name string) error {

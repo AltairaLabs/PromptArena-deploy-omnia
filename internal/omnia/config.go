@@ -82,6 +82,11 @@ var validSkillSelectors = map[string]bool{
 // skillSourceNamePattern is the omnia SkillSource name pattern (RFC1123 label).
 var skillSourceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
+// workspaceNamePattern is the Omnia workspace slug (RFC1123 label). The deploy
+// config must use the workspace's lowercase name, not its display name (e.g.
+// "default", not "Default") — the display name 404s at the API.
+var workspaceNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
 // Memory retrieval strategy constants. They select how recall queries the
 // memory store.
 const (
@@ -551,6 +556,11 @@ type Config struct {
 	// PackJSON holds the raw pack JSON content. Populated at apply-time.
 	// NOT serialized — transient computed field.
 	PackJSON string `json:"-"`
+
+	// workspaceNormalizedFrom records the original workspace value when it was
+	// case-normalized to a slug (e.g. "Default" → "default"), so the change can
+	// be surfaced as a warning. NOT serialized.
+	workspaceNormalizedFrom string
 }
 
 // RuntimeConfig holds optional resource sizing for agent runtimes.
@@ -691,7 +701,36 @@ func parseConfig(raw string) (*Config, error) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return nil, fmt.Errorf("invalid config JSON: %w", err)
 	}
+	cfg.normalizeWorkspace()
 	return &cfg, nil
+}
+
+// normalizeWorkspace lowercases the workspace name so the common "Default"
+// (display name) vs "default" (slug) case slip just works: workspace slugs are
+// always lowercase k8s names, so an uppercase input has exactly one valid
+// reading. It records the original for a transparency warning. A name that is
+// still not a valid slug once lowercased (e.g. it contains spaces) is left
+// untouched for validate() to reject with a clear message.
+func (c *Config) normalizeWorkspace() {
+	if c.Workspace == "" {
+		return
+	}
+	lower := strings.ToLower(c.Workspace)
+	if lower != c.Workspace && workspaceNamePattern.MatchString(lower) {
+		c.workspaceNormalizedFrom = c.Workspace
+		c.Workspace = lower
+	}
+}
+
+// normalizationWarnings returns a transparency advisory when the workspace name
+// was case-normalized to its slug, so the user can clean up the source config.
+func (c *Config) normalizationWarnings() []string {
+	if c.workspaceNormalizedFrom == "" {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"workspace %q normalized to %q — workspace names are lowercase slugs, "+
+			"not display names", c.workspaceNormalizedFrom, c.Workspace)}
 }
 
 // resolveToken returns the API token from config or the environment variable.
@@ -722,6 +761,10 @@ func (c *Config) validate() []string {
 
 	if c.Workspace == "" {
 		errs = append(errs, "workspace is required")
+	} else if !workspaceNamePattern.MatchString(c.Workspace) {
+		errs = append(errs, fmt.Sprintf(
+			"workspace %q is not a valid name — use the lowercase workspace slug "+
+				"(e.g. \"default\"), not the display name", c.Workspace))
 	}
 
 	errs = append(errs, validateProviderBindings(c.Providers)...)

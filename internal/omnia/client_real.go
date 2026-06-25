@@ -113,6 +113,40 @@ func (c *httpClient) ValidateProvider(ctx context.Context, name string) error {
 	return nil
 }
 
+//nolint:revive // interface implementation
+func (c *httpClient) ListProviders(ctx context.Context) ([]ProviderSummary, error) {
+	url := fmt.Sprintf("%s/providers", c.baseURL)
+	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list providers: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, c.readError(resp)
+	}
+	var items []ResourceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, fmt.Errorf("decode providers: %w", err)
+	}
+	out := make([]ProviderSummary, 0, len(items))
+	for _, it := range items {
+		var spec struct {
+			Type  string `json:"type"`
+			Model string `json:"model"`
+			Role  string `json:"role"`
+		}
+		_ = json.Unmarshal(it.Spec, &spec) // spec fields are advisory; name is what matters
+		out = append(out, ProviderSummary{
+			Name: it.Metadata.Name, Type: spec.Type, Model: spec.Model, Role: spec.Role,
+		})
+	}
+	return out, nil
+}
+
 // skillSourceReadyPhase is the SkillSource status.phase value meaning synced.
 const skillSourceReadyPhase = "Ready"
 
@@ -209,9 +243,12 @@ func (c *httpClient) newRequest(
 // classification (newDeployError) does not have to re-guess from the message.
 func (c *httpClient) readError(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
-	category, hint := classifyHTTPError(resp.StatusCode)
+	// The dashboard re-wraps non-404 k8s errors (409/422) as a bodyless-looking
+	// 500; recover the real code so the classification (and "retry" hint) is right.
+	code := effectiveStatusCode(resp.StatusCode, string(body))
+	category, hint := classifyHTTPError(code)
 	return &HTTPError{
-		StatusCode:  resp.StatusCode,
+		StatusCode:  code,
 		Body:        string(body),
 		Category:    category,
 		Remediation: hint,

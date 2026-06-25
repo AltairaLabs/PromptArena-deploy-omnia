@@ -3,10 +3,12 @@ package omnia
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
+	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
 const testPackJSON = `{
@@ -315,6 +317,106 @@ func TestDescribeRefValidationError(t *testing.T) {
 	if !strings.Contains(msg, "403") || !strings.Contains(msg, "permissions") {
 		t.Errorf("403 should surface status and remediation, got: %q", msg)
 	}
+}
+
+func TestProviderNotFoundMessage(t *testing.T) {
+	available := []ProviderSummary{
+		{Name: "rag-hero-candidate", Type: "openai", Model: "gpt-4o", Role: "llm"},
+		{Name: "rag-hero-embeddings", Type: "openai", Model: "text-embedding-3", Role: "embedding"},
+		{Name: "ollama", Type: "ollama", Model: "llava:7b", Role: "llm"},
+	}
+	msg := providerNotFoundMessage("claude", "demo", "llm", available)
+	for _, want := range []string{
+		`"claude" not found`, `"demo"`, "Available providers",
+		"rag-hero-candidate (openai/gpt-4o, role=llm)", "For role=llm try:", "ollama",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message missing %q\n got: %s", want, msg)
+		}
+	}
+	// embedding-only providers must not appear in the llm role hint.
+	hint := msg[strings.Index(msg, "For role=llm try:"):]
+	if strings.Contains(hint, "rag-hero-embeddings") {
+		t.Errorf("embedding provider leaked into llm hint: %s", hint)
+	}
+	// no available providers -> bare message.
+	if got := providerNotFoundMessage("x", "demo", "llm", nil); strings.Contains(got, "Available") {
+		t.Errorf("expected bare message when nothing is available, got %s", got)
+	}
+}
+
+func TestValidateProviders_ListBasedRichError(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.providerSummaries = []ProviderSummary{
+		{Name: "rag-hero-candidate", Type: "openai", Model: "gpt-4o", Role: "llm"},
+	}
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	cfg := `{"api_endpoint":"https://x","workspace":"demo","api_token":"t",` +
+		`"providers":{"default":"claude"}}`
+	_, err := p.Plan(context.Background(), &deploy.PlanRequest{PackJSON: testPackJSON, DeployConfig: cfg})
+	if err == nil {
+		t.Fatal("expected provider validation error")
+	}
+	if !strings.Contains(err.Error(), "rag-hero-candidate") ||
+		!strings.Contains(err.Error(), "Available providers") {
+		t.Errorf("expected rich error listing available providers, got: %v", err)
+	}
+}
+
+func TestValidateProviders_FallbackOnListError(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.listProvidersErr = fmt.Errorf("forbidden")
+	sim.validProviders["claude-prod"] = true
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	_, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON: testPackJSON, DeployConfig: testDeployConfig,
+	})
+	if err != nil {
+		t.Fatalf("expected fallback per-ref validation to succeed, got: %v", err)
+	}
+}
+
+func TestValidateProviders_FallbackError(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.listProvidersErr = fmt.Errorf("forbidden")
+	// validProviders is empty -> the per-ref fallback also fails.
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	_, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON: testPackJSON, DeployConfig: testDeployConfig,
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider validation failed") {
+		t.Fatalf("expected fallback provider validation error, got: %v", err)
+	}
+}
+
+func TestToolCoverageWarnings(t *testing.T) {
+	userTools := &prompt.Pack{Tools: map[string]*prompt.PackTool{"refund": {}, "lookup": {}}}
+
+	t.Run("declared tools, no handlers warns", func(t *testing.T) {
+		w := toolCoverageWarnings(userTools, &Config{})
+		if len(w) != 1 || !strings.Contains(w[0], "lookup, refund") {
+			t.Errorf("want one warning naming [lookup, refund], got %v", w)
+		}
+	})
+	t.Run("handlers present, no warning", func(t *testing.T) {
+		if w := toolCoverageWarnings(userTools, &Config{Tools: []ToolHandler{{}}}); w != nil {
+			t.Errorf("want nil, got %v", w)
+		}
+	})
+	t.Run("no declared tools, no warning", func(t *testing.T) {
+		if w := toolCoverageWarnings(&prompt.Pack{}, &Config{}); w != nil {
+			t.Errorf("want nil, got %v", w)
+		}
+	})
+	t.Run("system tools only, no warning", func(t *testing.T) {
+		sys := &prompt.Pack{Tools: map[string]*prompt.PackTool{"image__generate": {}}}
+		if w := toolCoverageWarnings(sys, &Config{}); w != nil {
+			t.Errorf("want nil, got %v", w)
+		}
+	})
 }
 
 func TestBuildSummary(t *testing.T) {
