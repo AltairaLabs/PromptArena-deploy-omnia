@@ -65,6 +65,27 @@ echo '{"jsonrpc":"2.0","method":"get_provider_info","id":1}' | ./promptarena-dep
 | `.golangci.yml` | Linter configuration (25 linters) |
 | `Makefile` | Build targets: fmt, lint, test, build, check |
 
+## Documentation
+
+The `docs/` directory is a Starlight site and is the **source of truth** for the Omnia deploy docs. Diagrams use **d2** (`astro-d2`), not mermaid — a ` ```d2 ` block renders on the site; a ` ```mermaid ` block will not. Validate a diagram locally with `d2 <file>` before relying on it.
+
+### How these docs get published
+
+This repo has **no docs deploy of its own**. The pages are published only through the parent **PromptKit docs site** (promptkit.altairalabs.ai). At build time, PromptKit's `docs/scripts/fetch-adapter-docs.mjs` (run as `prebuild`) fetches this repo's `docs/src/content/docs/**` from **`main`** over the GitHub API and writes them into `arena/.../deploy/omnia/` (gitignored, generated). That PromptKit docs build **deploys on a PromptKit release** — so doc changes here go live on the **next PromptKit release**, not when they merge here.
+
+### Adding a NEW doc page (important)
+
+The fetch script maps a **fixed list of files** and **silently skips anything not in the map** (it logs `no mapping … skipping`). A new page in this repo will **not** appear on the PromptKit site until it is added to the omnia `extraFiles` map in PromptKit's `docs/scripts/fetch-adapter-docs.mjs`:
+
+```js
+"explanation/your-page.md": {
+  target: "explanation/deploy/omnia/your-page.md",
+  order: 42, // sorts within the deploy/omnia sidebar section
+},
+```
+
+Editing an **existing mapped page** (e.g. `how-to/configure.md`, `reference/configuration.md`) needs no PromptKit change — it flows through on the next release automatically.
+
 ## Go Code Standards
 
 - **Cognitive complexity**: Keep functions below **15** (enforced by `gocognit` linter). Proactively extract helper functions.
