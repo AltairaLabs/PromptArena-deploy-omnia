@@ -216,15 +216,26 @@ func buildSummary(changes []deploy.ResourceChange) string {
 	return fmt.Sprintf("Plan: %d to create, %d to update, %d to delete", create, update, del)
 }
 
-// validateProviders creates a client and checks that every unique provider
-// referenced in cfg.Providers exists in the Omnia workspace.
+// validateProviders checks that every provider ref in cfg.Providers exists in
+// the Omnia workspace. It prefers a single workspace-provider listing — which
+// validates every ref in one call and lets a miss report what IS available —
+// and falls back to per-ref existence checks if listing isn't permitted.
 func (p *Provider) validateProviders(ctx context.Context, cfg *Config) error {
 	client, err := p.clientFunc(cfg)
 	if err != nil {
 		return fmt.Errorf("omnia: failed to create client for provider validation: %w", err)
 	}
 
-	// Deduplicate provider refs.
+	available, listErr := client.ListProviders(ctx)
+	if listErr != nil {
+		return validateProvidersByName(ctx, client, cfg)
+	}
+
+	byName := make(map[string]bool, len(available))
+	for _, pr := range available {
+		byName[pr.Name] = true
+	}
+
 	seen := make(map[string]bool, len(cfg.Providers))
 	var errs []string
 	for _, b := range cfg.Providers {
@@ -232,16 +243,71 @@ func (p *Provider) validateProviders(ctx context.Context, cfg *Config) error {
 			continue
 		}
 		seen[b.Ref] = true
-
-		if err := client.ValidateProvider(ctx, b.Ref); err != nil {
-			errs = append(errs, describeRefValidationError("provider", b.Ref, err))
+		if !byName[b.Ref] {
+			errs = append(errs, providerNotFoundMessage(b.Ref, cfg.Workspace, b.Role, available))
 		}
 	}
-
 	if len(errs) > 0 {
 		return fmt.Errorf("omnia: provider validation failed: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// validateProvidersByName checks each unique provider ref exists via a per-ref
+// lookup. Used as a fallback when the workspace provider list can't be fetched.
+func validateProvidersByName(ctx context.Context, client omniaClient, cfg *Config) error {
+	seen := make(map[string]bool, len(cfg.Providers))
+	var errs []string
+	for _, b := range cfg.Providers {
+		if seen[b.Ref] {
+			continue
+		}
+		seen[b.Ref] = true
+		if err := client.ValidateProvider(ctx, b.Ref); err != nil {
+			errs = append(errs, describeRefValidationError("provider", b.Ref, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("omnia: provider validation failed: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// providerNotFoundMessage explains a missing provider ref by listing what the
+// workspace actually has, and which providers could fill the binding's role.
+func providerNotFoundMessage(ref, workspace, role string, available []ProviderSummary) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "provider %q not found in workspace %q", ref, workspace)
+	if len(available) == 0 {
+		return b.String()
+	}
+
+	sorted := append([]ProviderSummary(nil), available...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	parts := make([]string, 0, len(sorted))
+	for _, pr := range sorted {
+		desc := pr.Type
+		if pr.Model != "" {
+			desc += "/" + pr.Model
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s, role=%s)", pr.Name, desc, pr.Role))
+	}
+	fmt.Fprintf(&b, ". Available providers: %s", strings.Join(parts, ", "))
+
+	if role == "" {
+		role = "llm" // an unset role binds the primary LLM
+	}
+	var sameRole []string
+	for _, pr := range sorted {
+		if pr.Role == role {
+			sameRole = append(sameRole, pr.Name)
+		}
+	}
+	if len(sameRole) > 0 {
+		fmt.Fprintf(&b, ". For role=%s try: %s", role, strings.Join(sameRole, ", "))
+	}
+	return b.String()
 }
 
 // validateSkillSources creates a client and checks that every unique

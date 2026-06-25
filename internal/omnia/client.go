@@ -19,6 +19,10 @@ type omniaClient interface {
 	// ValidateProvider checks that a Provider CRD exists.
 	ValidateProvider(ctx context.Context, name string) error
 
+	// ListProviders returns the workspace's Provider CRDs (name/type/model/role),
+	// for validating refs against what's actually available and reporting it.
+	ListProviders(ctx context.Context) ([]ProviderSummary, error)
+
 	// ValidateSkillSource checks that a SkillSource CRD exists and is synced.
 	ValidateSkillSource(ctx context.Context, name string) error
 
@@ -28,6 +32,15 @@ type omniaClient interface {
 
 // omniaClientFactory creates an omniaClient for the given config.
 type omniaClientFactory func(cfg *Config) (omniaClient, error)
+
+// ProviderSummary is a workspace Provider CRD reduced to the fields useful for
+// validating and reporting deploy bindings.
+type ProviderSummary struct {
+	Name  string // the CRD name — what a binding's ref must match
+	Type  string // e.g. openai, anthropic, ollama
+	Model string // e.g. gpt-4o (may be empty)
+	Role  string // llm, embedding, tts, …
+}
 
 // ResourceResponse is the envelope returned by the Omnia API for a single resource.
 type ResourceResponse struct {

@@ -22,6 +22,42 @@ func newTestHTTPClient(t *testing.T, handler http.Handler) *httpClient {
 	}
 }
 
+func TestHTTPClient_ListProviders(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/providers") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"metadata":{"name":"rag-hero-candidate"},"spec":{"type":"openai","model":"gpt-4o","role":"llm"}},
+			{"metadata":{"name":"ollama"},"spec":{"type":"ollama","model":"llava:7b","role":"llm"}}
+		]`))
+	})
+	hc := newTestHTTPClient(t, handler)
+	provs, err := hc.ListProviders(context.Background())
+	if err != nil {
+		t.Fatalf("ListProviders: %v", err)
+	}
+	if len(provs) != 2 {
+		t.Fatalf("want 2 providers, got %d", len(provs))
+	}
+	if provs[0].Name != "rag-hero-candidate" || provs[0].Type != "openai" ||
+		provs[0].Model != "gpt-4o" || provs[0].Role != "llm" {
+		t.Errorf("unexpected first provider: %+v", provs[0])
+	}
+}
+
+func TestHTTPClient_ListProviders_Error(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+	})
+	hc := newTestHTTPClient(t, handler)
+	if _, err := hc.ListProviders(context.Background()); err == nil {
+		t.Fatal("expected error on 403 list")
+	}
+}
+
 func TestHTTPClient_CreateResource(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
