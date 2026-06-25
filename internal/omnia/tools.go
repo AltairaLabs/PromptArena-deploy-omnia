@@ -210,6 +210,26 @@ func placeholderHandler(packTool *prompt.PackTool, toolName string) map[string]i
 // points at; it never resolves, so a forgotten handler fails loudly.
 const placeholderEndpoint = "https://placeholder.invalid/"
 
+// countUncoveredPackTools returns how many non-system pack tools have no matching
+// cfg.Tools handler — i.e. how many handlers create mode synthesizes beyond the
+// configured ones (placeholders on a fresh create, placeholder-or-preserved on a
+// re-sync). Used for an accurate plan summary.
+func countUncoveredPackTools(pack *prompt.Pack, cfg *Config) int {
+	configured := make(map[string]bool, len(cfg.Tools))
+	for i := range cfg.Tools {
+		if t := cfg.Tools[i].Tool; t != nil && t.Name != "" {
+			configured[t.Name] = true
+		}
+	}
+	n := 0
+	for _, name := range packToolNames(pack) {
+		if !configured[name] {
+			n++
+		}
+	}
+	return n
+}
+
 // existingHandlerSchemaDrifts reports whether the pack tool's parameters differ
 // from a preserved handler's tool.inputSchema (normalized-JSON compare). It
 // reuses the schema-drift normalization so key ordering doesn't register.

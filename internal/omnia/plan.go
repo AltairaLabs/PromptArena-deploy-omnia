@@ -155,11 +155,14 @@ func generateDesiredResources(
 	// Step 1: ToolRegistry — created only in create mode (cfg.Tools present).
 	// Bind/none modes reference an existing registry (or none) and create nothing.
 	if binding.Mode == toolModeCreate {
+		configured := len(cfg.Tools)
+		placeholders := countUncoveredPackTools(pack, cfg)
 		desired = append(desired, deploy.ResourceChange{
 			Type:   ResTypeToolRegistry,
 			Name:   binding.RegistryName,
 			Action: deploy.ActionCreate,
-			Detail: fmt.Sprintf("Create ToolRegistry with %d handlers", len(cfg.Tools)),
+			Detail: fmt.Sprintf("Create ToolRegistry: %d handlers (%d configured, %d placeholder)",
+				configured+placeholders, configured, placeholders),
 		})
 	}
 
