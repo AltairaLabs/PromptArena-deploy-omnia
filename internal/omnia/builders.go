@@ -119,10 +119,12 @@ func buildAgentRuntimeRequest(
 		spec["providers"] = refs
 	}
 
-	// Tool registry reference (CRD created by the ToolRegistry phase).
-	if len(cfg.Tools) > 0 {
+	// Tool registry reference — the single registry the resolver decided to bind
+	// (a created <pack-id>-tools registry, an existing one via tool_registry_ref,
+	// or an auto-discovered one). Omitted when the resolver bound none.
+	if cfg.resolvedRegistryName != "" {
 		spec["toolRegistryRef"] = map[string]interface{}{
-			keyName: sanitizeName(pack.ID + "-tools"),
+			keyName: cfg.resolvedRegistryName,
 		}
 	}
 

@@ -239,6 +239,44 @@ func TestValidateConfig_DuplicateNames(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_ToolsAndRegistryRefMutuallyExclusive(t *testing.T) {
+	t.Setenv("OMNIA_API_TOKEN", "tok")
+	cfg := &Config{
+		APIEndpoint:     "https://omnia.example.com",
+		Workspace:       "ws",
+		Providers:       Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		ToolRegistryRef: "shared-tools",
+		Tools: []ToolHandler{{
+			Name: "search", Type: handlerTypeHTTP,
+			Tool:       &HandlerTool{Name: "search", Description: "Search", InputSchema: map[string]interface{}{"type": "object"}},
+			HTTPConfig: map[string]interface{}{"endpoint": "https://x"},
+		}},
+	}
+	errs := cfg.validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "mutually exclusive") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a mutual-exclusion error, got %v", errs)
+	}
+}
+
+func TestValidateConfig_RegistryRefAloneValid(t *testing.T) {
+	t.Setenv("OMNIA_API_TOKEN", "tok")
+	cfg := &Config{
+		APIEndpoint:     "https://omnia.example.com",
+		Workspace:       "ws",
+		Providers:       Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		ToolRegistryRef: "shared-tools",
+	}
+	if errs := cfg.validate(); len(errs) != 0 {
+		t.Errorf("expected tool_registry_ref alone to be valid, got %v", errs)
+	}
+}
+
 func TestParseConfig_InvalidJSON(t *testing.T) {
 	_, err := parseConfig("{bad json")
 	if err == nil {

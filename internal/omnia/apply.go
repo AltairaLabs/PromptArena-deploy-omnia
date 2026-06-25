@@ -31,6 +31,20 @@ type applyContext struct {
 	reporter *adaptersdk.ProgressReporter
 	client   omniaClient
 	priorMap map[string]ResourceState
+	binding  ToolBinding
+}
+
+// echoToolWarnings re-emits the resolver's advisories through the progress
+// stream. Apply has no Warnings return field (the deploy.Provider.Apply
+// signature is (state string, err error)), so — like reportAgentAccessURL —
+// advisories surface as progress messages.
+func echoToolWarnings(reporter *adaptersdk.ProgressReporter, warnings []string) error {
+	for _, w := range warnings {
+		if err := reporter.Progress("warning: "+w, 0); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Apply executes a deployment plan, streaming progress events via the callback.
@@ -57,12 +71,26 @@ func (p *Provider) Apply(
 
 	cfg.PackJSON = req.PackJSON
 
+	// Run the SAME tool-registry resolution plan ran, so apply binds the same
+	// registry and re-echoes the same advisories without introducing new
+	// failures the plan didn't show.
+	binding, toolWarnings, err := resolveToolBinding(ctx, p, pack, cfg)
+	if err != nil {
+		return "", err
+	}
+	cfg.resolvedRegistryName = binding.RegistryName
+
 	ac := &applyContext{
 		pack:     pack,
 		cfg:      cfg,
 		reporter: adaptersdk.NewProgressReporter(callback),
 		client:   client,
 		priorMap: parsePriorState(req.PriorState),
+		binding:  binding,
+	}
+
+	if cbErr := echoToolWarnings(ac.reporter, toolWarnings); cbErr != nil {
+		return "", cbErr
 	}
 
 	resources, applyErr := executeApplyPhases(ctx, ac)
@@ -92,10 +120,11 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	resources = append(resources, res...)
 	applyErr = combineErrors(applyErr, err)
 
-	// Phase 1: ToolRegistry (if the deploy config declares tool handlers)
-	if len(ac.cfg.Tools) > 0 {
+	// Phase 1: ToolRegistry — created only in create mode (same decision plan
+	// reached). Bind/none modes reference an existing registry (or none).
+	if ac.binding.Mode == toolModeCreate {
 		res, err = applyResourcePhase(ctx, ac, stepToolRegistry, ResTypeToolRegistry,
-			sanitizeName(ac.pack.ID+"-tools"),
+			ac.binding.RegistryName,
 			func() (json.RawMessage, error) { return buildToolRegistryRequest(ac.pack, ac.cfg) })
 		resources = append(resources, res...)
 		applyErr = combineErrors(applyErr, err)
@@ -234,7 +263,9 @@ func (p *Provider) applyDryRun(
 	}
 
 	reporter := adaptersdk.NewProgressReporter(callback)
-	desired := generateDesiredResources(pack, cfg)
+	binding := dryRunToolBinding(pack, cfg)
+	cfg.resolvedRegistryName = binding.RegistryName
+	desired := generateDesiredResources(pack, cfg, binding)
 
 	resources := make([]ResourceState, 0, len(desired))
 	for i, d := range desired {

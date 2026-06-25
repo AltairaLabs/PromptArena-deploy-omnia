@@ -43,13 +43,21 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 
 	// Validate that referenced providers and skill sources exist (skip in dry-run mode).
 	if !cfg.DryRun {
-		if err := p.validateProviders(ctx, cfg); err != nil {
-			return nil, err
+		if verr := p.validateProviders(ctx, cfg); verr != nil {
+			return nil, verr
 		}
-		if err := p.validateSkillSources(ctx, cfg); err != nil {
-			return nil, err
+		if verr := p.validateSkillSources(ctx, cfg); verr != nil {
+			return nil, verr
 		}
 	}
+
+	// Resolve the tool-registry binding once. Apply runs the SAME resolution, so
+	// the decision and its warnings are deterministic across plan and apply.
+	binding, toolWarnings, err := p.resolveToolBindingForPhase(ctx, pack, cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.resolvedRegistryName = binding.RegistryName
 
 	var prior *AdapterState
 	if req.PriorState != "" {
@@ -59,13 +67,13 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		}
 	}
 
-	desired := generateDesiredResources(pack, cfg)
+	desired := generateDesiredResources(pack, cfg, binding)
 	changes := diffResources(desired, prior)
 	summary := buildSummary(changes)
 
 	warnings := cfg.normalizationWarnings()
 	warnings = append(warnings, providerWarnings(cfg.Providers)...)
-	warnings = append(warnings, toolCoverageWarnings(pack, cfg)...)
+	warnings = append(warnings, toolWarnings...)
 
 	return &deploy.PlanResponse{
 		Changes:  changes,
@@ -74,35 +82,38 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	}, nil
 }
 
-// toolCoverageWarnings warns when the pack declares tool(s) but the deploy
-// config provides no handlers: the adapter then creates no ToolRegistry, so
-// those tools have no execution wiring and silently won't run. System-namespaced
-// tools (names containing "__", e.g. image__generate) are runtime-provided and
-// need no handler, so they're excluded.
-func toolCoverageWarnings(pack *prompt.Pack, cfg *Config) []string {
-	if len(cfg.Tools) > 0 || len(pack.Tools) == 0 {
-		return nil
+// resolveToolBindingForPhase runs the shared tool resolver, except in dry-run
+// mode where it derives the binding from config alone (no API calls — mirroring
+// how provider/skill validation is skipped in dry-run). The full resolver's
+// discovery and verification need a live workspace, so dry-run reports only what
+// config can state on its own.
+func (p *Provider) resolveToolBindingForPhase(
+	ctx context.Context, pack *prompt.Pack, cfg *Config,
+) (ToolBinding, []string, error) {
+	if cfg.DryRun {
+		return dryRunToolBinding(pack, cfg), nil, nil
 	}
-	names := make([]string, 0, len(pack.Tools))
-	for name := range pack.Tools {
-		if !strings.Contains(name, "__") {
-			names = append(names, name)
-		}
+	return resolveToolBinding(ctx, p, pack, cfg)
+}
+
+// dryRunToolBinding decides the binding from config alone, without listing
+// workspace registries: tools → create, tool_registry_ref → bind, else none.
+func dryRunToolBinding(pack *prompt.Pack, cfg *Config) ToolBinding {
+	switch {
+	case len(cfg.Tools) > 0:
+		return ToolBinding{Mode: toolModeCreate, RegistryName: sanitizeName(pack.ID + "-tools")}
+	case cfg.ToolRegistryRef != "":
+		return ToolBinding{Mode: toolModeBind, RegistryName: cfg.ToolRegistryRef}
+	default:
+		return ToolBinding{Mode: toolModeNone}
 	}
-	if len(names) == 0 {
-		return nil
-	}
-	sort.Strings(names)
-	return []string{fmt.Sprintf(
-		"pack declares tool(s) [%s] but deploy.config.tools has no handlers — no "+
-			"ToolRegistry will be created and these tools won't execute. Add a "+
-			"tools: block with handlers, or remove them from the pack.",
-		strings.Join(names, ", "))}
 }
 
 // generateDesiredResources builds the list of desired Omnia resources from the
-// pack and deploy config.
-func generateDesiredResources(pack *prompt.Pack, cfg *Config) []deploy.ResourceChange {
+// pack, deploy config, and the resolved tool binding.
+func generateDesiredResources(
+	pack *prompt.Pack, cfg *Config, binding ToolBinding,
+) []deploy.ResourceChange {
 	// Step 0: PromptPack CRD (dashboard folds pack content into a managed ConfigMap).
 	desired := []deploy.ResourceChange{
 		{
@@ -113,11 +124,12 @@ func generateDesiredResources(pack *prompt.Pack, cfg *Config) []deploy.ResourceC
 		},
 	}
 
-	// Step 1: ToolRegistry (if the deploy config declares tool handlers).
-	if len(cfg.Tools) > 0 {
+	// Step 1: ToolRegistry — created only in create mode (cfg.Tools present).
+	// Bind/none modes reference an existing registry (or none) and create nothing.
+	if binding.Mode == toolModeCreate {
 		desired = append(desired, deploy.ResourceChange{
 			Type:   ResTypeToolRegistry,
-			Name:   sanitizeName(pack.ID + "-tools"),
+			Name:   binding.RegistryName,
 			Action: deploy.ActionCreate,
 			Detail: fmt.Sprintf("Create ToolRegistry with %d handlers", len(cfg.Tools)),
 		})

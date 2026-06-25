@@ -317,6 +317,9 @@ func TestBuildAgentRuntimeRequest(t *testing.T) {
 			Tool:       &HandlerTool{Name: "search", Description: "Search tool", InputSchema: map[string]interface{}{"type": "object"}},
 			HTTPConfig: map[string]interface{}{"endpoint": "https://api.example.com"},
 		}},
+		// buildAgentRuntimeRequest now emits toolRegistryRef from the resolver's
+		// decision (resolvedRegistryName), not from cfg.Tools directly.
+		resolvedRegistryName: "test-pack-tools",
 	}
 
 	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)

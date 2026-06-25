@@ -203,6 +203,54 @@ func TestApply_SingleAgent(t *testing.T) {
 	}
 }
 
+func TestApply_BindMode_EchoesWarningsNoRegistry(t *testing.T) {
+	sim := newSimulatedClient()
+	// Registry exists but doesn't provide the pack's "search" tool → missing warning.
+	sim.toolRegistries = []ToolRegistrySummary{{Name: "shared-tools"}}
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	cfg := `{
+		"api_endpoint": "https://omnia.test.com",
+		"workspace": "test-ws",
+		"api_token": "test-token",
+		"providers": {"default": "claude-prod"},
+		"tool_registry_ref": "shared-tools"
+	}`
+
+	var events []*deploy.ApplyEvent
+	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON: testPackJSON, DeployConfig: cfg,
+	}, capturingCallback(&events))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The missing-tool advisory must be re-echoed through the progress stream.
+	if got := countContaining(progressMessages(events), "does not provide pack tool \"search\""); got != 1 {
+		t.Errorf("expected the resolver warning echoed once, messages: %v", progressMessages(events))
+	}
+
+	// Bind mode must not create a ToolRegistry resource.
+	var state AdapterState
+	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		t.Fatalf("failed to parse state: %v", err)
+	}
+	for _, r := range state.Resources {
+		if r.Type == ResTypeToolRegistry {
+			t.Errorf("bind mode must not create a ToolRegistry, got %+v", r)
+		}
+	}
+	// The AgentRuntime must still be bound to the named registry (verified via
+	// the stored body on the simulated client).
+	ar := sim.resources[simKey(ResTypeAgentRuntime, "test-pack")]
+	if ar == nil {
+		t.Fatal("expected AgentRuntime to be created")
+	}
+	if !strings.Contains(string(ar.Spec), "shared-tools") {
+		t.Errorf("expected AgentRuntime spec to bind shared-tools, got %s", ar.Spec)
+	}
+}
+
 func TestApply_DryRun(t *testing.T) {
 	sim := newSimulatedClient()
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}

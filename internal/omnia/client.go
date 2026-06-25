@@ -23,6 +23,11 @@ type omniaClient interface {
 	// for validating refs against what's actually available and reporting it.
 	ListProviders(ctx context.Context) ([]ProviderSummary, error)
 
+	// ListToolRegistries returns the workspace's ToolRegistry CRDs reduced to the
+	// LLM-facing tool names + input schemas they expose, for matching a pack's
+	// declared tools against what a registry actually provides.
+	ListToolRegistries(ctx context.Context) ([]ToolRegistrySummary, error)
+
 	// ValidateSkillSource checks that a SkillSource CRD exists and is synced.
 	ValidateSkillSource(ctx context.Context, name string) error
 
@@ -40,6 +45,21 @@ type ProviderSummary struct {
 	Type  string // e.g. openai, anthropic, ollama
 	Model string // e.g. gpt-4o (may be empty)
 	Role  string // llm, embedding, tts, …
+}
+
+// ToolRegistrySummary is a workspace ToolRegistry CRD reduced to the LLM-facing
+// tools it exposes — what a pack's declared tool names are matched against.
+type ToolRegistrySummary struct {
+	Name  string         // the CRD name — what a tool_registry_ref binds to
+	Tools []RegistryTool // one per spec.handlers[] that carries a tool block
+}
+
+// RegistryTool is one tool a ToolRegistry exposes: the LLM-facing name
+// (handler.tool.name, snake_case — what the pack references) and its input
+// schema (handler.tool.inputSchema), kept raw for a normalized schema compare.
+type RegistryTool struct {
+	Name        string
+	InputSchema json.RawMessage
 }
 
 // ResourceResponse is the envelope returned by the Omnia API for a single resource.
