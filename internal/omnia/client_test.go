@@ -67,7 +67,7 @@ func TestHTTPClient_ListToolRegistries(t *testing.T) {
 		_, _ = w.Write([]byte(`[
 			{"metadata":{"name":"refunds"},"spec":{"handlers":[
 				{"name":"issue-refund","tool":{"name":"issue_refund","inputSchema":{"type":"object"}}},
-				{"name":"selector-only"}
+				{"name":"backend","type":"openapi","openAPIConfig":{"specURL":"https://api.example.com/openapi.json"}}
 			]}},
 			{"metadata":{"name":"empty"},"spec":{"handlers":[]}}
 		]`))
@@ -88,6 +88,12 @@ func TestHTTPClient_ListToolRegistries(t *testing.T) {
 	}
 	if len(regs[1].Tools) != 0 {
 		t.Errorf("want empty registry to have no tools, got %v", regs[1].Tools)
+	}
+	if !regs[0].Dynamic {
+		t.Errorf("registry with an openapi handler should be Dynamic (tools resolved externally)")
+	}
+	if regs[1].Dynamic {
+		t.Errorf("empty registry should not be Dynamic")
 	}
 }
 

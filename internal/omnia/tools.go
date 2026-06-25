@@ -120,9 +120,15 @@ func resolveBindMode(
 	for _, name := range packTools {
 		rt, ok := byName[name]
 		if !ok {
-			warnings = append(warnings, fmt.Sprintf(
-				"tool_registry_ref %q does not provide pack tool %q — the agent won't be able to call it",
-				cfg.ToolRegistryRef, name))
+			// A dynamic registry resolves tools externally (openapi/mcp), so a
+			// statically-absent tool may still be provided — don't warn per-tool
+			// (the dynamic advisory below covers it). Only a fully-static registry
+			// genuinely lacks the tool.
+			if !reg.Dynamic {
+				warnings = append(warnings, fmt.Sprintf(
+					"tool_registry_ref %q does not provide pack tool %q — the agent won't be able to call it",
+					cfg.ToolRegistryRef, name))
+			}
 			continue
 		}
 		if schemaDrifts(pack.Tools[name], rt.InputSchema) {
@@ -130,6 +136,12 @@ func resolveBindMode(
 				"tool %q in registry %q has a different input schema than the pack was tested against — "+
 					"calls may fail at runtime", name, cfg.ToolRegistryRef))
 		}
+	}
+	if reg.Dynamic {
+		warnings = append(warnings, fmt.Sprintf(
+			"registry %q resolves its tools dynamically (e.g. an OpenAPI spec or MCP server), so the "+
+				"adapter can't statically verify it provides the pack's tools — ensure the source exposes them",
+			cfg.ToolRegistryRef))
 	}
 	return binding, warnings, nil
 }
@@ -200,15 +212,29 @@ func registryCovers(reg ToolRegistrySummary, want []string) bool {
 // registry covers all pack tools. It names the registry with the best (highest)
 // coverage as the recommended tool_registry_ref, falling back to a tools block.
 func discoverNoneWarning(registries []ToolRegistrySummary, packTools []string) []string {
+	missing := strings.Join(packTools, ", ")
+
+	var dynamic []string
 	best, bestCount := "", 0
 	for _, reg := range registries {
-		c := coverageCount(reg, packTools)
-		if c > bestCount {
+		if reg.Dynamic {
+			dynamic = append(dynamic, reg.Name)
+		}
+		if c := coverageCount(reg, packTools); c > bestCount {
 			best, bestCount = reg.Name, c
 		}
 	}
 
-	missing := strings.Join(packTools, ", ")
+	// A dynamic registry (openapi/mcp) can't be enumerated, so it never "covers"
+	// statically — but it may well provide the pack's tools. Recommend it.
+	if len(dynamic) > 0 {
+		return []string{fmt.Sprintf(
+			"pack declares tool(s) [%s]; no registry statically lists all of them, but [%s] "+
+				"resolve tools dynamically (e.g. an OpenAPI spec or MCP server) and may provide them — "+
+				"set tool_registry_ref to one (coverage can't be verified statically), or add a tools: block.",
+			missing, strings.Join(dynamic, ", "))}
+	}
+
 	if best == "" {
 		return []string{fmt.Sprintf(
 			"pack declares tool(s) [%s] but no workspace ToolRegistry provides them and "+

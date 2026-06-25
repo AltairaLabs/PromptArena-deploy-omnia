@@ -51,7 +51,12 @@ type ProviderSummary struct {
 // tools it exposes — what a pack's declared tool names are matched against.
 type ToolRegistrySummary struct {
 	Name  string         // the CRD name — what a tool_registry_ref binds to
-	Tools []RegistryTool // one per spec.handlers[] that carries a tool block
+	Tools []RegistryTool // one per spec.handlers[] that carries an inline tool block
+	// Dynamic is true when the registry has a handler that resolves its tools
+	// externally (an openapi specURL, an mcp server) rather than declaring them
+	// inline. Such tools can't be enumerated or schema-checked statically, so
+	// coverage against them is unverifiable rather than absent.
+	Dynamic bool
 }
 
 // RegistryTool is one tool a ToolRegistry exposes: the LLM-facing name

@@ -29,6 +29,55 @@ func resolverProvider(sim *simulatedClient) *Provider {
 
 func objSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 
+func TestResolveToolBinding_BindMode_DynamicRegistry(t *testing.T) {
+	pack := resolverPack("create_split", "list_splits")
+	cfg := &Config{Workspace: "demo", ToolRegistryRef: "splitpantz-api"}
+	sim := newSimulatedClient()
+	// An openapi-backed registry exposes no inline tools (Dynamic): coverage can't
+	// be verified statically, so there must be no per-tool "missing" warnings —
+	// only a single advisory that verification was skipped.
+	sim.toolRegistries = []ToolRegistrySummary{{Name: "splitpantz-api", Dynamic: true}}
+
+	binding, warnings, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if binding.Mode != toolModeBind || binding.RegistryName != "splitpantz-api" {
+		t.Fatalf("want bind/splitpantz-api, got %+v", binding)
+	}
+	joined := strings.Join(warnings, "\n")
+	if strings.Contains(joined, "does not provide pack tool") {
+		t.Errorf("a dynamic registry must not produce per-tool missing warnings, got %v", warnings)
+	}
+	if !strings.Contains(joined, "resolves its tools dynamically") {
+		t.Errorf("want a dynamic-registry advisory, got %v", warnings)
+	}
+}
+
+func TestResolveToolBinding_Discover_DynamicCandidate(t *testing.T) {
+	pack := resolverPack("create_split")
+	cfg := &Config{Workspace: "demo"}
+	sim := newSimulatedClient()
+	// No static registry lists the tool, but a dynamic one may provide it — it
+	// should be recommended (not auto-bound, since coverage is unverifiable).
+	sim.toolRegistries = []ToolRegistrySummary{
+		{Name: "other", Tools: []RegistryTool{{Name: "unrelated"}}},
+		{Name: "splitpantz-api", Dynamic: true},
+	}
+
+	binding, warnings, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if binding.Mode != toolModeNone {
+		t.Fatalf("want none (dynamic registry not auto-bound), got %+v", binding)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "splitpantz-api") ||
+		!strings.Contains(warnings[0], "resolve tools dynamically") {
+		t.Errorf("want a dynamic-candidate recommendation naming splitpantz-api, got %v", warnings)
+	}
+}
+
 // --- Create mode -----------------------------------------------------------
 
 func TestResolveToolBinding_CreateMode_StubWarning(t *testing.T) {
