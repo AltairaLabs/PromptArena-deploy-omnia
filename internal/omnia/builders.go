@@ -432,16 +432,16 @@ func buildEvalPathSpec(p *EvalPathConfig) map[string]interface{} {
 	return map[string]interface{}{"groups": p.Groups}
 }
 
-// buildToolRegistryRequest builds the JSON body for creating/updating a
-// ToolRegistry CRD. The handlers are the merge of the explicit deploy-config
-// tools block (authoritative) with a handler for every other non-system pack
-// tool — a placeholder the operator completes in Omnia, or the operator's
-// existing handler preserved verbatim. existing is the live registry's handlers
-// (nil when it doesn't exist yet); the merge never clobbers operator edits.
+// buildToolRegistryRequest builds the JSON body for CREATING a ToolRegistry CRD.
+// The registry is create-only — written exactly once, when it does not yet
+// exist — so this body is only ever used on a fresh create (an existing registry
+// is operator-owned and never updated). The handlers are the explicit
+// deploy-config tools block (authoritative) plus a placeholder for every other
+// non-system pack tool, which the operator completes in Omnia.
 func buildToolRegistryRequest(
-	pack *prompt.Pack, cfg *Config, existing []map[string]interface{},
+	pack *prompt.Pack, cfg *Config,
 ) (json.RawMessage, error) {
-	handlers, _ := mergeRegistryHandlers(pack, cfg, existing)
+	handlers, _ := buildCreateRegistryHandlers(pack, cfg)
 
 	req := map[string]interface{}{
 		keyMetadata: map[string]interface{}{

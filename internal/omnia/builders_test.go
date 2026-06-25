@@ -400,7 +400,7 @@ func TestBuildToolRegistryRequest(t *testing.T) {
 		t.Fatalf("failed to parse pack: %v", err)
 	}
 
-	body, err := buildToolRegistryRequest(pack, toolsCfg(), nil)
+	body, err := buildToolRegistryRequest(pack, toolsCfg())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

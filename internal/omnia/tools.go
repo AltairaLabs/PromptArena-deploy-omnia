@@ -94,52 +94,67 @@ func resolveToolBinding(
 	}
 }
 
+// registryNameFor returns the create-mode ToolRegistry name for a pack
+// (<pack-id>-tools, sanitized). It is the single source of that derivation so
+// the resolver, existence check, and builder never drift.
+func registryNameFor(pack *prompt.Pack) string {
+	return sanitizeName(pack.ID + "-tools")
+}
+
 // resolveCreateMode handles cfg.Tools being non-empty: a <pack-id>-tools
-// registry is synthesized. The synthesized registry carries a handler for EVERY
-// non-system pack tool (the portable pack strips handler URLs, so a tool without
-// a configured handler gets a placeholder the operator completes in Omnia). It
-// fetches the live registry and merges so an operator's completed handlers are
-// never clobbered on re-sync. A fetch failure degrades to placeholder-only
-// warnings (computed against no existing registry) rather than blocking.
+// registry is synthesized — but CREATE-ONLY. The registry is written exactly
+// once, when it does not yet exist; an existing one is operator-owned and never
+// updated. So the resolver only checks existence:
+//
+//   - registry absent → return the create-time handlers' "created N
+//     placeholder(s)" warnings (apply will CREATE it).
+//   - registry present → return a single "left unchanged" advisory; apply
+//     skips it. The binding still names the registry (the AgentRuntime
+//     references it regardless).
+//
+// A client-build failure or an existence-check error degrades to the
+// unchanged note when we can't prove absence, or — for a build failure where we
+// never reached the API — to the create-warnings path (apply won't update
+// either way, so this is purely advisory).
 func resolveCreateMode(
 	ctx context.Context, p *Provider, pack *prompt.Pack, cfg *Config,
 ) (ToolBinding, []string, error) {
-	binding := ToolBinding{Mode: toolModeCreate, RegistryName: sanitizeName(pack.ID + "-tools")}
+	binding := ToolBinding{Mode: toolModeCreate, RegistryName: registryNameFor(pack)}
 
 	client, cerr := p.clientFunc(cfg)
 	if cerr != nil {
-		// Can't reach the workspace to read the live registry — degrade to the
-		// merge computed against no existing handlers (placeholder-only).
-		_, warnings := mergeRegistryHandlers(pack, cfg, nil)
+		// Can't reach the workspace to check existence — degrade to the
+		// create-time placeholder warnings (apply won't update an existing one).
+		_, warnings := buildCreateRegistryHandlers(pack, cfg)
 		return binding, warnings, nil
 	}
-	existing, ferr := p.currentRegistryHandlers(ctx, client, pack)
-	if ferr != nil {
-		// A GetResource failure (other than a 404, which yields nil) must not
-		// block: degrade to placeholder-only warnings.
-		_, warnings := mergeRegistryHandlers(pack, cfg, nil)
-		return binding, warnings, nil
+	exists, eerr := registryExists(ctx, client, pack)
+	if eerr != nil || exists {
+		// Either it already exists, or we couldn't tell — either way apply will
+		// not update it, so emit the operator-owned advisory.
+		return binding, []string{fmt.Sprintf(registryUnchangedWarningFmt, binding.RegistryName)}, nil
 	}
-	_, warnings := mergeRegistryHandlers(pack, cfg, existing)
+	_, warnings := buildCreateRegistryHandlers(pack, cfg)
 	return binding, warnings, nil
 }
 
-// mergeRegistryHandlers computes the create-mode registry's handlers and the
-// advisory warnings, given the pack, deploy config, and the CURRENT registry's
-// handlers (existing is nil when the registry doesn't exist yet). The rules:
+// registryUnchangedWarningFmt is the advisory emitted when the create-mode
+// registry already exists — it is operator-owned and never updated.
+const registryUnchangedWarningFmt = "tool registry %q already exists — left unchanged (operator-owned); " +
+	"delete it to re-seed"
+
+// buildCreateRegistryHandlers computes the CREATE-ONLY registry's handlers and
+// the advisory warning, given the pack and deploy config. It is only ever used
+// to seed a registry that does not yet exist (an existing one is operator-owned
+// and never touched), so it has no notion of preserve/remove/drift:
 //
 //   - Every cfg.Tools handler is authoritative and always included.
 //   - Each non-system pack tool NOT covered by cfg.Tools (compared by LLM-facing
-//     tool name) is either preserved verbatim from the existing registry (the
-//     operator owns it once it exists) or, absent an existing handler, gets a
-//     placeholder the operator completes in Omnia.
-//   - An existing handler whose tool is neither a current non-system pack tool
-//     nor a configured tool is dropped (the tool left the pack).
+//     tool name) gets a placeholder the operator completes in Omnia.
 //
-// Preserved handlers are never overwritten; a pack-schema change on a preserved
-// tool only warns. Warnings are emitted only for non-empty categories.
-func mergeRegistryHandlers(
-	pack *prompt.Pack, cfg *Config, existing []map[string]interface{},
+// The only warning it returns is the "created N placeholder(s)" advisory.
+func buildCreateRegistryHandlers(
+	pack *prompt.Pack, cfg *Config,
 ) (handlers []map[string]interface{}, warnings []string) {
 	configured := make(map[string]bool, len(cfg.Tools))
 	handlers = make([]map[string]interface{}, 0, len(cfg.Tools))
@@ -150,70 +165,21 @@ func mergeRegistryHandlers(
 		}
 	}
 
-	existingByTool := indexHandlersByTool(existing)
-	packTools := packToolNames(pack)
-	packToolSet := make(map[string]bool, len(packTools))
-
-	var created, preserved, drifted []string
-	for _, name := range packTools {
-		packToolSet[name] = true
+	var created []string
+	for _, name := range packToolNames(pack) {
 		if configured[name] {
 			continue // a configured handler is authoritative; skip synthesis
-		}
-		if h, ok := existingByTool[name]; ok {
-			// The operator owns this handler — preserve it verbatim.
-			handlers = append(handlers, h)
-			preserved = append(preserved, name)
-			if existingHandlerSchemaDrifts(pack.Tools[name], h) {
-				drifted = append(drifted, name)
-			}
-			continue
 		}
 		handlers = append(handlers, placeholderHandler(pack.Tools[name], name, cfg.sourceToolMethods[name]))
 		created = append(created, name)
 	}
 
-	removed := removedHandlerTools(existingByTool, packToolSet, configured)
-	warnings = mergeWarnings(created, preserved, removed, drifted)
+	if len(created) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"created %d placeholder handler(s) — set real URLs in Omnia: %s",
+			len(created), strings.Join(created, ", ")))
+	}
 	return handlers, warnings
-}
-
-// indexHandlersByTool maps each existing handler by its LLM-facing tool name
-// (spec.handlers[].tool.name). Handlers with no inline tool block are skipped.
-func indexHandlersByTool(existing []map[string]interface{}) map[string]map[string]interface{} {
-	byTool := make(map[string]map[string]interface{}, len(existing))
-	for _, h := range existing {
-		if name := handlerToolName(h); name != "" {
-			byTool[name] = h
-		}
-	}
-	return byTool
-}
-
-// handlerToolName extracts handler.tool.name from a handler map, or "".
-func handlerToolName(h map[string]interface{}) string {
-	tool, ok := h["tool"].(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	name, _ := tool[keyName].(string)
-	return name
-}
-
-// removedHandlerTools returns the sorted set of existing handler tool names that
-// are neither a current non-system pack tool nor a configured tool — these are
-// dropped on sync because the tool left the pack.
-func removedHandlerTools(
-	existingByTool map[string]map[string]interface{}, packToolSet, configured map[string]bool,
-) []string {
-	var removed []string
-	for name := range existingByTool {
-		if !packToolSet[name] && !configured[name] {
-			removed = append(removed, name)
-		}
-	}
-	sort.Strings(removed)
-	return removed
 }
 
 // placeholderHandler synthesizes an http handler whose endpoint is an
@@ -267,75 +233,22 @@ func countUncoveredPackTools(pack *prompt.Pack, cfg *Config) int {
 	return n
 }
 
-// existingHandlerSchemaDrifts reports whether the pack tool's parameters differ
-// from a preserved handler's tool.inputSchema (normalized-JSON compare). It
-// reuses the schema-drift normalization so key ordering doesn't register.
-func existingHandlerSchemaDrifts(packTool *prompt.PackTool, handler map[string]interface{}) bool {
-	tool, ok := handler["tool"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	raw, err := json.Marshal(tool["inputSchema"])
-	if err != nil {
-		return false
-	}
-	return schemaDrifts(packTool, raw)
-}
-
-// mergeWarnings renders the create-mode merge advisories, one entry per
-// non-empty category (created placeholders, preserved operator handlers,
-// removed handlers, and one per drifted preserved tool).
-func mergeWarnings(created, preserved, removed, drifted []string) []string {
-	var warnings []string
-	if len(created) > 0 {
-		warnings = append(warnings, fmt.Sprintf(
-			"created %d placeholder handler(s) — set real URLs in Omnia: %s",
-			len(created), strings.Join(created, ", ")))
-	}
-	if len(preserved) > 0 {
-		warnings = append(warnings, fmt.Sprintf(
-			"preserved %d operator-managed handler(s) on re-sync", len(preserved)))
-	}
-	if len(removed) > 0 {
-		warnings = append(warnings, fmt.Sprintf(
-			"removed %d handler(s) for tool(s) no longer in the pack: %s",
-			len(removed), strings.Join(removed, ", ")))
-	}
-	for _, name := range drifted {
-		warnings = append(warnings, fmt.Sprintf(
-			"pack tool %q schema changed but its handler in the registry is preserved — "+
-				"update it in Omnia if needed", name))
-	}
-	return warnings
-}
-
-// currentRegistryHandlers fetches the live <pack-id>-tools ToolRegistry and
-// returns its spec.handlers as a slice of generic maps (so preserved operator
-// handlers round-trip verbatim through the merge). A 404 — the registry does not
-// yet exist — yields (nil, nil); any other GetResource failure is returned so
-// the caller can decide whether to degrade or fail. A registry whose spec has no
-// handlers yields (nil, nil) too.
-func (p *Provider) currentRegistryHandlers(
-	ctx context.Context, client omniaClient, pack *prompt.Pack,
-) ([]map[string]interface{}, error) {
-	resp, err := client.GetResource(ctx, ResTypeToolRegistry, sanitizeName(pack.ID+"-tools"))
+// registryExists reports whether the create-mode <pack-id>-tools ToolRegistry
+// already exists in the workspace. It is the gate for the CREATE-ONLY rule: an
+// existing registry is operator-owned and never updated. A typed 404 from
+// GetResource yields (false, nil); a successful fetch yields (true, nil); any
+// other error is returned so the caller can decide how to degrade (it never
+// blocks the deploy, since apply won't update an existing registry anyway).
+func registryExists(ctx context.Context, client omniaClient, pack *prompt.Pack) (bool, error) {
+	_, err := client.GetResource(ctx, ResTypeToolRegistry, registryNameFor(pack))
 	if err != nil {
 		var he *HTTPError
 		if errors.As(err, &he) && he.StatusCode == httpStatusNotFound {
-			return nil, nil
+			return false, nil
 		}
-		return nil, err
+		return false, err
 	}
-	if len(resp.Spec) == 0 {
-		return nil, nil
-	}
-	var spec struct {
-		Handlers []map[string]interface{} `json:"handlers"`
-	}
-	if uerr := json.Unmarshal(resp.Spec, &spec); uerr != nil {
-		return nil, fmt.Errorf("omnia: failed to parse existing tool registry handlers: %w", uerr)
-	}
-	return spec.Handlers, nil
+	return true, nil
 }
 
 // resolveBindMode handles an explicit tool_registry_ref: the named registry is

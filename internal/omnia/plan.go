@@ -212,7 +212,14 @@ func diffResources(desired []deploy.ResourceChange, prior *AdapterState) []deplo
 		key := resourceKey(d.Type, d.Name)
 		seen[key] = true
 
-		if _, exists := priorMap[key]; exists {
+		_, exists := priorMap[key]
+		// The ToolRegistry is CREATE-ONLY: once it exists it is operator-owned and
+		// never updated, so an existing one emits no change at all (apply skips it).
+		// Absent → fall through to the normal Create below.
+		if exists && d.Type == ResTypeToolRegistry {
+			continue
+		}
+		if exists {
 			changes = append(changes, deploy.ResourceChange{
 				Type:   d.Type,
 				Name:   d.Name,
