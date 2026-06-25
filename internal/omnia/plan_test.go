@@ -186,6 +186,11 @@ func TestPlan_WithPriorState(t *testing.T) {
 	}
 
 	for _, c := range resp.Changes {
+		// The tool_registry is CREATE-ONLY: an existing one emits no change at all,
+		// so it must never appear in the diff. Every other adopted resource updates.
+		if c.Type == ResTypeToolRegistry {
+			t.Errorf("an existing tool_registry must emit no change, got %+v", c)
+		}
 		if c.Action != deploy.ActionUpdate {
 			t.Errorf("expected UPDATE action for %s %q, got %s", c.Type, c.Name, c.Action)
 		}

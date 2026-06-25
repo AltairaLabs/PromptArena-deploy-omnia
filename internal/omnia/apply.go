@@ -136,27 +136,14 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	resources = append(resources, res...)
 	applyErr = combineErrors(applyErr, err)
 
-	// Phase 1: ToolRegistry — created only in create mode (same decision plan
-	// reached). Bind/none modes reference an existing registry (or none). The
-	// live registry's handlers are fetched first so the merge preserves an
-	// operator's completed handlers verbatim; a non-404 fetch failure fails the
-	// phase (we must not silently clobber operator edits we couldn't read).
+	// Phase 1: ToolRegistry — created only in create mode, and CREATE-ONLY: the
+	// registry is written exactly once, when it does not yet exist. An existing
+	// one is operator-owned and never updated (unlike the other resource types).
+	// Bind/none modes reference an existing registry (or none) and create nothing.
 	if ac.binding.Mode == toolModeCreate {
-		existing, ferr := ac.provider.currentRegistryHandlers(ctx, ac.client, ac.pack)
-		if ferr != nil {
-			deployErr := newDeployError("read", ResTypeToolRegistry, ac.binding.RegistryName, ferr)
-			_ = ac.reporter.Error(deployErr)
-			resources = append(resources, ResourceState{
-				Type: ResTypeToolRegistry, Name: ac.binding.RegistryName, Status: ResStatusFailed,
-			})
-			applyErr = combineErrors(applyErr, deployErr)
-		} else {
-			res, err = applyResourcePhase(ctx, ac, stepToolRegistry, ResTypeToolRegistry,
-				ac.binding.RegistryName,
-				func() (json.RawMessage, error) { return buildToolRegistryRequest(ac.pack, ac.cfg, existing) })
-			resources = append(resources, res...)
-			applyErr = combineErrors(applyErr, err)
-		}
+		res, err = applyToolRegistryCreate(ctx, ac)
+		resources = append(resources, res...)
+		applyErr = combineErrors(applyErr, err)
 	}
 
 	// Phase 2: AgentPolicy (if pack has tool policy)
@@ -196,6 +183,78 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	}
 
 	return resources, applyErr
+}
+
+// applyToolRegistryCreate applies the create-mode ToolRegistry under the
+// CREATE-ONLY rule: it is written exactly once, when it does not yet exist, and
+// an existing registry is left entirely untouched (operator-owned). Existence is
+// determined two ways:
+//
+//   - the adopted prior state (priorMap) already carries the registry key — it
+//     was found in the cluster, so skip without any API call; or
+//   - the CreateResource call returns a 409 AlreadyExists (a race, or adoption
+//     missed it) — unlike the generic applyResourcePhase belt-and-braces, this
+//     does NOT fall back to an update; the registry becomes a no-op.
+//
+// In either skip case the registry is recorded as ResStatusUnchanged (never
+// updated) and an advisory is reported. A genuine create succeeds as today.
+func applyToolRegistryCreate(ctx context.Context, ac *applyContext) ([]ResourceState, error) {
+	name := ac.binding.RegistryName
+	pct := float64(stepToolRegistry) * progressStepSize
+
+	if _, hasPrior := ac.priorMap[resourceKey(ResTypeToolRegistry, name)]; hasPrior {
+		return reportRegistryUnchanged(ac, name, pct)
+	}
+
+	if cbErr := ac.reporter.Progress(
+		fmt.Sprintf("%s %s: %s", verbCreating, ResTypeToolRegistry, name), pct,
+	); cbErr != nil {
+		return nil, cbErr
+	}
+
+	body, berr := buildToolRegistryRequest(ac.pack, ac.cfg)
+	if berr != nil {
+		deployErr := newDeployError("build", ResTypeToolRegistry, name, berr)
+		_ = ac.reporter.Error(deployErr)
+		return []ResourceState{{Type: ResTypeToolRegistry, Name: name, Status: ResStatusFailed}}, deployErr
+	}
+
+	resp, cerr := ac.client.CreateResource(ctx, ResTypeToolRegistry, name, body)
+	if cerr != nil {
+		// CREATE-ONLY: an AlreadyExists is a no-op, never an update.
+		if isAlreadyExists(cerr) {
+			return reportRegistryUnchanged(ac, name, pct)
+		}
+		deployErr := newDeployError(verbCreating, ResTypeToolRegistry, name, cerr)
+		_ = ac.reporter.Error(deployErr)
+		return []ResourceState{{Type: ResTypeToolRegistry, Name: name, Status: ResStatusFailed}}, deployErr
+	}
+
+	if cbErr := ac.reporter.Resource(&deploy.ResourceResult{
+		Type: ResTypeToolRegistry, Name: name, Action: deploy.ActionCreate,
+		Status: ResStatusCreated, Detail: resp.Metadata.UID,
+	}); cbErr != nil {
+		return nil, cbErr
+	}
+	return []ResourceState{{
+		Type:            ResTypeToolRegistry,
+		Name:            name,
+		UID:             resp.Metadata.UID,
+		ResourceVersion: resp.Metadata.ResourceVersion,
+		Status:          ResStatusCreated,
+	}}, nil
+}
+
+// reportRegistryUnchanged records the create-mode ToolRegistry as left unchanged
+// (operator-owned) and reports the advisory through the progress stream. It
+// performs no API write.
+func reportRegistryUnchanged(ac *applyContext, name string, pct float64) ([]ResourceState, error) {
+	if cbErr := ac.reporter.Progress(
+		fmt.Sprintf("tool registry %q exists — left unchanged", name), pct,
+	); cbErr != nil {
+		return nil, cbErr
+	}
+	return []ResourceState{{Type: ResTypeToolRegistry, Name: name, Status: ResStatusUnchanged}}, nil
 }
 
 // agentRuntimeSucceeded reports whether the AgentRuntime phase produced a

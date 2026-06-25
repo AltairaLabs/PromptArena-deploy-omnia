@@ -140,7 +140,7 @@ func TestResolveToolBinding_CreateMode_AllHandlersNoWarning(t *testing.T) {
 	}
 }
 
-func TestResolveToolBinding_CreateMode_PreservesOperatorHandler(t *testing.T) {
+func TestResolveToolBinding_CreateMode_ExistingRegistryLeftUnchanged(t *testing.T) {
 	pack := resolverPack("issue_refund", "lookup_order")
 	cfg := &Config{
 		Tools: []ToolHandler{{
@@ -149,8 +149,8 @@ func TestResolveToolBinding_CreateMode_PreservesOperatorHandler(t *testing.T) {
 		}},
 	}
 	sim := newSimulatedClient()
-	// The operator completed lookup_order's handler in Omnia (real URL). Its
-	// inputSchema matches the pack so only the preserved warning fires (no drift).
+	// The registry already exists (operator-owned). CREATE-ONLY: the resolver
+	// must NOT emit placeholder warnings — only the single left-unchanged advisory.
 	seedToolRegistry(sim, "test-pack", []map[string]interface{}{{
 		keyName: "lookup-order", keyType: handlerTypeHTTP,
 		"tool": map[string]interface{}{
@@ -158,12 +158,40 @@ func TestResolveToolBinding_CreateMode_PreservesOperatorHandler(t *testing.T) {
 		},
 		"httpConfig": map[string]interface{}{"endpoint": "https://real.example.com/lookup"},
 	}})
-	_, warnings, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
+	binding, warnings, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "preserved 1 operator-managed") {
-		t.Errorf("want one preserved-handler warning, got %v", warnings)
+	// The AgentRuntime still references the registry by name.
+	if binding.Mode != toolModeCreate || binding.RegistryName != "test-pack-tools" {
+		t.Fatalf("want create/test-pack-tools, got %+v", binding)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "already exists") ||
+		!strings.Contains(warnings[0], "left unchanged") {
+		t.Errorf("want one left-unchanged advisory, got %v", warnings)
+	}
+}
+
+func TestResolveToolBinding_CreateMode_ExistenceErrorDegradesToUnchanged(t *testing.T) {
+	pack := resolverPack("issue_refund", "lookup_order")
+	cfg := &Config{Tools: []ToolHandler{{
+		Name: "issue-refund", Type: handlerTypeHTTP, Tool: &HandlerTool{Name: "issue_refund"},
+	}}}
+	sim := newSimulatedClient()
+	// A non-404 existence-check error must NOT block and must NOT emit placeholder
+	// warnings (apply won't update either way) — it degrades to the unchanged note.
+	sim.failOn[simKey(ResTypeToolRegistry, "test-pack-tools")] = &HTTPError{
+		StatusCode: httpStatusForbidden, Body: "forbidden", Category: ErrCategoryPermission,
+	}
+	binding, warnings, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
+	if err != nil {
+		t.Fatalf("existence-check error must not hard-fail, got %v", err)
+	}
+	if binding.Mode != toolModeCreate {
+		t.Fatalf("want create mode, got %+v", binding)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "left unchanged") {
+		t.Errorf("want one left-unchanged advisory on existence error, got %v", warnings)
 	}
 }
 
@@ -461,16 +489,16 @@ func TestPlaceholderHandler_UsesSourceMethod(t *testing.T) {
 	}
 }
 
-// --- Merge wires the per-tool method ---------------------------------------
+// --- Create-build wires the per-tool method --------------------------------
 
-func TestMergeRegistryHandlers_AppliesSourceMethod(t *testing.T) {
+func TestBuildCreateRegistryHandlers_AppliesSourceMethod(t *testing.T) {
 	pack := resolverPack("list_user_exercises", "issue_refund")
 	cfg := &Config{
 		// list_user_exercises is a GET in the source; issue_refund is absent from
 		// the map → it must default to POST.
 		sourceToolMethods: map[string]string{"list_user_exercises": "GET"},
 	}
-	handlers, _ := mergeRegistryHandlers(pack, cfg, nil)
+	handlers, _ := buildCreateRegistryHandlers(pack, cfg)
 
 	byTool := map[string]map[string]interface{}{}
 	for _, h := range handlers {

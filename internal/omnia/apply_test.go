@@ -357,10 +357,15 @@ func TestApply_WithPriorState(t *testing.T) {
 		t.Fatalf("failed to parse state: %v", err)
 	}
 
-	// All resources should have "updated" status since they existed before.
+	// All resources existed before, so they update — EXCEPT the tool_registry,
+	// which is CREATE-ONLY and is left unchanged (operator-owned) once it exists.
 	for _, r := range state.Resources {
-		if r.Status != ResStatusUpdated {
-			t.Errorf("expected status %q for %s %q, got %q", ResStatusUpdated, r.Type, r.Name, r.Status)
+		want := ResStatusUpdated
+		if r.Type == ResTypeToolRegistry {
+			want = ResStatusUnchanged
+		}
+		if r.Status != want {
+			t.Errorf("expected status %q for %s %q, got %q", want, r.Type, r.Name, r.Status)
 		}
 	}
 }

@@ -3,7 +3,6 @@ package omnia
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -11,8 +10,19 @@ import (
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
+// handlerToolName extracts handler.tool.name from a handler map (test helper for
+// asserting the LLM-facing tool name a built handler serves).
+func handlerToolName(h map[string]interface{}) string {
+	tool, ok := h["tool"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	name, _ := tool[keyName].(string)
+	return name
+}
+
 // twoToolPackJSON declares two non-system tools; only `search` is configured in
-// twoToolDeployConfig, so `lookup_order` exercises the placeholder/preserve path.
+// twoToolDeployConfig, so `lookup_order` exercises the placeholder path.
 const twoToolPackJSON = `{
 	"id": "test-pack",
 	"version": "1.0.0",
@@ -43,7 +53,8 @@ func packWithTool(toolName string, schema interface{}) *prompt.Pack {
 }
 
 // handlerFor builds an existing-registry handler map for a tool, with an inline
-// tool block carrying the given inputSchema and an http endpoint.
+// tool block carrying the given inputSchema and an http endpoint. Used to seed a
+// pre-existing operator-owned registry the CREATE-ONLY rule must leave untouched.
 func handlerFor(toolName, endpoint string, schema interface{}) map[string]interface{} {
 	return map[string]interface{}{
 		keyName: sanitizeName(toolName),
@@ -57,7 +68,7 @@ func handlerFor(toolName, endpoint string, schema interface{}) map[string]interf
 	}
 }
 
-func TestMergeRegistryHandlers_ConfigOnly(t *testing.T) {
+func TestBuildCreateRegistryHandlers_ConfigOnly(t *testing.T) {
 	// The single pack tool IS configured → only config handlers, no extras.
 	pack := packWithTool("search", map[string]interface{}{"type": "object"})
 	cfg := &Config{Tools: []ToolHandler{{
@@ -66,7 +77,7 @@ func TestMergeRegistryHandlers_ConfigOnly(t *testing.T) {
 		HTTPConfig: map[string]interface{}{"endpoint": "https://api.example.com"},
 	}}}
 
-	handlers, warnings := mergeRegistryHandlers(pack, cfg, nil)
+	handlers, warnings := buildCreateRegistryHandlers(pack, cfg)
 	if len(handlers) != 1 {
 		t.Fatalf("want exactly the config handler, got %d", len(handlers))
 	}
@@ -78,11 +89,11 @@ func TestMergeRegistryHandlers_ConfigOnly(t *testing.T) {
 	}
 }
 
-func TestMergeRegistryHandlers_PlaceholderForUnconfigured(t *testing.T) {
+func TestBuildCreateRegistryHandlers_PlaceholderForUnconfigured(t *testing.T) {
 	pack := packWithTool("lookup_order", map[string]interface{}{"type": "object"})
 	cfg := &Config{} // no configured tools at all
 
-	handlers, warnings := mergeRegistryHandlers(pack, cfg, nil)
+	handlers, warnings := buildCreateRegistryHandlers(pack, cfg)
 	if len(handlers) != 1 {
 		t.Fatalf("want one placeholder handler, got %d", len(handlers))
 	}
@@ -110,58 +121,13 @@ func TestMergeRegistryHandlers_PlaceholderForUnconfigured(t *testing.T) {
 	}
 }
 
-func TestMergeRegistryHandlers_PreservesExistingOperatorHandler(t *testing.T) {
-	pack := packWithTool("lookup_order", map[string]interface{}{"type": "object"})
-	cfg := &Config{}
-	existing := []map[string]interface{}{
-		handlerFor("lookup_order", "https://real.example.com/lookup",
-			map[string]interface{}{"type": "object"}),
-	}
-
-	handlers, warnings := mergeRegistryHandlers(pack, cfg, existing)
-	if len(handlers) != 1 {
-		t.Fatalf("want one handler, got %d", len(handlers))
-	}
-	hc := handlers[0]["httpConfig"].(map[string]interface{})
-	if hc["endpoint"] != "https://real.example.com/lookup" {
-		t.Errorf("operator handler URL must be preserved verbatim, got %v", hc["endpoint"])
-	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "preserved 1 operator-managed") {
-		t.Errorf("want one preserved warning, got %v", warnings)
-	}
-}
-
-func TestMergeRegistryHandlers_RemovesDroppedTool(t *testing.T) {
-	// The pack no longer declares old_tool, but the live registry still has a
-	// handler for it → drop it and warn.
-	pack := packWithTool("search", map[string]interface{}{"type": "object"})
-	cfg := &Config{Tools: []ToolHandler{{
-		Name: "search", Type: handlerTypeHTTP,
-		Tool: &HandlerTool{Name: "search", InputSchema: map[string]interface{}{"type": "object"}},
-	}}}
-	existing := []map[string]interface{}{
-		handlerFor("old_tool", "https://real.example.com/old", map[string]interface{}{"type": "object"}),
-	}
-
-	handlers, warnings := mergeRegistryHandlers(pack, cfg, existing)
-	for _, h := range handlers {
-		if handlerToolName(h) == "old_tool" {
-			t.Errorf("dropped tool old_tool must not appear in handlers, got %v", h)
-		}
-	}
-	joined := strings.Join(warnings, "\n")
-	if !strings.Contains(joined, "removed 1 handler(s)") || !strings.Contains(joined, "old_tool") {
-		t.Errorf("want a removal warning naming old_tool, got %v", warnings)
-	}
-}
-
-func TestMergeRegistryHandlers_SystemToolExcluded(t *testing.T) {
+func TestBuildCreateRegistryHandlers_SystemToolExcluded(t *testing.T) {
 	// A system __ tool needs no handler — it must be neither placeholdered nor
 	// counted, even with no config tools.
 	pack := &prompt.Pack{ID: "test-pack", Tools: map[string]*prompt.PackTool{
 		"image__generate": {Name: "image__generate"},
 	}}
-	handlers, warnings := mergeRegistryHandlers(pack, &Config{}, nil)
+	handlers, warnings := buildCreateRegistryHandlers(pack, &Config{})
 	if len(handlers) != 0 {
 		t.Errorf("system tool must not be synthesized, got %d handlers", len(handlers))
 	}
@@ -170,116 +136,46 @@ func TestMergeRegistryHandlers_SystemToolExcluded(t *testing.T) {
 	}
 }
 
-func TestMergeRegistryHandlers_SchemaDriftOnPreservedWarns(t *testing.T) {
-	// The pack tool's schema changed, but the operator's handler is preserved.
-	pack := packWithTool("lookup_order", map[string]interface{}{
-		"type": "object", "properties": map[string]interface{}{"id": map[string]interface{}{"type": "string"}},
-	})
-	cfg := &Config{}
-	existing := []map[string]interface{}{
-		handlerFor("lookup_order", "https://real.example.com/lookup",
-			map[string]interface{}{"type": "object"}), // old/drifted schema
-	}
+// --- registryExists --------------------------------------------------------
 
-	handlers, warnings := mergeRegistryHandlers(pack, cfg, existing)
-	hc := handlers[0]["httpConfig"].(map[string]interface{})
-	if hc["endpoint"] != "https://real.example.com/lookup" {
-		t.Errorf("preserved handler must be untouched despite drift, got %v", hc["endpoint"])
-	}
-	joined := strings.Join(warnings, "\n")
-	if !strings.Contains(joined, "preserved 1 operator-managed") {
-		t.Errorf("want preserved warning, got %v", warnings)
-	}
-	if !strings.Contains(joined, "schema changed") || !strings.Contains(joined, "lookup_order") {
-		t.Errorf("want a drift warning naming lookup_order, got %v", warnings)
-	}
-}
-
-func TestExistingHandlerSchemaDrifts_NoToolBlock(t *testing.T) {
-	// A handler with no inline tool block can't drift (nothing to compare).
-	if existingHandlerSchemaDrifts(
-		&prompt.PackTool{Parameters: map[string]interface{}{"type": "object"}},
-		map[string]interface{}{keyName: "h", keyType: handlerTypeHTTP},
-	) {
-		t.Error("a handler with no tool block must not register drift")
-	}
-}
-
-// --- currentRegistryHandlers ----------------------------------------------
-
-func TestCurrentRegistryHandlers_404(t *testing.T) {
+func TestRegistryExists_404(t *testing.T) {
 	sim := newSimulatedClient() // empty store → GetResource returns a typed 404
-	p := resolverProvider(sim)
-	handlers, err := p.currentRegistryHandlers(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
+	exists, err := registryExists(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
 	if err != nil {
 		t.Fatalf("404 must yield nil error, got %v", err)
 	}
-	if handlers != nil {
-		t.Errorf("404 must yield nil handlers, got %v", handlers)
+	if exists {
+		t.Errorf("404 must yield exists=false")
 	}
 }
 
-func TestCurrentRegistryHandlers_OtherError(t *testing.T) {
-	sim := newSimulatedClient()
-	sim.failOn[simKey(ResTypeToolRegistry, "test-pack-tools")] = fmt.Errorf("boom")
-	p := resolverProvider(sim)
-	_, err := p.currentRegistryHandlers(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
-	if err == nil {
-		t.Fatal("a non-404 error must propagate")
-	}
-}
-
-func TestCurrentRegistryHandlers_Success(t *testing.T) {
+func TestRegistryExists_Found(t *testing.T) {
 	sim := newSimulatedClient()
 	seedToolRegistry(sim, "test-pack", []map[string]interface{}{
 		handlerFor("lookup_order", "https://real.example.com/lookup",
 			map[string]interface{}{"type": "object"}),
 	})
-	p := resolverProvider(sim)
-	handlers, err := p.currentRegistryHandlers(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
+	exists, err := registryExists(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(handlers) != 1 || handlerToolName(handlers[0]) != "lookup_order" {
-		t.Errorf("want the seeded handler parsed back, got %v", handlers)
+	if !exists {
+		t.Errorf("a seeded registry must yield exists=true")
 	}
 }
 
-func TestCurrentRegistryHandlers_EmptySpec(t *testing.T) {
+func TestRegistryExists_OtherError(t *testing.T) {
 	sim := newSimulatedClient()
-	sim.mu.Lock()
-	sim.resources[simKey(ResTypeToolRegistry, "test-pack-tools")] = &ResourceResponse{
-		Kind:     ResTypeToolRegistry,
-		Metadata: ResourceMetadata{Name: "test-pack-tools"},
+	sim.failOn[simKey(ResTypeToolRegistry, "test-pack-tools")] = &HTTPError{
+		StatusCode: httpStatusForbidden, Body: "forbidden", Category: ErrCategoryPermission,
 	}
-	sim.mu.Unlock()
-	p := resolverProvider(sim)
-	handlers, err := p.currentRegistryHandlers(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if handlers != nil {
-		t.Errorf("empty spec must yield nil handlers, got %v", handlers)
-	}
-}
-
-func TestCurrentRegistryHandlers_MalformedSpec(t *testing.T) {
-	sim := newSimulatedClient()
-	sim.mu.Lock()
-	sim.resources[simKey(ResTypeToolRegistry, "test-pack-tools")] = &ResourceResponse{
-		Kind:     ResTypeToolRegistry,
-		Metadata: ResourceMetadata{Name: "test-pack-tools"},
-		Spec:     json.RawMessage(`{"handlers": "not-an-array"}`),
-	}
-	sim.mu.Unlock()
-	p := resolverProvider(sim)
-	_, err := p.currentRegistryHandlers(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
+	_, err := registryExists(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
 	if err == nil {
-		t.Fatal("malformed handlers must produce a parse error")
+		t.Fatal("a non-404 error must propagate")
 	}
 }
 
-// --- Plan create-mode merge warnings --------------------------------------
+// --- Plan create-mode warnings --------------------------------------------
 
 func TestPlan_CreateMode_PlaceholderWarning(t *testing.T) {
 	sim := newSimulatedClient()
@@ -297,16 +193,21 @@ func TestPlan_CreateMode_PlaceholderWarning(t *testing.T) {
 	if !strings.Contains(joined, "created 1 placeholder") || !strings.Contains(joined, "lookup_order") {
 		t.Errorf("want a created-placeholder warning naming lookup_order, got %v", resp.Warnings)
 	}
+	// Absent registry → the plan must show a CREATE for the tool_registry.
+	if !hasChange(resp.Changes, ResTypeToolRegistry, deploy.ActionCreate) {
+		t.Errorf("want a tool_registry CREATE in the plan, got %+v", resp.Changes)
+	}
 }
 
-func TestPlan_CreateMode_PreservedAndRemovedWarnings(t *testing.T) {
+func TestPlan_CreateMode_ExistingRegistryLeftUnchanged(t *testing.T) {
 	sim := newSimulatedClient()
 	sim.validProviders["claude-prod"] = true
-	// Live registry: an operator-completed lookup_order + a stale handler for a
-	// tool no longer in the pack → preserve one, remove the other.
+	// All managed resources already exist (seeded with managed labels so adopt
+	// lists them) — including the operator-owned registry.
+	seedManagedResource(sim, ResTypePromptPack, "test-pack", "test-pack")
+	seedManagedResource(sim, ResTypeAgentRuntime, "test-pack", "test-pack")
 	seedToolRegistry(sim, "test-pack", []map[string]interface{}{
 		handlerFor("lookup_order", "https://real.example.com/lookup", map[string]interface{}{"type": "object"}),
-		handlerFor("gone_tool", "https://real.example.com/gone", map[string]interface{}{"type": "object"}),
 	})
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
@@ -316,16 +217,33 @@ func TestPlan_CreateMode_PreservedAndRemovedWarnings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	joined := strings.Join(resp.Warnings, "\n")
-	if !strings.Contains(joined, "preserved 1 operator-managed") {
-		t.Errorf("want a preserved warning, got %v", resp.Warnings)
+	// CREATE-ONLY: an existing registry emits NO change (neither create nor update).
+	for _, c := range resp.Changes {
+		if c.Type == ResTypeToolRegistry {
+			t.Errorf("an existing tool_registry must emit no change, got %+v", c)
+		}
 	}
-	if !strings.Contains(joined, "removed 1 handler(s)") || !strings.Contains(joined, "gone_tool") {
-		t.Errorf("want a removed warning naming gone_tool, got %v", resp.Warnings)
+	joined := strings.Join(resp.Warnings, "\n")
+	if !strings.Contains(joined, "already exists") || !strings.Contains(joined, "left unchanged") {
+		t.Errorf("want a left-unchanged advisory, got %v", resp.Warnings)
+	}
+	// The OTHER resources must still be updated (adopted as prior).
+	if !hasChange(resp.Changes, ResTypePromptPack, deploy.ActionUpdate) {
+		t.Errorf("want the prompt_pack to update, got %+v", resp.Changes)
 	}
 }
 
-// --- Apply create-mode merge body -----------------------------------------
+// hasChange reports whether changes contains a resource of the given type+action.
+func hasChange(changes []deploy.ResourceChange, resType string, action deploy.Action) bool {
+	for _, c := range changes {
+		if c.Type == resType && c.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+// --- Apply create-mode body -----------------------------------------------
 
 func TestApply_CreateMode_BodyHasConfigAndPlaceholder(t *testing.T) {
 	sim := newSimulatedClient() // empty store → registry created fresh
@@ -359,57 +277,55 @@ func TestApply_CreateMode_BodyHasConfigAndPlaceholder(t *testing.T) {
 	}
 }
 
-func TestApply_CreateMode_PreservesOperatorHandler(t *testing.T) {
+func TestApply_CreateMode_ExistingRegistryNotUpdated(t *testing.T) {
 	sim := newSimulatedClient()
 	sim.validProviders["claude-prod"] = true
-	// Operator completed lookup_order before re-apply.
+	// The operator already owns the registry (seeded with managed labels so adopt
+	// lists it as prior). CREATE-ONLY: apply must NOT update it. The other managed
+	// resources are seeded too so they adopt-and-update as normal (#41).
+	seedManagedResource(sim, ResTypePromptPack, "test-pack", "test-pack")
+	seedManagedResource(sim, ResTypeAgentRuntime, "test-pack", "test-pack")
 	seedToolRegistry(sim, "test-pack", []map[string]interface{}{
 		handlerFor("lookup_order", "https://real.example.com/lookup", map[string]interface{}{"type": "object"}),
 	})
-	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+	before := sim.resources[simKey(ResTypeToolRegistry, "test-pack-tools")].Metadata.ResourceVersion
 
-	_, err := p.Apply(context.Background(), &deploy.PlanRequest{
+	var events []*deploy.ApplyEvent
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
 		PackJSON: twoToolPackJSON, DeployConfig: twoToolDeployConfig,
-	}, noopApplyCallback)
+	}, capturingCallback(&events))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	reg := sim.resources[simKey(ResTypeToolRegistry, "test-pack-tools")]
-	if reg == nil {
-		t.Fatal("expected the ToolRegistry to exist")
+	// No UpdateResource was issued → the resourceVersion is unchanged AND the
+	// operator handler URL survives verbatim.
+	if reg.Metadata.ResourceVersion != before {
+		t.Errorf("registry must not be updated (version changed %s→%s)", before, reg.Metadata.ResourceVersion)
 	}
 	if !strings.Contains(string(reg.Spec), "https://real.example.com/lookup") {
-		t.Errorf("operator handler URL must survive re-apply, got %s", reg.Spec)
+		t.Errorf("operator handler must survive untouched, got %s", reg.Spec)
 	}
-	if strings.Contains(string(reg.Spec), "placeholder.invalid/lookup_order") {
-		t.Errorf("a preserved operator handler must not be reverted to a placeholder, got %s", reg.Spec)
-	}
-}
-
-func TestApply_CreateMode_ReadErrorFailsPhase(t *testing.T) {
-	sim := newSimulatedClient()
-	sim.validProviders["claude-prod"] = true
-	// A non-404 GetResource failure on the registry must fail the phase — the
-	// adapter must never clobber operator edits it couldn't read.
-	sim.failOn[simKey(ResTypeToolRegistry, "test-pack-tools")] = &HTTPError{
-		StatusCode: httpStatusForbidden, Body: "forbidden", Category: ErrCategoryPermission,
-	}
-	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
-
-	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
-		PackJSON: twoToolPackJSON, DeployConfig: twoToolDeployConfig,
-	}, noopApplyCallback)
-	if err == nil {
-		t.Fatal("a non-404 read error must fail the apply")
-	}
+	// State records it as unchanged, never updated.
 	var state AdapterState
 	if uerr := json.Unmarshal([]byte(stateJSON), &state); uerr != nil {
 		t.Fatalf("failed to parse state: %v", uerr)
 	}
 	for _, r := range state.Resources {
-		if r.Type == ResTypeToolRegistry && r.Status != ResStatusFailed {
-			t.Errorf("ToolRegistry must be marked failed, got %q", r.Status)
+		if r.Type == ResTypeToolRegistry && r.Status != ResStatusUnchanged {
+			t.Errorf("tool_registry status = %q, want %q", r.Status, ResStatusUnchanged)
+		}
+	}
+	// The "left unchanged" advisory is reported through progress.
+	if got := countContaining(progressMessages(events), "left unchanged"); got == 0 {
+		t.Errorf("want a left-unchanged progress message, got %v", progressMessages(events))
+	}
+	// The OTHER resources still update (they were adopted as prior).
+	for _, r := range state.Resources {
+		if r.Type == ResTypePromptPack && r.Status != ResStatusUpdated {
+			t.Errorf("prompt_pack status = %q, want %q", r.Status, ResStatusUpdated)
 		}
 	}
 }
@@ -484,6 +400,73 @@ func TestApply_CreateMode_PlaceholderDefaultsPOSTWithoutArenaConfig(t *testing.T
 	}
 	if m := placeholderMethodFor(t, reg.Spec, "lookup_order"); m != defaultHTTPMethod {
 		t.Errorf("lookup_order placeholder method = %q, want %q (POST default)", m, defaultHTTPMethod)
+	}
+}
+
+func TestApply_CreateMode_AlreadyExistsIsNoOp(t *testing.T) {
+	// The adopt-list missed the registry (it carries no managed labels, so it is
+	// NOT in priorMap), but the CreateResource call races and returns a 409
+	// AlreadyExists. CREATE-ONLY: this must become a no-op (unchanged), NOT an
+	// update — unlike the generic applyResourcePhase belt-and-braces fallback.
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	sim.createAlreadyExists = map[string]bool{
+		simKey(ResTypeToolRegistry, "test-pack-tools"): true,
+	}
+	var events []*deploy.ApplyEvent
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON: twoToolPackJSON, DeployConfig: twoToolDeployConfig,
+	}, capturingCallback(&events))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The seeded (raced) registry must keep its original resourceVersion "1" — no
+	// update was issued against it.
+	reg := sim.resources[simKey(ResTypeToolRegistry, "test-pack-tools")]
+	if reg == nil {
+		t.Fatal("expected the raced registry to exist")
+	}
+	if reg.Metadata.ResourceVersion != "1" {
+		t.Errorf("registry must not be updated on AlreadyExists, version = %s", reg.Metadata.ResourceVersion)
+	}
+	var state AdapterState
+	if uerr := json.Unmarshal([]byte(stateJSON), &state); uerr != nil {
+		t.Fatalf("failed to parse state: %v", uerr)
+	}
+	for _, r := range state.Resources {
+		if r.Type == ResTypeToolRegistry && r.Status != ResStatusUnchanged {
+			t.Errorf("tool_registry status = %q, want %q on AlreadyExists no-op", r.Status, ResStatusUnchanged)
+		}
+	}
+	if got := countContaining(progressMessages(events), "left unchanged"); got == 0 {
+		t.Errorf("want a left-unchanged progress message, got %v", progressMessages(events))
+	}
+}
+
+func TestApply_CreateMode_CreateErrorFailsPhase(t *testing.T) {
+	// A non-AlreadyExists create error must fail the registry phase (not no-op).
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	sim.failOn[simKey(ResTypeToolRegistry, "test-pack-tools")] = &HTTPError{
+		StatusCode: httpStatusServerError, Body: "boom", Category: ErrCategoryNetwork,
+	}
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON: twoToolPackJSON, DeployConfig: twoToolDeployConfig,
+	}, noopApplyCallback)
+	if err == nil {
+		t.Fatal("a non-AlreadyExists create error must fail the apply")
+	}
+	var state AdapterState
+	if uerr := json.Unmarshal([]byte(stateJSON), &state); uerr != nil {
+		t.Fatalf("failed to parse state: %v", uerr)
+	}
+	for _, r := range state.Resources {
+		if r.Type == ResTypeToolRegistry && r.Status != ResStatusFailed {
+			t.Errorf("tool_registry status = %q, want %q", r.Status, ResStatusFailed)
+		}
 	}
 }
 
