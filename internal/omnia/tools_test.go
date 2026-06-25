@@ -403,6 +403,90 @@ func TestSchemaDrifts(t *testing.T) {
 	}
 }
 
+// --- Source HTTP-method extraction ----------------------------------------
+
+func TestExtractSourceToolMethods_FromToolSpecs(t *testing.T) {
+	// A minimal valid ArenaConfig: tool_specs map with per-tool http.method. A
+	// GET tool, a POST tool (lower-case → upper-cased), and a method-less tool
+	// (omitted from the map).
+	arenaConfig := `{
+		"tool_specs": {
+			"list_user_exercises": {"description": "list", "mode": "live", "http": {"url": "https://x/list", "method": "get"}},
+			"create_workout": {"description": "create", "mode": "live", "http": {"url": "https://x/create", "method": "POST"}},
+			"local_only": {"description": "no http", "mode": "mock"}
+		}
+	}`
+	methods := extractSourceToolMethods(arenaConfig)
+	if methods["list_user_exercises"] != "GET" {
+		t.Errorf("list_user_exercises method = %q, want GET", methods["list_user_exercises"])
+	}
+	if methods["create_workout"] != "POST" {
+		t.Errorf("create_workout method = %q, want POST", methods["create_workout"])
+	}
+	if _, ok := methods["local_only"]; ok {
+		t.Errorf("a tool with no http method must be omitted, got %v", methods)
+	}
+}
+
+func TestExtractSourceToolMethods_DegradesToEmptyNonNil(t *testing.T) {
+	for _, in := range []string{"", "not json", "{"} {
+		methods := extractSourceToolMethods(in)
+		if methods == nil {
+			t.Errorf("input %q: map must be non-nil for graceful degradation", in)
+		}
+		if len(methods) != 0 {
+			t.Errorf("input %q: map must be empty, got %v", in, methods)
+		}
+	}
+}
+
+// --- Placeholder handler method --------------------------------------------
+
+func TestPlaceholderHandler_UsesSourceMethod(t *testing.T) {
+	packTool := &prompt.PackTool{Name: "list_user_exercises", Description: "list"}
+
+	h := placeholderHandler(packTool, "list_user_exercises", "GET")
+	hc := h[keyHTTPConfig].(map[string]interface{})
+	if hc[keyMethod] != "GET" {
+		t.Errorf("method with source GET = %v, want GET", hc[keyMethod])
+	}
+	if hc[keyEndpoint] != placeholderEndpoint+"list_user_exercises" {
+		t.Errorf("endpoint placeholder must be unchanged, got %v", hc[keyEndpoint])
+	}
+
+	def := placeholderHandler(packTool, "list_user_exercises", "")
+	dc := def[keyHTTPConfig].(map[string]interface{})
+	if dc[keyMethod] != defaultHTTPMethod {
+		t.Errorf("empty method must fall back to %q, got %v", defaultHTTPMethod, dc[keyMethod])
+	}
+}
+
+// --- Merge wires the per-tool method ---------------------------------------
+
+func TestMergeRegistryHandlers_AppliesSourceMethod(t *testing.T) {
+	pack := resolverPack("list_user_exercises", "issue_refund")
+	cfg := &Config{
+		// list_user_exercises is a GET in the source; issue_refund is absent from
+		// the map → it must default to POST.
+		sourceToolMethods: map[string]string{"list_user_exercises": "GET"},
+	}
+	handlers, _ := mergeRegistryHandlers(pack, cfg, nil)
+
+	byTool := map[string]map[string]interface{}{}
+	for _, h := range handlers {
+		byTool[handlerToolName(h)] = h
+	}
+
+	get := byTool["list_user_exercises"][keyHTTPConfig].(map[string]interface{})
+	if get[keyMethod] != "GET" {
+		t.Errorf("list_user_exercises placeholder method = %v, want GET", get[keyMethod])
+	}
+	post := byTool["issue_refund"][keyHTTPConfig].(map[string]interface{})
+	if post[keyMethod] != defaultHTTPMethod {
+		t.Errorf("issue_refund (absent from map) method = %v, want %q", post[keyMethod], defaultHTTPMethod)
+	}
+}
+
 func TestDryRunToolBinding(t *testing.T) {
 	pack := &prompt.Pack{ID: "test-pack"}
 	if b := dryRunToolBinding(pack, &Config{Tools: []ToolHandler{{}}}); b.Mode != toolModeCreate ||

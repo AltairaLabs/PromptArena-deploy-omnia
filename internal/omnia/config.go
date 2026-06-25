@@ -578,6 +578,15 @@ type Config struct {
 	// thread the single deterministic decision through without re-deriving it.
 	// NOT serialized — transient computed field.
 	resolvedRegistryName string
+
+	// sourceToolMethods maps an LLM-facing pack tool name to the HTTP method
+	// declared for it in the arena source (extracted from req.ArenaConfig). It
+	// lets create-mode placeholder handlers carry the REAL method (GET tools stay
+	// GET) instead of a hardcoded POST. Populated in Plan/Apply via
+	// extractSourceToolMethods, NOT parsed from the deploy-config JSON — being
+	// unexported, encoding/json ignores it, so config round-trips are unaffected.
+	// A nil/empty map (graceful degradation) simply leaves placeholders on POST.
+	sourceToolMethods map[string]string
 }
 
 // RuntimeConfig holds optional resource sizing for agent runtimes.
