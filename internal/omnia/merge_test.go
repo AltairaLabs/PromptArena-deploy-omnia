@@ -199,6 +199,41 @@ func TestPlan_CreateMode_PlaceholderWarning(t *testing.T) {
 	}
 }
 
+func TestPlan_CreateMode_SourceWiredAndPlaceholderSplit(t *testing.T) {
+	sim := newSimulatedClient()
+	sim.validProviders["claude-prod"] = true
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	// twoToolArenaConfig declares lookup_order as a live tool with a real URL →
+	// source-wired. `search` is configured. No tool is left as a placeholder.
+	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON: twoToolPackJSON, DeployConfig: twoToolDeployConfig, ArenaConfig: twoToolArenaConfig,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var detail string
+	for _, c := range resp.Changes {
+		if c.Type == ResTypeToolRegistry && c.Action == deploy.ActionCreate {
+			detail = c.Detail
+		}
+	}
+	want := "Create ToolRegistry: 2 handlers (1 configured, 1 from source, 0 placeholder)"
+	if detail != want {
+		t.Errorf("registry detail = %q, want %q", detail, want)
+	}
+
+	// The source-wired advisory must name lookup_order; no placeholder advisory.
+	joined := strings.Join(resp.Warnings, "\n")
+	if !strings.Contains(joined, "wired 1 handler(s) from the arena tool definitions (lookup_order)") {
+		t.Errorf("want a source-wired advisory naming lookup_order, got %v", resp.Warnings)
+	}
+	if strings.Contains(joined, "placeholder handler(s) with no source URL") {
+		t.Errorf("no placeholder advisory expected when all uncovered tools are source-wired, got %v", resp.Warnings)
+	}
+}
+
 func TestPlan_CreateMode_ExistingRegistryLeftUnchanged(t *testing.T) {
 	sim := newSimulatedClient()
 	sim.validProviders["claude-prod"] = true
@@ -331,16 +366,17 @@ func TestApply_CreateMode_ExistingRegistryNotUpdated(t *testing.T) {
 }
 
 // twoToolArenaConfig is a valid arena source config declaring lookup_order as a
-// GET tool, so the create-mode placeholder for it must carry method GET.
+// live GET tool with a real URL, so the create-mode handler for it must carry
+// method GET AND wire straight to that URL (source-wired, not a placeholder).
 const twoToolArenaConfig = `{
 	"tool_specs": {
 		"lookup_order": {"description": "Lookup", "mode": "live", "http": {"url": "https://x/lookup", "method": "get"}}
 	}
 }`
 
-// placeholderMethodFor finds the create-mode placeholder for toolName in a
-// stored registry body and returns its httpConfig.method.
-func placeholderMethodFor(t *testing.T, spec json.RawMessage, toolName string) string {
+// handlerHTTPConfigFor finds the create-mode handler for toolName in a stored
+// registry body and returns its httpConfig map.
+func handlerHTTPConfigFor(t *testing.T, spec json.RawMessage, toolName string) map[string]interface{} {
 	t.Helper()
 	for _, raw := range registryHandlers(t, spec) {
 		h := raw.(map[string]interface{})
@@ -351,14 +387,21 @@ func placeholderMethodFor(t *testing.T, spec json.RawMessage, toolName string) s
 		if !ok {
 			t.Fatalf("handler for %q has no httpConfig: %v", toolName, h)
 		}
-		m, _ := hc[keyMethod].(string)
-		return m
+		return hc
 	}
 	t.Fatalf("no handler found for tool %q", toolName)
-	return ""
+	return nil
 }
 
-func TestApply_CreateMode_PlaceholderUsesSourceMethod(t *testing.T) {
+// placeholderMethodFor returns the httpConfig.method of the create-mode handler
+// for toolName in a stored registry body.
+func placeholderMethodFor(t *testing.T, spec json.RawMessage, toolName string) string {
+	t.Helper()
+	m, _ := handlerHTTPConfigFor(t, spec, toolName)[keyMethod].(string)
+	return m
+}
+
+func TestApply_CreateMode_HandlerWiresSourceURLAndMethod(t *testing.T) {
 	sim := newSimulatedClient() // empty store → registry created fresh
 	sim.validProviders["claude-prod"] = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
@@ -374,10 +417,14 @@ func TestApply_CreateMode_PlaceholderUsesSourceMethod(t *testing.T) {
 	if reg == nil {
 		t.Fatal("expected the ToolRegistry to be created")
 	}
-	// lookup_order is GET in the arena source → its placeholder must be GET, not
-	// the hardcoded POST default.
-	if m := placeholderMethodFor(t, reg.Spec, "lookup_order"); m != "GET" {
-		t.Errorf("lookup_order placeholder method = %q, want GET", m)
+	// lookup_order is a live GET in the arena source → its handler must carry GET
+	// and wire to the real URL, not the hardcoded POST + placeholder.
+	hc := handlerHTTPConfigFor(t, reg.Spec, "lookup_order")
+	if hc[keyMethod] != "GET" {
+		t.Errorf("lookup_order handler method = %q, want GET", hc[keyMethod])
+	}
+	if hc[keyEndpoint] != "https://x/lookup" {
+		t.Errorf("lookup_order handler endpoint = %q, want https://x/lookup", hc[keyEndpoint])
 	}
 }
 
@@ -386,7 +433,7 @@ func TestApply_CreateMode_PlaceholderDefaultsPOSTWithoutArenaConfig(t *testing.T
 	sim.validProviders["claude-prod"] = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
-	// No ArenaConfig → sourceToolMethods is empty → placeholder keeps POST.
+	// No ArenaConfig → sourceTools is empty → placeholder keeps POST.
 	_, err := p.Apply(context.Background(), &deploy.PlanRequest{
 		PackJSON: twoToolPackJSON, DeployConfig: twoToolDeployConfig,
 	}, noopApplyCallback)

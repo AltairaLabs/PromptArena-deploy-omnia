@@ -69,10 +69,11 @@ func (p *Provider) Apply(
 		return p.applyDryRun(req, callback)
 	}
 
-	// Carry the arena source's HTTP methods onto the cfg that builds the
-	// registry, so create-mode placeholders use the real method (GET stays GET)
-	// rather than a hardcoded POST. Mirrors Plan; degrades to the POST default.
-	cfg.sourceToolMethods = extractSourceToolMethods(req.ArenaConfig)
+	// Carry the arena source's HTTP method + URL onto the cfg that builds the
+	// registry, so create-mode handlers use the real method (GET stays GET) and
+	// wire live tools straight to their real URL rather than a hardcoded POST to a
+	// placeholder. Mirrors Plan; degrades to the placeholder URL + POST default.
+	cfg.sourceTools = extractSourceTools(req.ArenaConfig)
 
 	pack, err := adaptersdk.ParsePack([]byte(req.PackJSON))
 	if err != nil {

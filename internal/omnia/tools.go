@@ -12,33 +12,44 @@ import (
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
-// HTTP-handler config keys and the default method a placeholder handler uses
-// when the source declares no method (or the tool isn't HTTP-backed).
+// HTTP-handler config keys and the default method a handler uses when the
+// source declares no method (or the tool isn't HTTP-backed).
 const (
 	keyEndpoint       = "endpoint"
 	keyMethod         = "method"
 	defaultHTTPMethod = "POST"
 )
 
-// extractSourceToolMethods reads the arena source config (the JSON-serialized
-// arena config the CLI threads through req.ArenaConfig) and returns a map from
-// each tool's LLM-facing name to its declared HTTP method (upper-cased). It
-// degrades gracefully: a parse failure, empty input, or a tool with no method
-// yields a (non-nil) map omitting that entry — it NEVER fails the deploy, since
-// the real method is an enhancement over the POST default, not a requirement.
-func extractSourceToolMethods(arenaConfigJSON string) map[string]string {
-	methods := make(map[string]string)
+// sourceTool carries the HTTP wiring an arena tool declares in its source: the
+// (upper-cased) method and the endpoint URL. Either field may be empty — a mock
+// tool has neither; a live tool has both. A non-empty URL is what lets create
+// mode wire a real handler instead of a placeholder.
+type sourceTool struct {
+	Method string
+	URL    string
+}
+
+// extractSourceTools reads the arena source config (the JSON-serialized arena
+// config the CLI threads through req.ArenaConfig) and returns a map from each
+// tool's LLM-facing name to its declared HTTP method (upper-cased) and URL. A
+// tool is kept if it has EITHER a method or a URL; a tool with neither (e.g. a
+// mock tool with no http block) is omitted. It degrades gracefully: a parse
+// failure or empty input yields a (non-nil) empty map — it NEVER fails the
+// deploy, since the real method/URL is an enhancement over the placeholder
+// defaults, not a requirement.
+func extractSourceTools(arenaConfigJSON string) map[string]sourceTool {
+	tools := make(map[string]sourceTool)
 	infos, err := adaptersdk.ExtractToolInfo(arenaConfigJSON)
 	if err != nil {
-		return methods
+		return tools
 	}
 	for _, info := range infos {
-		if info.HTTPMethod == "" {
+		if info.HTTPMethod == "" && info.HTTPURL == "" {
 			continue
 		}
-		methods[info.Name] = strings.ToUpper(info.HTTPMethod)
+		tools[info.Name] = sourceTool{Method: strings.ToUpper(info.HTTPMethod), URL: info.HTTPURL}
 	}
-	return methods
+	return tools
 }
 
 // ToolBinding is the deterministic decision the resolver reaches about how a
@@ -150,9 +161,13 @@ const registryUnchangedWarningFmt = "tool registry %q already exists — left un
 //
 //   - Every cfg.Tools handler is authoritative and always included.
 //   - Each non-system pack tool NOT covered by cfg.Tools (compared by LLM-facing
-//     tool name) gets a placeholder the operator completes in Omnia.
+//     tool name) is synthesized from its arena source definition: a live tool
+//     (one whose source declares a URL) is wired straight to that real URL; a
+//     tool with no source URL (mock / no http block) gets a placeholder the
+//     operator completes in Omnia.
 //
-// The only warning it returns is the "created N placeholder(s)" advisory.
+// It returns up to two advisories — one for the source-wired handlers and one
+// for the placeholders — so the deploy output is explicit about each.
 func buildCreateRegistryHandlers(
 	pack *prompt.Pack, cfg *Config,
 ) (handlers []map[string]interface{}, warnings []string) {
@@ -165,45 +180,61 @@ func buildCreateRegistryHandlers(
 		}
 	}
 
-	var created []string
+	var sourceWired, placeholders []string
 	for _, name := range packToolNames(pack) {
 		if configured[name] {
 			continue // a configured handler is authoritative; skip synthesis
 		}
-		handlers = append(handlers, placeholderHandler(pack.Tools[name], name, cfg.sourceToolMethods[name]))
-		created = append(created, name)
+		src := cfg.sourceTools[name]
+		handlers = append(handlers, synthesizeHandler(pack.Tools[name], name, src))
+		if src.URL != "" {
+			sourceWired = append(sourceWired, name)
+		} else {
+			placeholders = append(placeholders, name)
+		}
 	}
 
-	if len(created) > 0 {
+	if len(sourceWired) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
-			"created %d placeholder handler(s) — set real URLs in Omnia: %s",
-			len(created), strings.Join(created, ", ")))
+			"tool registry: wired %d handler(s) from the arena tool definitions (%s) — "+
+				"applied only because the registry doesn't already exist",
+			len(sourceWired), strings.Join(sourceWired, ", ")))
+	}
+	if len(placeholders) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"created %d placeholder handler(s) with no source URL — set real URLs in Omnia: %s",
+			len(placeholders), strings.Join(placeholders, ", ")))
 	}
 	return handlers, warnings
 }
 
-// placeholderHandler synthesizes an http handler whose endpoint is an
-// RFC-2606 .invalid URL — it never resolves and fails loudly, so the operator
-// knows to set the real URL in Omnia. The pack tool's schema is carried through.
-// method is the HTTP method from the arena source (e.g. "GET" for a read tool);
-// when empty (the tool isn't HTTP-backed, or no method was declared) it falls
-// back to defaultHTTPMethod so existing behavior is unchanged.
-func placeholderHandler(packTool *prompt.PackTool, toolName, method string) map[string]interface{} {
+// synthesizeHandler builds an http handler for a non-configured pack tool from
+// its arena source definition. When the source declares a URL (a live tool) the
+// handler is wired straight to it; otherwise the endpoint is an RFC-2606
+// .invalid placeholder that never resolves and fails loudly, so the operator
+// knows to set the real URL in Omnia. The method comes from the source too,
+// falling back to defaultHTTPMethod when none was declared. The pack tool's
+// schema is carried through.
+func synthesizeHandler(packTool *prompt.PackTool, toolName string, src sourceTool) map[string]interface{} {
 	tool := map[string]interface{}{keyName: toolName}
 	if packTool != nil {
 		tool["description"] = packTool.Description
 		tool["inputSchema"] = packTool.Parameters
 	}
+	endpoint := placeholderEndpoint + toolName
+	if src.URL != "" {
+		endpoint = src.URL
+	}
 	httpMethod := defaultHTTPMethod
-	if method != "" {
-		httpMethod = method
+	if src.Method != "" {
+		httpMethod = src.Method
 	}
 	return map[string]interface{}{
 		keyName: sanitizeName(toolName),
 		keyType: handlerTypeHTTP,
 		"tool":  tool,
 		keyHTTPConfig: map[string]interface{}{
-			keyEndpoint: placeholderEndpoint + toolName,
+			keyEndpoint: endpoint,
 			keyMethod:   httpMethod,
 		},
 	}
@@ -213,24 +244,29 @@ func placeholderHandler(packTool *prompt.PackTool, toolName, method string) map[
 // points at; it never resolves, so a forgotten handler fails loudly.
 const placeholderEndpoint = "https://placeholder.invalid/"
 
-// countUncoveredPackTools returns how many non-system pack tools have no matching
-// cfg.Tools handler — i.e. how many handlers create mode synthesizes beyond the
-// configured ones (placeholders on a fresh create, placeholder-or-preserved on a
-// re-sync). Used for an accurate plan summary.
-func countUncoveredPackTools(pack *prompt.Pack, cfg *Config) int {
+// countSynthesizedPackTools returns how many non-system pack tools create mode
+// synthesizes beyond the configured ones, split by how they're wired: sourceWired
+// is the count whose arena source declares a URL (wired to the real endpoint),
+// placeholder is the count with no source URL (an Omnia placeholder). Used for an
+// accurate plan summary.
+func countSynthesizedPackTools(pack *prompt.Pack, cfg *Config) (sourceWired, placeholder int) {
 	configured := make(map[string]bool, len(cfg.Tools))
 	for i := range cfg.Tools {
 		if t := cfg.Tools[i].Tool; t != nil && t.Name != "" {
 			configured[t.Name] = true
 		}
 	}
-	n := 0
 	for _, name := range packToolNames(pack) {
-		if !configured[name] {
-			n++
+		if configured[name] {
+			continue
+		}
+		if cfg.sourceTools[name].URL != "" {
+			sourceWired++
+		} else {
+			placeholder++
 		}
 	}
-	return n
+	return sourceWired, placeholder
 }
 
 // registryExists reports whether the create-mode <pack-id>-tools ToolRegistry

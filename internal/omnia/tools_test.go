@@ -431,12 +431,12 @@ func TestSchemaDrifts(t *testing.T) {
 	}
 }
 
-// --- Source HTTP-method extraction ----------------------------------------
+// --- Source HTTP method + URL extraction ----------------------------------
 
-func TestExtractSourceToolMethods_FromToolSpecs(t *testing.T) {
-	// A minimal valid ArenaConfig: tool_specs map with per-tool http.method. A
-	// GET tool, a POST tool (lower-case → upper-cased), and a method-less tool
-	// (omitted from the map).
+func TestExtractSourceTools_FromToolSpecs(t *testing.T) {
+	// A minimal valid ArenaConfig: tool_specs map with per-tool http.{url,method}.
+	// A GET tool with a URL, a POST tool (lower-case method → upper-cased) with a
+	// URL, and a tool with no http block (omitted from the map).
 	arenaConfig := `{
 		"tool_specs": {
 			"list_user_exercises": {"description": "list", "mode": "live", "http": {"url": "https://x/list", "method": "get"}},
@@ -444,74 +444,114 @@ func TestExtractSourceToolMethods_FromToolSpecs(t *testing.T) {
 			"local_only": {"description": "no http", "mode": "mock"}
 		}
 	}`
-	methods := extractSourceToolMethods(arenaConfig)
-	if methods["list_user_exercises"] != "GET" {
-		t.Errorf("list_user_exercises method = %q, want GET", methods["list_user_exercises"])
+	tools := extractSourceTools(arenaConfig)
+	if got := tools["list_user_exercises"]; got.Method != "GET" || got.URL != "https://x/list" {
+		t.Errorf("list_user_exercises = %+v, want {GET https://x/list}", got)
 	}
-	if methods["create_workout"] != "POST" {
-		t.Errorf("create_workout method = %q, want POST", methods["create_workout"])
+	if got := tools["create_workout"]; got.Method != "POST" || got.URL != "https://x/create" {
+		t.Errorf("create_workout = %+v, want {POST https://x/create}", got)
 	}
-	if _, ok := methods["local_only"]; ok {
-		t.Errorf("a tool with no http method must be omitted, got %v", methods)
+	if _, ok := tools["local_only"]; ok {
+		t.Errorf("a tool with no http block must be omitted, got %v", tools)
 	}
 }
 
-func TestExtractSourceToolMethods_DegradesToEmptyNonNil(t *testing.T) {
+func TestExtractSourceTools_DegradesToEmptyNonNil(t *testing.T) {
 	for _, in := range []string{"", "not json", "{"} {
-		methods := extractSourceToolMethods(in)
-		if methods == nil {
+		tools := extractSourceTools(in)
+		if tools == nil {
 			t.Errorf("input %q: map must be non-nil for graceful degradation", in)
 		}
-		if len(methods) != 0 {
-			t.Errorf("input %q: map must be empty, got %v", in, methods)
+		if len(tools) != 0 {
+			t.Errorf("input %q: map must be empty, got %v", in, tools)
 		}
 	}
 }
 
-// --- Placeholder handler method --------------------------------------------
+// --- synthesizeHandler: real URL for live tools, placeholder otherwise ------
 
-func TestPlaceholderHandler_UsesSourceMethod(t *testing.T) {
+func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	packTool := &prompt.PackTool{Name: "list_user_exercises", Description: "list"}
 
-	h := placeholderHandler(packTool, "list_user_exercises", "GET")
+	// Source carries a real URL + method → both wired straight through.
+	h := synthesizeHandler(packTool, "list_user_exercises", sourceTool{Method: "GET", URL: "https://x/list"})
 	hc := h[keyHTTPConfig].(map[string]interface{})
 	if hc[keyMethod] != "GET" {
 		t.Errorf("method with source GET = %v, want GET", hc[keyMethod])
 	}
-	if hc[keyEndpoint] != placeholderEndpoint+"list_user_exercises" {
-		t.Errorf("endpoint placeholder must be unchanged, got %v", hc[keyEndpoint])
+	if hc[keyEndpoint] != "https://x/list" {
+		t.Errorf("endpoint with source URL = %v, want https://x/list", hc[keyEndpoint])
 	}
 
-	def := placeholderHandler(packTool, "list_user_exercises", "")
+	// Empty source → placeholder URL + POST default.
+	def := synthesizeHandler(packTool, "list_user_exercises", sourceTool{})
 	dc := def[keyHTTPConfig].(map[string]interface{})
 	if dc[keyMethod] != defaultHTTPMethod {
-		t.Errorf("empty method must fall back to %q, got %v", defaultHTTPMethod, dc[keyMethod])
+		t.Errorf("empty source method must fall back to %q, got %v", defaultHTTPMethod, dc[keyMethod])
+	}
+	if dc[keyEndpoint] != placeholderEndpoint+"list_user_exercises" {
+		t.Errorf("empty source URL must fall back to placeholder, got %v", dc[keyEndpoint])
+	}
+
+	// URL empty but method set → placeholder URL with that method.
+	mo := synthesizeHandler(packTool, "list_user_exercises", sourceTool{Method: "DELETE"})
+	mc := mo[keyHTTPConfig].(map[string]interface{})
+	if mc[keyMethod] != "DELETE" {
+		t.Errorf("method-only source must keep its method, got %v", mc[keyMethod])
+	}
+	if mc[keyEndpoint] != placeholderEndpoint+"list_user_exercises" {
+		t.Errorf("method-only source must still use the placeholder URL, got %v", mc[keyEndpoint])
 	}
 }
 
-// --- Create-build wires the per-tool method --------------------------------
+// --- Create-build wires source URLs + emits both advisories ----------------
 
-func TestBuildCreateRegistryHandlers_AppliesSourceMethod(t *testing.T) {
+func TestBuildCreateRegistryHandlers_SourceWiredAndPlaceholder(t *testing.T) {
 	pack := resolverPack("list_user_exercises", "issue_refund")
 	cfg := &Config{
-		// list_user_exercises is a GET in the source; issue_refund is absent from
-		// the map → it must default to POST.
-		sourceToolMethods: map[string]string{"list_user_exercises": "GET"},
+		// list_user_exercises is a live GET (has a URL) → source-wired; issue_refund
+		// is absent from the map → placeholder + POST default.
+		sourceTools: map[string]sourceTool{
+			"list_user_exercises": {Method: "GET", URL: "https://x/list"},
+		},
 	}
-	handlers, _ := buildCreateRegistryHandlers(pack, cfg)
+	handlers, warnings := buildCreateRegistryHandlers(pack, cfg)
 
 	byTool := map[string]map[string]interface{}{}
 	for _, h := range handlers {
 		byTool[handlerToolName(h)] = h
 	}
 
-	get := byTool["list_user_exercises"][keyHTTPConfig].(map[string]interface{})
-	if get[keyMethod] != "GET" {
-		t.Errorf("list_user_exercises placeholder method = %v, want GET", get[keyMethod])
+	live := byTool["list_user_exercises"][keyHTTPConfig].(map[string]interface{})
+	if live[keyMethod] != "GET" || live[keyEndpoint] != "https://x/list" {
+		t.Errorf("list_user_exercises handler = %v, want GET https://x/list", live)
 	}
-	post := byTool["issue_refund"][keyHTTPConfig].(map[string]interface{})
-	if post[keyMethod] != defaultHTTPMethod {
-		t.Errorf("issue_refund (absent from map) method = %v, want %q", post[keyMethod], defaultHTTPMethod)
+	ph := byTool["issue_refund"][keyHTTPConfig].(map[string]interface{})
+	if ph[keyMethod] != defaultHTTPMethod || ph[keyEndpoint] != placeholderEndpoint+"issue_refund" {
+		t.Errorf("issue_refund handler = %v, want POST placeholder", ph)
+	}
+
+	if len(warnings) != 2 {
+		t.Fatalf("want 2 advisories (source-wired + placeholder), got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "wired 1 handler(s) from the arena tool definitions (list_user_exercises)") {
+		t.Errorf("source-wired advisory = %q", warnings[0])
+	}
+	if !strings.Contains(warnings[1], "created 1 placeholder handler(s) with no source URL — set real URLs in Omnia: issue_refund") {
+		t.Errorf("placeholder advisory = %q", warnings[1])
+	}
+}
+
+func TestBuildCreateRegistryHandlers_AllConfiguredNoAdvisories(t *testing.T) {
+	pack := resolverPack("search")
+	cfg := &Config{Tools: []ToolHandler{{
+		Name: "search", Type: handlerTypeHTTP,
+		Tool:       &HandlerTool{Name: "search", Description: "Search", InputSchema: map[string]interface{}{"type": "object"}},
+		HTTPConfig: map[string]interface{}{keyEndpoint: "https://api.example.com/search"},
+	}}}
+	_, warnings := buildCreateRegistryHandlers(pack, cfg)
+	if len(warnings) != 0 {
+		t.Errorf("all-configured must emit no advisories, got %v", warnings)
 	}
 }
 
