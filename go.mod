@@ -2,7 +2,7 @@ module github.com/AltairaLabs/promptarena-deploy-omnia
 
 go 1.26.0
 
-require github.com/AltairaLabs/PromptKit/runtime v1.3.2
+require github.com/AltairaLabs/PromptKit/runtime v1.5.3
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect
@@ -37,7 +37,3 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
 )
-
-replace github.com/AltairaLabs/PromptKit/runtime => ../promptkit/runtime
-
-replace github.com/AltairaLabs/PromptKit/pkg => ../promptkit/pkg
