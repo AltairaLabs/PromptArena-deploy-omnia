@@ -41,10 +41,11 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		return nil, fmt.Errorf("omnia: config validation failed: %s", strings.Join(errs, "; "))
 	}
 
-	// Carry the arena source's HTTP methods so create-mode placeholders use the
-	// real method (GET tools stay GET) rather than a hardcoded POST. Degrades to
-	// an empty map — placeholders then keep the POST default.
-	cfg.sourceToolMethods = extractSourceToolMethods(req.ArenaConfig)
+	// Carry the arena source's HTTP method + URL so create-mode handlers use the
+	// real method (GET tools stay GET) and wire live tools straight to their real
+	// URL, rather than a hardcoded POST to a placeholder. Degrades to an empty map
+	// — handlers then keep the placeholder URL + POST default.
+	cfg.sourceTools = extractSourceTools(req.ArenaConfig)
 
 	// Validate that referenced providers and skill sources exist (skip in dry-run mode).
 	var providerPhaseWarnings []string
@@ -194,13 +195,13 @@ func generateDesiredResources(
 	// Bind/none modes reference an existing registry (or none) and create nothing.
 	if binding.Mode == toolModeCreate {
 		configured := len(cfg.Tools)
-		placeholders := countUncoveredPackTools(pack, cfg)
+		sourceWired, placeholders := countSynthesizedPackTools(pack, cfg)
 		desired = append(desired, deploy.ResourceChange{
 			Type:   ResTypeToolRegistry,
 			Name:   binding.RegistryName,
 			Action: deploy.ActionCreate,
-			Detail: fmt.Sprintf("Create ToolRegistry: %d handlers (%d configured, %d placeholder)",
-				configured+placeholders, configured, placeholders),
+			Detail: fmt.Sprintf("Create ToolRegistry: %d handlers (%d configured, %d from source, %d placeholder)",
+				configured+sourceWired+placeholders, configured, sourceWired, placeholders),
 		})
 	}
 
