@@ -11,15 +11,30 @@ import (
 // destroyEventResource is the DestroyEvent.Type for per-resource deletion events.
 const destroyEventResource = "resource"
 
-// destroyOrder defines the reverse dependency order for teardown. The
-// PromptPack's managed content ConfigMap is cleaned up dashboard-side on
-// PromptPack delete, so the adapter does not track or delete it.
+// destroyOrder defines the reverse dependency order for teardown of the
+// pack-scoped resources the deploy OWNS: the AgentRuntime that runs the pack,
+// its derived AgentPolicy, and the PromptPack itself. The PromptPack's managed
+// content ConfigMap is cleaned up dashboard-side on PromptPack delete, so the
+// adapter does not track or delete it. The ToolRegistry is intentionally absent
+// — see operatorOwnedTypes.
 var destroyOrder = []string{
 	ResTypeAgentRuntime,
 	ResTypeAgentPolicy,
-	ResTypeToolRegistry,
 	ResTypePromptPack,
 }
+
+// operatorOwnedTypes are resources the adapter creates for CONVENIENCE but does
+// not own — they belong to the platform operator (pre-existing providers and
+// skill registries, or a tool registry whose placeholder handlers the operator
+// has completed). Destroy LEAVES these in place and only tears down the
+// pack-scoped resources this deploy created; the adapter's sole owned artifact
+// is the PromptPack (and its underlying pack JSON).
+var operatorOwnedTypes = map[string]bool{
+	ResTypeToolRegistry: true,
+}
+
+// isOperatorOwned reports whether a resource type is left untouched on destroy.
+func isOperatorOwned(rtype string) bool { return operatorOwnedTypes[rtype] }
 
 // Destroy tears down deployed resources in reverse dependency order.
 func (p *Provider) Destroy(
@@ -49,7 +64,7 @@ func (p *Provider) Destroy(
 	byType := groupByType(state.Resources)
 
 	emitDestroyEvent(callback, "progress",
-		fmt.Sprintf("Destroying %d resources", len(state.Resources)))
+		fmt.Sprintf("Destroying %d resources", countDeletable(state.Resources)))
 
 	for step, rtype := range destroyOrder {
 		resources, ok := byType[rtype]
@@ -64,8 +79,36 @@ func (p *Provider) Destroy(
 	// Handle any resource types not in the standard destroy order.
 	destroyUnorderedResources(ctx, client, state.Resources, callback)
 
+	// Report the operator-owned resources we deliberately leave in place.
+	reportOperatorOwnedLeft(state.Resources, callback)
+
 	emitDestroyEvent(callback, "complete", "Destroy complete")
 	return nil
+}
+
+// countDeletable counts the resources the adapter owns and will delete (i.e. not
+// operator-owned), for an accurate "Destroying N resources" message.
+func countDeletable(resources []ResourceState) int {
+	n := 0
+	for _, r := range resources {
+		if !isOperatorOwned(r.Type) {
+			n++
+		}
+	}
+	return n
+}
+
+// reportOperatorOwnedLeft emits an advisory for each operator-owned resource the
+// adapter leaves untouched on destroy — it created them for convenience but does
+// not own them, so teardown is the operator's call.
+func reportOperatorOwnedLeft(resources []ResourceState, callback deploy.DestroyCallback) {
+	for _, res := range resources {
+		if !isOperatorOwned(res.Type) {
+			continue
+		}
+		emitDestroyEvent(callback, "progress",
+			fmt.Sprintf("Left %s %q in place (operator-owned)", res.Type, res.Name))
+	}
 }
 
 // destroyResourceGroup deletes a slice of resources, emitting events for each.
@@ -104,7 +147,7 @@ func destroyUnorderedResources(
 	resources []ResourceState, callback deploy.DestroyCallback,
 ) {
 	for _, res := range resources {
-		if isInDestroyOrder(res.Type) {
+		if isInDestroyOrder(res.Type) || isOperatorOwned(res.Type) {
 			continue
 		}
 		err := client.DeleteResource(ctx, res.Type, res.Name)

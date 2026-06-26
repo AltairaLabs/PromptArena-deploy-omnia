@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
@@ -54,15 +55,29 @@ func TestDestroy_AllResources(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify all resources were deleted.
-	var resourceEvents int
+	// Adapter-owned resources (PromptPack + AgentRuntime) are deleted; the
+	// ToolRegistry is operator-owned and must be LEFT in place, with an advisory.
+	var deletedTypes []string
+	var registryLeft bool
 	for _, e := range *events {
 		if e.Type == "resource" && e.Resource != nil && e.Resource.Action == deploy.ActionDelete {
-			resourceEvents++
+			deletedTypes = append(deletedTypes, e.Resource.Type)
+		}
+		if e.Type == "progress" && strings.Contains(e.Message, "operator-owned") &&
+			strings.Contains(e.Message, ResTypeToolRegistry) {
+			registryLeft = true
 		}
 	}
-	if resourceEvents != len(state.Resources) {
-		t.Errorf("expected %d resource delete events, got %d", len(state.Resources), resourceEvents)
+	if len(deletedTypes) != 2 {
+		t.Errorf("expected 2 delete events (pack + runtime), got %d: %v", len(deletedTypes), deletedTypes)
+	}
+	for _, typ := range deletedTypes {
+		if typ == ResTypeToolRegistry {
+			t.Error("tool_registry is operator-owned and must NOT be deleted")
+		}
+	}
+	if !registryLeft {
+		t.Error("expected a 'left ... (operator-owned)' advisory for the tool_registry")
 	}
 
 	// Verify destroy order via events: AgentRuntime delete before PromptPack
@@ -167,7 +182,9 @@ func TestDestroy_PartialFailure(t *testing.T) {
 	if errorCount != 1 {
 		t.Errorf("expected 1 error event, got %d", errorCount)
 	}
-	if deleteCount < 2 {
-		t.Errorf("expected at least 2 successful deletes, got %d", deleteCount)
+	// AgentRuntime deletes successfully; PromptPack fails; ToolRegistry is
+	// operator-owned and left — so exactly one successful delete.
+	if deleteCount != 1 {
+		t.Errorf("expected 1 successful delete (agent_runtime), got %d", deleteCount)
 	}
 }
