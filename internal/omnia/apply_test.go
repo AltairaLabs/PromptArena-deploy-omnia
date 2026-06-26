@@ -248,9 +248,11 @@ func TestApply_SingleAgent(t *testing.T) {
 	}
 }
 
-func TestApply_BindMode_EchoesWarningsNoRegistry(t *testing.T) {
+func TestApply_BindMode_BindsRegistryWithoutCreating(t *testing.T) {
 	sim := newSimulatedClient()
-	// Registry exists but doesn't provide the pack's "search" tool → missing warning.
+	// Registry exists but doesn't provide the pack's "search" tool. Apply no
+	// longer echoes the resolver advisory (the CLI surfaces the plan's warnings);
+	// what matters here is that bind mode binds without creating a registry.
 	sim.toolRegistries = []ToolRegistrySummary{{Name: "shared-tools"}}
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
@@ -268,11 +270,6 @@ func TestApply_BindMode_EchoesWarningsNoRegistry(t *testing.T) {
 	}, capturingCallback(&events))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// The missing-tool advisory must be re-echoed through the progress stream.
-	if got := countContaining(progressMessages(events), "does not provide pack tool \"search\""); got != 1 {
-		t.Errorf("expected the resolver warning echoed once, messages: %v", progressMessages(events))
 	}
 
 	// Bind mode must not create a ToolRegistry resource.

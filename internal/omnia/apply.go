@@ -44,19 +44,6 @@ type applyContext struct {
 	binding  ToolBinding
 }
 
-// echoToolWarnings re-emits the resolver's advisories through the progress
-// stream. Apply has no Warnings return field (the deploy.Provider.Apply
-// signature is (state string, err error)), so — like reportAgentAccessURL —
-// advisories surface as progress messages.
-func echoToolWarnings(reporter *adaptersdk.ProgressReporter, warnings []string) error {
-	for _, w := range warnings {
-		if err := reporter.Progress("warning: "+w, 0); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // Apply executes a deployment plan, streaming progress events via the callback.
 func (p *Provider) Apply(
 	ctx context.Context, req *deploy.PlanRequest, callback deploy.ApplyCallback,
@@ -88,9 +75,10 @@ func (p *Provider) Apply(
 	cfg.PackJSON = req.PackJSON
 
 	// Run the SAME tool-registry resolution plan ran, so apply binds the same
-	// registry and re-echoes the same advisories without introducing new
-	// failures the plan didn't show.
-	binding, toolWarnings, err := resolveToolBinding(ctx, p, pack, cfg)
+	// registry without introducing new failures the plan didn't show. The
+	// advisories are discarded here — the CLI surfaces the plan's warnings on
+	// apply (it has no Warnings channel of its own).
+	binding, _, err := resolveToolBinding(ctx, p, pack, cfg)
 	if err != nil {
 		return "", err
 	}
@@ -104,10 +92,6 @@ func (p *Provider) Apply(
 		client:   client,
 		priorMap: p.applyPriorMap(ctx, pack, cfg, req),
 		binding:  binding,
-	}
-
-	if cbErr := echoToolWarnings(ac.reporter, toolWarnings); cbErr != nil {
-		return "", cbErr
 	}
 
 	resources, applyErr := executeApplyPhases(ctx, ac)
