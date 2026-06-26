@@ -1,63 +1,28 @@
 ---
 title: Resource Types
-description: The five managed Kubernetes resource types created by the Omnia adapter
+description: The managed Kubernetes resource types created by the Omnia adapter, and who owns each
 ---
 
-The Omnia adapter manages five Kubernetes resource types. This page documents each type, its naming convention, when it is created, and the API operations used.
+The Omnia adapter works with four Kubernetes resource types. This page documents each type, **who owns it**, its naming convention, when it is created, and the API operations used.
 
 ## Overview
 
-| Resource type | Adapter constant | API path segment | Conditional |
-|---|---|---|---|
-| ConfigMap | `configmap` | `configmaps` | No -- always created |
-| PromptPack | `prompt_pack` | `promptpacks` | No -- always created |
-| ToolRegistry | `tool_registry` | `toolregistries` | Yes -- only if the deploy-config `tools` block is non-empty |
-| AgentPolicy | `agent_policy` | `agentpolicies` | Yes -- only if pack defines a tool blocklist |
-| AgentRuntime | `agent_runtime` | `agentruntimes` | No -- always created (one per agent) |
+| Resource type | Adapter constant | API path segment | Owner | Created / Conditional |
+|---|---|---|---|---|
+| PromptPack | `prompt_pack` | `promptpacks` | **Adapter** | Always |
+| ToolRegistry | `tool_registry` | `toolregistries` | **Operator** | Create-only convenience — synthesized only in create mode (deploy-config `tools` block present) when one doesn't already exist; never updated; left in place on destroy |
+| AgentPolicy | `agent_policy` | `agentpolicies` | **Adapter** | Only if the pack defines a tool blocklist |
+| AgentRuntime | `agent_runtime` | `agentruntimes` | **Adapter** | Always (one per agent) |
 
-## ConfigMap
+The **adapter-owned** resources are fully reconciled — created, updated, and destroyed. The **operator-owned** ToolRegistry is created only as a convenience and otherwise left alone. The providers and skill sources the AgentRuntime/PromptPack reference are also operator-owned, but the adapter never creates them (it binds to existing ones), so they are not in this table. See [Resource Lifecycle](/explanation/resource-lifecycle/#ownership) for the ownership model.
 
-### What it represents
-
-A Kubernetes ConfigMap that stores the raw compiled pack JSON. This is the data source that the PromptPack CRD references.
-
-### Naming convention
-
-`<pack-id>-packdata`
-
-All names are sanitized to valid Kubernetes DNS subdomain names: lowercased, underscores and spaces replaced with hyphens, invalid characters stripped, repeated hyphens collapsed, and truncated to 253 characters.
-
-### When created
-
-Always. Every deployment creates exactly one ConfigMap.
-
-### Payload structure
-
-```json
-{
-  "kind": "ConfigMap",
-  "metadata": {
-    "name": "<pack-id>-packdata",
-    "labels": { ... }
-  },
-  "data": {
-    "pack.json": "<raw pack JSON>"
-  }
-}
-```
-
-### API operations
-
-| Operation | HTTP method | URL |
-|---|---|---|
-| Create | `POST` | `/api/workspaces/<ws>/configmaps` |
-| Update | `PUT` | `/api/workspaces/<ws>/configmaps/<name>` |
-| Get | `GET` | `/api/workspaces/<ws>/configmaps/<name>` |
-| Delete | `DELETE` | `/api/workspaces/<ws>/configmaps/<name>` |
-
----
+:::note
+The raw pack JSON is no longer pushed as a standalone ConfigMap the adapter manages. The PromptPack carries the pack content in its request `content`, and the dashboard folds it into a **dashboard-managed** ConfigMap that is cleaned up when the PromptPack is deleted — the adapter does not track it.
+:::
 
 ## PromptPack
+
+**Adapter-owned.** Created, updated, and destroyed by the adapter.
 
 ### What it represents
 
@@ -114,21 +79,27 @@ Always. Every deployment creates exactly one PromptPack.
 
 ## ToolRegistry
 
+:::caution[Operator-owned, create-only]
+The adapter creates a ToolRegistry only as a **convenience** when one doesn't already exist. It is **operator-owned**: once it exists the adapter never updates it on a later apply, and **never deletes it on destroy**. The operator may have completed placeholder URLs or otherwise edited it.
+:::
+
 ### What it represents
 
-A custom resource that lists the tool handlers available to the agent runtime. Handlers are a faithful passthrough of the deploy-config `tools` block to `spec.handlers[]` — they are **not** derived from tools embedded in the pack (inline pack tool schemas reach the runtime via the PromptPack content fold instead).
+A custom resource that lists the tool handlers available to the agent runtime. It is populated only in **create mode** (the deploy-config `tools` block is present), by [create-mode synthesis](/explanation/resource-lifecycle/#create-mode-synthesis): one handler per pack tool, sourced from the configured `tools` handler, the tool's arena-source URL, or a placeholder. The handlers are **not** a copy of tool schemas embedded in the pack — inline pack tool schemas reach the runtime via the PromptPack content fold instead.
+
+In **bind** mode (`tool_registry_ref`) and **discover** mode, the adapter binds an **existing** registry by name and creates nothing here.
 
 ### Naming convention
 
-`<pack-id>-tools`
+`<pack-id>-tools` (create mode). In bind/discover mode the AgentRuntime references whatever registry name was resolved.
 
 ### When created
 
-Conditional. Only created when the deploy-config `tools` block is non-empty (`len(cfg.Tools) > 0`).
+Only in **create mode** (`len(cfg.Tools) > 0`) **and** only when a `<pack-id>-tools` registry does not already exist. An existing registry is left untouched. The registry is **never updated** on a re-apply and is **left in place on destroy**.
 
 ### Payload structure
 
-Each handler carries its `name` and `type` plus the type-specific blocks that were set. The shape varies by `type`:
+Each handler carries its `name` and `type` plus the type-specific blocks that were set. Configured handlers preserve the order of the deploy-config `tools` list; synthesized handlers for uncovered pack tools follow. The shape varies by `type`:
 
 ```json
 {
@@ -187,6 +158,8 @@ Optional blocks (`tool`, `selector`, the `*Config` blocks, `timeout`) are emitte
 
 ## AgentPolicy
 
+**Adapter-owned.** Created, updated, and destroyed by the adapter (derived from the pack's tool blocklist).
+
 ### What it represents
 
 A custom resource that enforces tool usage policies. Currently supports tool blocklists -- tools that the agent is not allowed to call.
@@ -228,6 +201,8 @@ The blocklist is the deduplicated, sorted union of all blocklists across all pro
 ---
 
 ## AgentRuntime
+
+**Adapter-owned.** Created, updated, and destroyed by the adapter. Its `providerRef`/`toolRegistryRef`/`skills` point at **operator-owned** resources (Providers, ToolRegistry, SkillSources) the adapter binds to but does not own.
 
 ### What it represents
 
@@ -295,7 +270,7 @@ Always. Single-agent packs produce one AgentRuntime. Multi-agent packs produce o
 
 Notes:
 - Every provider binding is emitted as a `NamedProviderRef` in `spec.providers`, preserving order. The binding named `default` is the runtime's primary; an empty `role` defaults to `llm`.
-- `toolRegistryRef` is only set when the deploy-config `tools` block is non-empty.
+- `toolRegistryRef` is set whenever a registry was resolved — in **create** mode (`<pack-id>-tools`), **bind** mode (the `tool_registry_ref` name), or **discover** mode (an auto-bound registry). It is omitted only when no registry is resolved (the pack declares no tools, or discovery found no single covering registry).
 - `runtime` is only set when the `runtime` config is provided; `replicas`/`resources`/`autoscaling` each appear only when their inputs are set. Autoscaling keys use camelCase CRD names (`minReplicas`, `targetCPUUtilizationPercentage`, etc.).
 - `externalAuth`, `memory`, and `evals` are each emitted only when their deploy-config block is set, and carry only the sub-fields you provide (faithful passthrough). See the [configuration reference](./configuration/) for the full shape of each.
 - The AgentRuntime does not carry an `agentPolicyRef`; the AgentPolicy CRD is created independently when the pack defines a tool blocklist.

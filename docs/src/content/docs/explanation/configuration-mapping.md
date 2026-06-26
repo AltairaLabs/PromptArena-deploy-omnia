@@ -12,15 +12,14 @@ For the general, provider-neutral model — *pack = portable contract, deploy co
 
 ## The resources
 
-A deployment produces up to five resources. Two are always created; three are conditional.
+A deployment works with up to four resource types. The PromptPack and AgentRuntime(s) are always created; the AgentPolicy is conditional; the ToolRegistry is a create-only convenience. The adapter **owns** the PromptPack, AgentRuntime, and AgentPolicy; the ToolRegistry (and the Providers and SkillSources it binds to) are **operator-owned** — see [Resource Lifecycle § Ownership](/explanation/resource-lifecycle/#ownership).
 
-| Resource | Created | Built from |
-|----------|---------|-----------|
-| ConfigMap (`<pack>-packdata`) | Always | The raw pack JSON (content fold) |
-| PromptPack | Always | Pack version + `skills` / `skillsConfig` |
-| ToolRegistry | When `config.tools` is non-empty | `config.tools` handlers |
-| AgentPolicy | When a prompt defines a tool policy | The **pack's** tool blocklist |
-| AgentRuntime (one per agent) | Always | `providers`, `runtime`, `externalAuth`, `memory`, `evals` + refs |
+| Resource | Owner | Created | Built from |
+|----------|-------|---------|-----------|
+| PromptPack | Adapter | Always | Pack version + `skills` / `skillsConfig` (pack content folded dashboard-side into a managed ConfigMap) |
+| ToolRegistry | Operator | Create-only, in create mode (`config.tools` set) when absent | `config.tools` handlers + synthesized handlers for uncovered pack tools |
+| AgentPolicy | Adapter | When a prompt defines a tool policy | The **pack's** tool blocklist |
+| AgentRuntime (one per agent) | Adapter | Always | `providers`, `runtime`, `externalAuth`, `memory`, `evals` + refs |
 
 Apply/destroy ordering across these is covered in [Resource Lifecycle](/explanation/resource-lifecycle/); exact payloads are in [Resource Types](/reference/resource-types/).
 
@@ -68,12 +67,18 @@ The pack carries **no** provider bindings — that is deliberate, so the same pa
 A tool has two halves, and they come from two different inputs:
 
 - The **schema** — the tool's name/description/input-output contract, i.e. what the model is allowed to call — is compiled into the pack and reaches the runtime inside the **PromptPack content fold**. You do not restate it in `deploy.config`.
-- The **handler** — how that tool actually executes (an HTTP endpoint, an MCP server, a gRPC target, …) — comes from `config.tools` and becomes `ToolRegistry.spec.handlers[]`, one entry per handler, in order.
+- The **handler** — how that tool actually executes (an HTTP endpoint, an MCP server, a gRPC target, …) — is supplied by the ToolRegistry the AgentRuntime is wired to.
 
-The AgentRuntime gets a `toolRegistryRef` **only** when at least one handler is declared. Consequence: a pack tool with no matching `config.tools` handler is visible to the model but has nothing to execute it server-side (unless it is a `client`-type or system tool).
+How that registry is resolved is decided in one of **three modes** — `tools` (create), `tool_registry_ref` (bind), or discovery — the same way at plan and apply. The full decision tree is in [Tool-registry resolution](/explanation/resource-lifecycle/#tool-registry-resolution-3-modes); the short version:
 
-:::caution[The adapter does not copy pack tools into the ToolRegistry]
-The ToolRegistry is built **only** from `config.tools` — it is a faithful passthrough, **not** derived from the pack. The adapter never reads the pack's tool definitions to populate a CRD, and there is no per-tool CRD. The pack's tool schemas stay in the pack (they ride into the runtime via the PromptPack content fold). The two lists are joined **at runtime**: a handler is matched to a tool by **name**, or via a `selector` — the intended way to attach a handler to a pack-declared tool *without* restating its schema. (For `http`/`grpc` you *may* restate the schema in the handler's `tool` block, but that duplicates what is already in the pack.) Nothing in the adapter cross-checks that pack tools have handlers, or that handlers correspond to pack tools — that coverage is your responsibility.
+- **`config.tools` set (create)** — the adapter synthesizes a `<pack-id>-tools` registry. It is **operator-owned and create-only**: written once when absent, then never updated and left in place on destroy. Beyond your declared handlers, it synthesizes a handler for each uncovered pack tool — a `mode: live` tool wired to its real URL from the arena source, a `mode: mock`/no-URL tool to a `placeholder.invalid` endpoint the operator completes in Omnia.
+- **`tool_registry_ref` set (bind)** — the AgentRuntime is pointed at an existing registry by name; the adapter never creates or updates it.
+- **neither set (discover)** — the adapter auto-binds an existing registry iff exactly one covers all the pack's tools, else binds none and advises.
+
+The AgentRuntime gets a `toolRegistryRef` whenever a registry is resolved (create, bind, or auto-discover); it is omitted only when no registry resolves. A pack tool that ends up with no handler is visible to the model but has nothing to execute it server-side (unless it is a `client`-type or system tool).
+
+:::note[The adapter does cross-check coverage — as advisories]
+Unlike a blind passthrough, the resolver **does** compare the pack's tools against the registry: in bind mode it warns for pack tools the registry doesn't provide and for input-schema drift; in create mode it reports how many handlers were configured vs source-wired vs placeholder. These are **warnings, not errors** — a mismatch never blocks the deploy. The pack's tool **schemas** still stay in the pack (they ride into the runtime via the PromptPack content fold); the handler is matched to a tool by **name** or via a `selector`. (For `http`/`grpc` you *may* restate the schema in the handler's `tool` block, but that duplicates what is already in the pack.)
 :::
 
 ### `skills` / `skillsConfig` → `PromptPack.spec.skills[]` / `spec.skillsConfig`
@@ -103,10 +108,11 @@ These are faithful passthroughs onto the AgentRuntime — only the fields you se
 | Input | Destination |
 |-------|-------------|
 | `config.providers` | `AgentRuntime.spec.providers[]` (NamedProviderRef) |
-| `config.tools` | `ToolRegistry.spec.handlers[]` |
+| `config.tools` | `ToolRegistry.spec.handlers[]` (create mode; create-only) |
+| `config.tool_registry_ref` | `AgentRuntime.spec.toolRegistryRef` (bind mode) |
 | `config.skills` / `skillsConfig` | `PromptPack.spec.skills[]` / `spec.skillsConfig` |
 | `config.runtime` / `externalAuth` / `memory` / `evals` | `AgentRuntime.spec.*` |
-| Pack content (prompts, **tool schemas**, eval defs) | `PromptPack` (via the `<pack>-packdata` ConfigMap) |
+| Pack content (prompts, **tool schemas**, eval defs) | `PromptPack.content` (folded dashboard-side into a managed ConfigMap) |
 | Pack tool policy | `AgentPolicy.spec.toolBlocklist` |
 | Pack agents | One `AgentRuntime` each |
 
