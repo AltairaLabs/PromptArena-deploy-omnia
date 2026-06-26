@@ -171,7 +171,11 @@ providers:
 
 ### `tools` (optional)
 
-Tool handlers projected into the `ToolRegistry` CRD's `spec.handlers[]`, in order. When `tools` is empty, no ToolRegistry is created.
+Setting `tools` selects **create mode**: the adapter synthesizes a `<pack-id>-tools` ToolRegistry from these handlers plus the pack's tools, in order. It is **mutually exclusive** with [`tool_registry_ref`](#tool_registry_ref-optional).
+
+The synthesized registry is **create-only** — it is created once when absent, then owned by the operator (never updated on a later apply, and left in place on destroy). Each pack tool not covered by a handler here is synthesized from its arena source: a `mode: live` tool is wired to its real URL, a `mode: mock`/no-URL tool gets a `https://placeholder.invalid/<tool>` endpoint to complete in Omnia. See [Tool-registry resolution](/explanation/resource-lifecycle/#tool-registry-resolution-3-modes).
+
+When neither `tools` nor `tool_registry_ref` is set, the adapter **discovers**: it auto-binds an existing registry iff exactly one covers all the pack's tools, otherwise binds none and advises.
 
 ```yaml
 tools:
@@ -204,6 +208,16 @@ tools:
 | `timeout` | string | Per-handler timeout (e.g. `"30s"`). |
 
 Per-type requirements: `http`/`grpc` need a `tool` block **plus** the matching config block or a `selector`; `openapi`/`mcp` need the matching config block or a `selector`; `client` has no hard requirement. The omnia CRD validates the inner config fields deeply.
+
+### `tool_registry_ref` (optional)
+
+Bind the AgentRuntime to an **existing** workspace ToolRegistry by name, instead of synthesizing a new one. Mutually exclusive with `tools`. The adapter never creates or updates the referenced registry — it must already exist.
+
+```yaml
+tool_registry_ref: shared-tools
+```
+
+At plan/apply time the adapter verifies the binding without blocking: it warns for pack tools the registry doesn't provide and for input-schema drift, and skips per-tool verification for **dynamic** (OpenAPI/MCP) registries that resolve tools externally. Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`.
 
 ### `skills` (optional)
 

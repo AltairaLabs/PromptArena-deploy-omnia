@@ -94,6 +94,11 @@ The adapter validates configuration against the following JSON Schema:
         "additionalProperties": false
       }
     },
+    "tool_registry_ref": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+      "description": "Bind an existing workspace ToolRegistry CRD by name. Mutually exclusive with tools."
+    },
     "skills": {
       "type": "array",
       "description": "Skill bindings for the PromptPack spec.skills[]. Each references a SkillSource. Optional.",
@@ -369,14 +374,38 @@ providers:
   router: gpt4-prod
 ```
 
+## How tools are wired
+
+The AgentRuntime's tool wiring is resolved into one of **three modes**, decided the same way at plan and apply time. The two fields `tools` and `tool_registry_ref` are **mutually exclusive** (setting both fails validation):
+
+| Mode | Trigger | Effect |
+|---|---|---|
+| **create** | `tools:` block present | Synthesize a `<pack-id>-tools` ToolRegistry (create-only). |
+| **bind** | `tool_registry_ref: <name>` set | Bind that existing workspace ToolRegistry; warn for tools it doesn't provide and for input-schema drift. |
+| **discover** | Pack declares tools, neither field set | Auto-bind iff exactly **one** workspace registry covers **all** the pack's tools; otherwise bind nothing and recommend a fix. |
+
+All three are **warn-don't-block**: a coverage or drift mismatch never fails the deploy — only a transport/setup error does. See [Resource Lifecycle](/explanation/resource-lifecycle/#tool-registry-resolution-3-modes) for the full decision tree.
+
 ### `tools`
 
 | | |
 |---|---|
 | **Type** | `array` of handler specs |
-| **Required** | No |
+| **Required** | No (mutually exclusive with `tool_registry_ref`) |
 
-Tool handlers projected verbatim into the `ToolRegistry` CRD's `spec.handlers[]`, preserving order. When `tools` is empty, **no** ToolRegistry is created. (The ToolRegistry is built from this block, not from tools embedded in the pack — inline pack tool schemas reach the runtime through the PromptPack content fold instead.)
+Setting `tools` selects **create mode**: the adapter synthesizes a `<pack-id>-tools` ToolRegistry. (The registry is built from this block plus the pack's tools, **not** by copying tool schemas out of the pack — inline pack tool schemas reach the runtime through the PromptPack content fold instead.)
+
+**Create-mode synthesis.** The registry gets one handler per pack tool (system-namespaced tools like `image__generate` are runtime-provided and excluded):
+
+- a pack tool with a matching `tools` handler → **that handler** (authoritative);
+- an uncovered tool that's `mode: live` in the arena source → its **real URL and HTTP method, pulled from the arena source** (the CLI threads the arena config through to the adapter);
+- an uncovered `mode: mock` / no-URL tool → an `https://placeholder.invalid/<tool>` endpoint the operator completes in Omnia.
+
+The plan summarizes this as `N handlers (C configured, S from source, P placeholder)`.
+
+**Create-only.** The synthesized registry is written **exactly once**. If a `<pack-id>-tools` registry already exists the adapter leaves it untouched (the operator owns it and may have completed placeholder URLs) and the registry is **never** updated on a later apply. It is also **left in place on destroy**.
+
+The handler specs are projected into the CRD's `spec.handlers[]` preserving order.
 
 | Sub-field | Type | Required | Description |
 |---|---|---|---|
@@ -418,6 +447,29 @@ tools:
     type: mcp
     mcpConfig:
       server: "docs-mcp"
+```
+
+### `tool_registry_ref`
+
+| | |
+|---|---|
+| **Type** | `string` |
+| **Required** | No (mutually exclusive with `tools`) |
+| **Pattern** | `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` |
+| **Example** | `"shared-tools"` |
+
+Setting `tool_registry_ref` selects **bind mode**: the AgentRuntime is pointed at an **existing** workspace ToolRegistry by name, instead of synthesizing a new one. The adapter never creates or updates the referenced registry — it must already exist, owned by the operator.
+
+At plan and apply time the adapter lists the workspace registries to verify the binding (warn-don't-block):
+
+- a pack tool the registry does **not** provide → a warning that the agent won't be able to call it;
+- a matched tool whose input schema **drifts** from what the pack was tested against → a warning that calls may fail at runtime;
+- a **dynamic** registry (OpenAPI/MCP) that resolves its tools externally → per-tool verification is **skipped** (the adapter can't enumerate it statically) and a single advisory is emitted instead.
+
+A registry that isn't found, or a failure to list registries, degrades to an advisory — the agent still deploys.
+
+```yaml
+tool_registry_ref: shared-tools
 ```
 
 ### `skills`
@@ -707,7 +759,7 @@ The adapter validates the config before every operation. The following checks ar
 2. `workspace` must be non-empty.
 3. `providers` must contain at least one binding; each binding's `ref` must be non-empty, each `role` (if set) must be a valid role, and binding names must be unique.
 4. An API token must be available from either `api_token` or `OMNIA_API_TOKEN`.
-5. Each `tools` handler must have a valid name (pattern + unique), a valid `type`, and satisfy the per-type tool/config-or-selector requirements.
+5. Each `tools` handler must have a valid name (pattern + unique), a valid `type`, and satisfy the per-type tool/config-or-selector requirements. `tools` and `tool_registry_ref` are mutually exclusive — setting both fails validation. If set, `tool_registry_ref` must match the registry-name pattern.
 6. Each `skills` binding's `source` must be non-empty and match the SkillSource name pattern; `skillsConfig.selector` (if set) must be a valid selector and `skillsConfig.maxActive` (if set) must be >= 1.
 7. If `runtime` is specified, `runtime.replicas` must be >= 1, and any `runtime.autoscaling` values must be within the documented ranges (`type` is `hpa`/`keda`, utilization targets 1-100, `min_replicas` <= `max_replicas`).
 8. If `externalAuth` is specified, each configured validator is structurally valid: `sharedToken.secretRef` is non-empty, `apiKeys.defaultRole` (if set) is one of `viewer`/`editor`/`admin`, and `oidc.issuer` and `oidc.audience` are both non-empty. Secret existence and OIDC discovery are validated by the controller at reconcile time, not at plan time.
