@@ -90,21 +90,34 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	}, nil
 }
 
-// defaultEntryName is the prompt name the Omnia runtime currently hardcodes as
-// the entry point (Omnia#1595 will replace this with the pack's declared entry).
+// defaultEntryName is the prompt name the Omnia runtime falls back to when it
+// cannot otherwise resolve a pack's entry point (see promptWarnings).
 const defaultEntryName = "default"
 
-// promptWarnings warns when a plain-prompt pack (no workflow, no multi-agent
-// config) has no prompt named "default". The Omnia runtime currently hardcodes
-// the prompt entry to "default" (Omnia#1595), so such a pack deploys healthy but
-// fails its first request — the runtime can't resolve a prompt. Workflow and
-// multi-agent packs declare their own entry (workflow.entry / agents.entry), so
-// they are exempt. Non-blocking, mirroring the no-default-provider guardrail.
+// minPromptsForEntryAmbiguity is the prompt count at or above which a plain pack
+// must disambiguate its entry: with a single prompt the runtime opens it
+// automatically, so only 2+ prompts can be ambiguous.
+const minPromptsForEntryAmbiguity = 2
+
+// promptWarnings flags the one residual case where a plain-prompt pack (no
+// workflow, no multi-agent config) can fail to resolve an entry point.
+//
+// As of Omnia#1595/#1597 (PR #1605) the runtime no longer hardcodes a prompt
+// named "default": it resolves the entry from the pack (workflow.entry /
+// agents.entry / the sole prompt), and a caller may also name a prompt
+// per-request. So single-prompt packs, workflow packs and multi-agent packs all
+// resolve without any "default" prompt and are exempt.
+//
+// The gap is a plain pack with 2+ prompts and no "default": PromptKit doesn't
+// yet let such a pack declare an entry, so if a caller ever omits the prompt
+// name the runtime falls back to "default" — which the pack doesn't define — and
+// that request fails. This is caller-dependent, not a guaranteed deploy failure,
+// so it's a soft note. Non-blocking, mirroring the no-default-provider guardrail.
 func promptWarnings(pack *prompt.Pack) []string {
 	if pack.Workflow != nil || adaptersdk.IsMultiAgent(pack) {
 		return nil
 	}
-	if len(pack.Prompts) == 0 {
+	if len(pack.Prompts) < minPromptsForEntryAmbiguity {
 		return nil
 	}
 	if _, ok := pack.Prompts[defaultEntryName]; ok {
@@ -116,10 +129,11 @@ func promptWarnings(pack *prompt.Pack) []string {
 	}
 	sort.Strings(names)
 	return []string{fmt.Sprintf(
-		"this pack has no prompt named %[1]q (prompts: %[2]s) — the Omnia runtime currently looks "+
-			"for %[1]q and the agent won't resolve its prompt. Name the entry prompt %[1]q, or wait "+
-			"for Omnia#1595 (runtime reads the pack's declared entry).",
-		defaultEntryName, strings.Join(names, ", "))}
+		"this pack has %[1]d prompts (%[2]s) and none is named %[3]q, and it declares no entry point "+
+			"— the Omnia runtime resolves the entry per-request, but if a caller omits the prompt name "+
+			"it falls back to %[3]q, which this pack doesn't define, and that request fails. Name one "+
+			"prompt %[3]q, or ensure callers always pass a prompt name.",
+		len(names), strings.Join(names, ", "), defaultEntryName)}
 }
 
 // planPriorState resolves the prior state used to diff against. In the non
