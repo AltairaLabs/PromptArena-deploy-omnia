@@ -156,10 +156,10 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 
 // applyAgentRuntimeTarget applies a single AgentRuntime target: it reports
 // progress, creates/updates the resource, and — on a successful create/update —
-// surfaces the dashboard access URL and polls until the resource reconciles. A
-// reconcile failure/timeout is reported and folded into the returned error so a
-// created-but-never-reconciled AgentRuntime fails the deploy loudly instead of
-// silently reporting success.
+// polls until the resource reconciles and, once Ready, surfaces the dashboard
+// access URL. A reconcile failure/timeout is reported and folded into the
+// returned error so a created-but-never-reconciled AgentRuntime fails the deploy
+// loudly instead of silently reporting success.
 //
 // abort reports whether a progress-callback transport error occurred (broken
 // stdio pipe, etc.) — the caller must treat that as an immediate abort of the
@@ -183,21 +183,18 @@ func applyAgentRuntimeTarget(
 		sanitizeName(agentName),
 		func() (json.RawMessage, error) { return buildAgentRuntimeRequest(ac.pack, agentName, entry, ac.cfg) })
 
-	// On a successful create/update, surface a dashboard deep-link so the
-	// operator can open the agent immediately. The /agents/[name] route
-	// keys on the AgentRuntime metadata.name = sanitizeName(agentName).
-	if applyErr == nil && agentRuntimeSucceeded(res) {
-		if cbErr := reportAgentAccessURL(ac, agentName, pct); cbErr != nil {
-			return res, true, cbErr
-		}
-	}
-
-	// The access URL above is best-effort; a reconcile failure must still
-	// surface, so this check is independent of the access-URL report's outcome.
+	// On a successful create/update, verify the AgentRuntime actually reconciles.
+	// This is correctness-critical, so it runs BEFORE the best-effort access-URL
+	// report and a reconcile failure/timeout is folded into applyErr — it is never
+	// skipped by a cosmetic progress-callback error. The dashboard deep-link is
+	// surfaced only once the agent is Ready (no link for an agent that failed to
+	// reconcile). The /agents/[name] route keys on metadata.name = sanitizeName(agentName).
 	if applyErr == nil && agentRuntimeSucceeded(res) {
 		if rerr := waitForReconcile(ctx, ac.client, ResTypeAgentRuntime, sanitizeName(agentName)); rerr != nil {
 			_ = ac.reporter.Error(rerr)
 			applyErr = combineErrors(applyErr, rerr)
+		} else if cbErr := reportAgentAccessURL(ac, agentName, pct); cbErr != nil {
+			return res, true, cbErr
 		}
 	}
 
