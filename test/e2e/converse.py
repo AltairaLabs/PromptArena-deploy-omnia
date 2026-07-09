@@ -13,12 +13,15 @@ import websockets
 
 AGENT = os.environ["AGENT"]
 NS = os.environ["NS"]
+# Agents are data-plane-auth-gated by default; send the shared bearer token.
+TOKEN = os.environ.get("TOKEN", "")
 URI = f"ws://{AGENT}.{NS}.svc.cluster.local:8080/ws?agent={AGENT}"
 
 
 async def run() -> None:
     print(f"connecting: {URI}")
-    async with websockets.connect(URI, ping_interval=None) as ws:
+    headers = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
+    async with websockets.connect(URI, additional_headers=headers, ping_interval=None) as ws:
         await ws.send(json.dumps({"type": "message", "content": "Hello, are you there?"}))
         connected = False
         responded = False

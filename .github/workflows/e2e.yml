@@ -91,6 +91,14 @@ jobs:
           # a placeholder value is fine for type: mock.
           stringData: { api-key: "mock" }
           ---
+          # Shared bearer token for the agents' data-plane auth (facade reads key
+          # "token"). Agents are management-plane-only without an externalAuth
+          # validator; this lets the converse step talk to them.
+          apiVersion: v1
+          kind: Secret
+          metadata: { name: e2e-agent-token, namespace: ${AGENTS_NS} }
+          stringData: { token: "e2e-secret" }
+          ---
           apiVersion: omnia.altairalabs.ai/v1alpha1
           kind: Provider
           metadata: { name: ${PROVIDER}, namespace: ${AGENTS_NS} }
@@ -111,12 +119,9 @@ jobs:
             anonymousAccess:
               enabled: true
               role: owner
-            services:
-              - name: default
-                mode: external
-                external:
-                  sessionURL: "http://session.${AGENTS_NS}.svc:8080"
-                  memoryURL: "http://memory.${AGENTS_NS}.svc:8080"
+            # NO service group on purpose: the facade then can't resolve a
+            # session-api URL and falls back to an in-memory session store, so a
+            # basic agent reaches Ready with no session-api / Postgres / memory-api.
           EOF
           kubectl get workspace "${WORKSPACE}" -o yaml
 
@@ -139,6 +144,7 @@ jobs:
           OMNIA_IT_WORKSPACE: ${{ env.WORKSPACE }}
           OMNIA_IT_PROVIDER: ${{ env.PROVIDER }}
           OMNIA_IT_KEEP: "1"
+          OMNIA_IT_SHARED_TOKEN_SECRET: "e2e-agent-token"
         run: |
           # Single-prompt pack -> one agent "e2e-basic".
           OMNIA_IT_PACK_ID=e2e-basic OMNIA_IT_PROMPTS=main \
@@ -182,6 +188,7 @@ jobs:
                 env:
                   - { name: AGENT, value: "${AGENT}" }
                   - { name: NS, value: "${AGENTS_NS}" }
+                  - { name: TOKEN, value: "e2e-secret" }
                 volumeMounts:
                   - { name: s, mountPath: /s }
             volumes:

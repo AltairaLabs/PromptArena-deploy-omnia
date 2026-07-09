@@ -466,6 +466,24 @@ func buildSimplePack(packID string, promptNames ...string) string {
 	return string(b)
 }
 
+// withSharedToken adds an externalAuth.sharedToken block naming the given Secret
+// to a deploy-config JSON document.
+func withSharedToken(t *testing.T, cfg, secretName string) string {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(cfg), &doc); err != nil {
+		t.Fatalf("withSharedToken: unmarshal cfg: %v", err)
+	}
+	doc["externalAuth"] = map[string]any{
+		"sharedToken": map[string]any{"secretRef": secretName},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("withSharedToken: marshal: %v", err)
+	}
+	return string(b)
+}
+
 // TestIntegration_E2EDeployAndKeep deploys a persistent agent (deliberately NO
 // destroy) and waits for it to become "deployed" — pods Ready — so a subsequent
 // websocket converse step can talk to it. Gated on OMNIA_IT_KEEP so it stays out
@@ -490,6 +508,12 @@ func TestIntegration_E2EDeployAndKeep(t *testing.T) {
 	}
 	pack := buildSimplePack(packID, prompts...)
 	cfg := buildDeployConfig(env, deployConfigOpts{})
+	// Agents are data-plane-auth-gated by default. When a shared-token secret is
+	// named, add an externalAuth.sharedToken block so the deployed agent accepts
+	// websocket traffic bearing that token (the secret must pre-exist).
+	if sec := os.Getenv("OMNIA_IT_SHARED_TOKEN_SECRET"); sec != "" {
+		cfg = withSharedToken(t, cfg, sec)
+	}
 
 	state, _ := applyAndCollect(t, p, &deploy.PlanRequest{
 		PackJSON: pack, DeployConfig: cfg, Environment: env.Workspace,
