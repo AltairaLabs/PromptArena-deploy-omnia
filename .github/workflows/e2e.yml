@@ -160,7 +160,7 @@ jobs:
               if kubectl -n "${AGENTS_NS}" get "deployment/${AGENT}" >/dev/null 2>&1; then break; fi
               echo "  deployment/${AGENT} not created yet ($i)"; sleep 3
             done
-            kubectl -n "${AGENTS_NS}" rollout status "deployment/${AGENT}" --timeout=300s
+            kubectl -n "${AGENTS_NS}" rollout status "deployment/${AGENT}" --timeout=180s
           done
 
       - name: Converse with each agent (websocket -> non-error response)
@@ -208,7 +208,15 @@ jobs:
             echo "--- $a ---"; kubectl -n "${AGENTS_NS}" get agentruntime "$a" -o jsonpath='{.status.phase}{"\n"}{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>/dev/null || true
           done
           echo "===== provider status ====="; kubectl -n "${AGENTS_NS}" get provider "${PROVIDER}" -o jsonpath='{.status}' || true; echo
-          echo "===== agent pod logs (if any) ====="; kubectl -n "${AGENTS_NS}" logs -l app.kubernetes.io/instance=e2e-basic --all-containers --tail=40 2>/dev/null || true
+          echo "===== agent pods: which container is not ready + why ====="
+          for p in $(kubectl -n "${AGENTS_NS}" get pods -o name | grep -E 'e2e-basic|e2e-multi'); do
+            echo "----- $p container readiness -----"
+            kubectl -n "${AGENTS_NS}" get "$p" -o jsonpath='{range .status.containerStatuses[*]}{.name}: ready={.ready} state={.state}{"\n"}{end}' 2>/dev/null || true
+            echo "----- $p events/probes -----"
+            kubectl -n "${AGENTS_NS}" describe "$p" 2>/dev/null | sed -n '/Containers:/,/Events:/p' | grep -iE "State|Ready|Restart|Probe|Liveness|Readiness|Reason|Exit|Message|Warning" | head -30 || true
+            echo "----- $p logs (all containers) -----"
+            kubectl -n "${AGENTS_NS}" logs "$p" --all-containers --prefix --tail=40 2>/dev/null || true
+          done
           echo "===== workspace status ====="; kubectl get workspace "${WORKSPACE}" -o jsonpath='{.status}' || true; echo
           echo "===== dashboard logs (tail) ====="; kubectl -n "${NS}" logs deploy/omnia-dashboard --tail=60 || true
           echo "===== port-forward log ====="; cat /tmp/pf.log || true
