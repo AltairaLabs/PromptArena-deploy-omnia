@@ -52,6 +52,11 @@ const (
 	toolModeNone   = "none"
 )
 
+// toolModeMock is the httpToolSource.Mode value for a pack tool declared with
+// no live http block — a mock has no URL and its synthesized handler is a
+// placeholder that will fail at runtime on a live deploy.
+const toolModeMock = "mock"
+
 // resolveToolBinding decides how a deployment's tools are wired and returns the
 // decision plus advisory warnings. It is the single source of truth shared by
 // Plan and Apply: everything here is warn-don't-block — a mismatch never errors
@@ -145,8 +150,11 @@ const registryUnchangedWarningFmt = "tool registry %q already exists — left un
 //     tool with no source URL (mock / no http block) gets a placeholder the
 //     operator completes in Omnia.
 //
-// It returns up to two advisories — one for the source-wired handlers and one
-// for the placeholders — so the deploy output is explicit about each.
+// It returns up to three advisories (via createRegistryWarnings) — one for the
+// source-wired handlers, one for placeholders with no source at all, and one
+// for tools explicitly declared mock-mode in the pack — so the deploy output
+// is explicit about each and a live deploy doesn't silently ship a mock
+// placeholder that fails at runtime.
 func buildCreateRegistryHandlers(
 	pack *prompt.Pack, cfg *Config,
 ) (handlers []map[string]interface{}, warnings []string) {
@@ -159,20 +167,33 @@ func buildCreateRegistryHandlers(
 		}
 	}
 
-	var sourceWired, placeholders []string
+	var sourceWired, placeholders, mockTools []string
 	for _, name := range packToolNames(pack) {
 		if configured[name] {
 			continue // a configured handler is authoritative; skip synthesis
 		}
 		src := cfg.sourceTools[name]
 		handlers = append(handlers, synthesizeHandler(pack.Tools[name], name, src))
-		if src != nil && src.URL != "" {
+		switch {
+		case src != nil && src.URL != "":
 			sourceWired = append(sourceWired, name)
-		} else {
+		case src != nil && src.Mode == toolModeMock:
+			mockTools = append(mockTools, name)
+		default:
 			placeholders = append(placeholders, name)
 		}
 	}
 
+	warnings = append(warnings, createRegistryWarnings(sourceWired, placeholders, mockTools)...)
+	return handlers, warnings
+}
+
+// createRegistryWarnings builds the advisories for buildCreateRegistryHandlers:
+// one for source-wired handlers, one for no-source placeholders, and a distinct
+// one for pack tools that are explicitly mock-mode (no live http) — a live
+// deploy would otherwise silently ship a placeholder that fails at runtime.
+func createRegistryWarnings(sourceWired, placeholders, mockTools []string) []string {
+	var warnings []string
 	if len(sourceWired) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"tool registry: wired %d handler(s) from the arena tool definitions (%s) — "+
@@ -184,7 +205,13 @@ func buildCreateRegistryHandlers(
 			"created %d placeholder handler(s) with no source URL — set real URLs in Omnia: %s",
 			len(placeholders), strings.Join(placeholders, ", ")))
 	}
-	return handlers, warnings
+	if len(mockTools) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"tool(s) [%s] are mock-mode in the pack (no live http) — the created placeholder "+
+				"handler(s) will fail at runtime on a live deploy; provide live http in the pack "+
+				"or a tools: override with real endpoints", strings.Join(mockTools, ", ")))
+	}
+	return warnings
 }
 
 // synthesizeHandler builds an http handler for a non-configured pack tool from

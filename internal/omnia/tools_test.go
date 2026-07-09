@@ -658,3 +658,24 @@ func TestSynthesizeHandler_RequestMappings(t *testing.T) {
 		t.Errorf("staticQuery = %v", cfg["staticQuery"])
 	}
 }
+
+// --- Mock-mode pack tools get a distinct plan-time warning ------------------
+
+func TestBuildCreateRegistryHandlers_MockToolWarning(t *testing.T) {
+	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{
+		"search_shared_workouts": {Name: "search_shared_workouts", Description: "d",
+			Parameters: map[string]interface{}{}},
+	}}
+	cfg := &Config{sourceTools: map[string]*httpToolSource{
+		"search_shared_workouts": {Mode: "mock"}, // no URL, mock mode
+	}}
+	_, warnings := buildCreateRegistryHandlers(pack, cfg)
+	// NOTE: not using a hasWarningContaining helper here — an identical one
+	// already exists in integration_test.go, but it's gated behind the
+	// "integration" build tag; redefining it in this (untagged) file would
+	// collide when CI builds with -tags=integration.
+	joined := strings.Join(warnings, "\n")
+	if !strings.Contains(joined, "mock") || !strings.Contains(joined, "search_shared_workouts") {
+		t.Errorf("expected a mock-mode warning naming the tool, got %v", warnings)
+	}
+}
