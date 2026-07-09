@@ -439,6 +439,93 @@ func TestIntegration_Plan_CreateMode(t *testing.T) {
 // destroy round-trip. It asserts: each core resource is created on first apply;
 // status reports deployed; the create-only ToolRegistry stays "unchanged" on
 // re-apply while PromptPack/AgentRuntime update; destroy succeeds.
+// buildSimplePack returns a minimal, tool-free pack with the given prompt names.
+// One prompt => one agent; 2+ prompts => one agent per prompt (fan-out).
+func buildSimplePack(packID string, promptNames ...string) string {
+	prompts := map[string]any{}
+	for _, n := range promptNames {
+		prompts[n] = map[string]any{
+			"id": n, "name": n, "version": "1.0.0",
+			"description":     n + " prompt",
+			"system_template": "You are a helpful test agent. Answer briefly.",
+		}
+	}
+	doc := map[string]any{
+		"id": packID, "name": packID, "version": "1.0.0",
+		"description": "e2e converse pack",
+		"template_engine": map[string]any{
+			"version": "v1", "syntax": "{{variable}}",
+			"features": []string{"basic_substitution"},
+		},
+		"prompts": prompts,
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		panic(fmt.Sprintf("buildSimplePack: marshal failed: %v", err))
+	}
+	return string(b)
+}
+
+// withSharedToken adds an externalAuth.sharedToken block naming the given Secret
+// to a deploy-config JSON document.
+func withSharedToken(t *testing.T, cfg, secretName string) string {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(cfg), &doc); err != nil {
+		t.Fatalf("withSharedToken: unmarshal cfg: %v", err)
+	}
+	doc["externalAuth"] = map[string]any{
+		"sharedToken": map[string]any{"secretRef": secretName},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("withSharedToken: marshal: %v", err)
+	}
+	return string(b)
+}
+
+// TestIntegration_E2EDeployAndKeep deploys a persistent agent (deliberately NO
+// destroy) and waits for it to become "deployed" — pods Ready — so a subsequent
+// websocket converse step can talk to it. Gated on OMNIA_IT_KEEP so it stays out
+// of the normal integration run (which always cleans up after itself).
+//
+// OMNIA_IT_PACK_ID names the pack (default "e2e-basic"); OMNIA_IT_PROMPTS is a
+// comma-separated prompt list (default "main"). 2+ prompts exercise fan-out.
+func TestIntegration_E2EDeployAndKeep(t *testing.T) {
+	if os.Getenv("OMNIA_IT_KEEP") == "" {
+		t.Skip("set OMNIA_IT_KEEP=1 to deploy a persistent agent (converse e2e)")
+	}
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := os.Getenv("OMNIA_IT_PACK_ID")
+	if packID == "" {
+		packID = "e2e-basic"
+	}
+	prompts := []string{"main"}
+	if v := os.Getenv("OMNIA_IT_PROMPTS"); v != "" {
+		prompts = strings.Split(v, ",")
+	}
+	pack := buildSimplePack(packID, prompts...)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+	// Agents are data-plane-auth-gated by default. When a shared-token secret is
+	// named, add an externalAuth.sharedToken block so the deployed agent accepts
+	// websocket traffic bearing that token (the secret must pre-exist).
+	if sec := os.Getenv("OMNIA_IT_SHARED_TOKEN_SECRET"); sec != "" {
+		cfg = withSharedToken(t, cfg, sec)
+	}
+
+	state, _ := applyAndCollect(t, p, &deploy.PlanRequest{
+		PackJSON: pack, DeployConfig: cfg, Environment: env.Workspace,
+	})
+	st := pollStatus(t, p, cfg, env.Workspace, state, "deployed", 180*time.Second)
+	if st.Status != "deployed" {
+		t.Fatalf("agent(s) for pack %q did not reach deployed; last = %q (%+v)",
+			packID, st.Status, st.Resources)
+	}
+	t.Logf("agent(s) for pack %q deployed and ready", packID)
+}
+
 func TestIntegration_Lifecycle(t *testing.T) {
 	env := itEnv(t)
 	p := NewProvider()
