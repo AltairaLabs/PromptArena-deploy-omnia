@@ -39,6 +39,12 @@ type simulatedClient struct {
 	// seed the resource (so the subsequent update succeeds) — to exercise the
 	// create→AlreadyExists→update fallback in applyResourcePhase.
 	createAlreadyExists map[string]bool
+
+	// statusQueue, when set for simKey(resType,name), makes each GetResource call
+	// return (and consume) the next ResourceStatus — for exercising reconcile polls
+	// that observe a not-ready→ready (or never-ready) progression. When exhausted,
+	// GetResource falls back to the stored resource's status.
+	statusQueue map[string][]*ResourceStatus
 }
 
 // newSimulatedClient creates a simulatedClient with default healthy state.
@@ -127,6 +133,13 @@ func (s *simulatedClient) GetResource(
 			Body:       fmt.Sprintf("resource %s not found", key),
 			Category:   ErrCategoryNotFound,
 		}
+	}
+	if q := s.statusQueue[key]; len(q) > 0 {
+		next := q[0]
+		s.statusQueue[key] = q[1:]
+		clone := *res
+		clone.Status = next
+		return &clone, nil
 	}
 	return res, nil
 }
