@@ -573,3 +573,88 @@ func TestDryRunToolBinding(t *testing.T) {
 		t.Errorf("neither → none, got %+v", b)
 	}
 }
+
+func TestSynthesizeHandler_RichHTTPConfig(t *testing.T) {
+	src := &httpToolSource{
+		Mode: "live", Method: "POST",
+		URL:                 "https://api.splitpantz.com/api/v1/workouts",
+		TimeoutMs:           15000,
+		Redact:              []string{"user_id"},
+		ResponseBodyMapping: "{id: id, name: name}",
+	}
+	h := synthesizeHandler(nil, "create_workout", src)
+	cfg, _ := h[keyHTTPConfig].(map[string]interface{})
+	if cfg["responseMapping"] != "{id: id, name: name}" {
+		t.Errorf("responseMapping = %v", cfg["responseMapping"])
+	}
+	if cfg["timeout"] != nil {
+		t.Errorf("timeout must be handler-level, not in httpConfig")
+	}
+	if h["timeout"] != "15000ms" {
+		t.Errorf("handler timeout = %v, want 15000ms", h["timeout"])
+	}
+	redact, _ := cfg["redact"].([]string)
+	if len(redact) != 1 || redact[0] != "user_id" {
+		t.Errorf("redact = %v", cfg["redact"])
+	}
+}
+
+func TestSynthesizeHandler_GETQueryParamsInferred(t *testing.T) {
+	packTool := &prompt.PackTool{
+		Name: "list_user_exercises",
+		Parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"search": map[string]interface{}{"type": "string"}},
+		},
+	}
+	src := &httpToolSource{Mode: "live", Method: "GET", URL: "https://api.splitpantz.com/api/v1/exercises"}
+	h := synthesizeHandler(packTool, "list_user_exercises", src)
+	cfg := h[keyHTTPConfig].(map[string]interface{})
+	qp, _ := cfg[keyQueryParams].([]string)
+	if len(qp) != 1 || qp[0] != "search" {
+		t.Errorf("queryParams = %v, want [search]", cfg[keyQueryParams])
+	}
+}
+
+func TestSynthesizeHandler_POSTNoQueryParams(t *testing.T) {
+	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
+		"properties": map[string]interface{}{"name": map[string]interface{}{"type": "string"}}}}
+	src := &httpToolSource{Method: "POST", URL: "https://x/y"}
+	h := synthesizeHandler(packTool, "create_x", src)
+	if _, ok := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams]; ok {
+		t.Errorf("POST must not infer queryParams")
+	}
+}
+
+func TestSynthesizeHandler_GETExplicitQueryParamsWin(t *testing.T) {
+	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
+		"properties": map[string]interface{}{"a": map[string]interface{}{}, "b": map[string]interface{}{}}}}
+	src := &httpToolSource{Method: "GET", URL: "https://x", QueryParams: []string{"a"}}
+	h := synthesizeHandler(packTool, "t", src)
+	qp := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams].([]string)
+	if len(qp) != 1 || qp[0] != "a" {
+		t.Errorf("explicit queryParams must win, got %v", qp)
+	}
+}
+
+func TestSynthesizeHandler_RequestMappings(t *testing.T) {
+	src := &httpToolSource{
+		Method:             "POST",
+		URL:                "https://x/y",
+		RequestBodyMapping: "{payload: input}",
+		HeaderParams:       map[string]string{"X-Tenant": "tenant_id"},
+		StaticQuery:        map[string]string{"v": "2"},
+	}
+	cfg := synthesizeHandler(nil, "create_x", src)[keyHTTPConfig].(map[string]interface{})
+	if cfg["bodyMapping"] != "{payload: input}" {
+		t.Errorf("bodyMapping = %v", cfg["bodyMapping"])
+	}
+	hp, _ := cfg["headerParams"].(map[string]string)
+	if hp["X-Tenant"] != "tenant_id" {
+		t.Errorf("headerParams = %v", cfg["headerParams"])
+	}
+	sq, _ := cfg["staticQuery"].(map[string]string)
+	if sq["v"] != "2" {
+		t.Errorf("staticQuery = %v", cfg["staticQuery"])
+	}
+}

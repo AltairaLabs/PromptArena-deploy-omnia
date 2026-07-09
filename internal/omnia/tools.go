@@ -14,9 +14,14 @@ import (
 // HTTP-handler config keys and the default method a handler uses when the
 // source declares no method (or the tool isn't HTTP-backed).
 const (
-	keyEndpoint       = "endpoint"
-	keyMethod         = "method"
-	defaultHTTPMethod = "POST"
+	keyEndpoint        = "endpoint"
+	keyMethod          = "method"
+	defaultHTTPMethod  = "POST"
+	keyResponseMapping = "responseMapping"
+	keyRedact          = "redact"
+	keyQueryParams     = "queryParams"
+	keyTimeout         = "timeout"
+	methodGET          = "GET"
 )
 
 // extractSourceTools returns the full HTTP wiring for each arena tool, keyed by
@@ -195,8 +200,28 @@ func synthesizeHandler(packTool *prompt.PackTool, toolName string, src *httpTool
 		tool["description"] = packTool.Description
 		tool["inputSchema"] = packTool.Parameters
 	}
+	entry := map[string]interface{}{
+		keyName:       sanitizeName(toolName),
+		keyType:       handlerTypeHTTP,
+		"tool":        tool,
+		keyHTTPConfig: buildSynthHTTPConfig(toolName, src, packTool),
+	}
+	if src != nil && src.TimeoutMs > 0 {
+		entry[keyTimeout] = fmt.Sprintf("%dms", src.TimeoutMs)
+	}
+	return entry
+}
+
+// buildSynthHTTPConfig maps a tool's arena HTTP source to an Omnia httpConfig
+// block: the real endpoint+method when live (placeholder otherwise), the response
+// reshape, redact list, and request mappings the source declares, plus inferred
+// GET query params.
+func buildSynthHTTPConfig(
+	toolName string, src *httpToolSource, packTool *prompt.PackTool,
+) map[string]interface{} {
 	endpoint := placeholderEndpoint + toolName
 	httpMethod := defaultHTTPMethod
+	cfg := map[string]interface{}{}
 	if src != nil {
 		if src.URL != "" {
 			endpoint = src.URL
@@ -204,14 +229,68 @@ func synthesizeHandler(packTool *prompt.PackTool, toolName string, src *httpTool
 		if src.Method != "" {
 			httpMethod = src.Method
 		}
+		addSourceHTTPMappings(cfg, src)
 	}
-	httpCfg := map[string]interface{}{keyEndpoint: endpoint, keyMethod: httpMethod}
-	return map[string]interface{}{
-		keyName:       sanitizeName(toolName),
-		keyType:       handlerTypeHTTP,
-		"tool":        tool,
-		keyHTTPConfig: httpCfg,
+	cfg[keyEndpoint] = endpoint
+	cfg[keyMethod] = httpMethod
+	if qp := resolveQueryParams(src, httpMethod, packTool); len(qp) > 0 {
+		cfg[keyQueryParams] = qp
 	}
+	return cfg
+}
+
+// addSourceHTTPMappings copies the response/redact/request mappings a source
+// declares into an httpConfig map (only non-empty ones).
+func addSourceHTTPMappings(cfg map[string]interface{}, src *httpToolSource) {
+	if src.ResponseBodyMapping != "" {
+		cfg[keyResponseMapping] = src.ResponseBodyMapping
+	}
+	if len(src.Redact) > 0 {
+		cfg[keyRedact] = src.Redact
+	}
+	if src.RequestBodyMapping != "" {
+		cfg["bodyMapping"] = src.RequestBodyMapping
+	}
+	if len(src.HeaderParams) > 0 {
+		cfg["headerParams"] = src.HeaderParams
+	}
+	if len(src.StaticQuery) > 0 {
+		cfg["staticQuery"] = src.StaticQuery
+	}
+}
+
+// resolveQueryParams returns the arg names an httpConfig should send as query
+// parameters: the source's explicit request.query_params when set, else — for a
+// GET with none declared — every top-level input-schema property (sorted), so GET
+// args are sent as query string rather than an absent request body.
+func resolveQueryParams(src *httpToolSource, method string, packTool *prompt.PackTool) []string {
+	if src != nil && len(src.QueryParams) > 0 {
+		return src.QueryParams
+	}
+	if method != methodGET || packTool == nil {
+		return nil
+	}
+	return inputSchemaPropertyNames(packTool.Parameters)
+}
+
+// inputSchemaPropertyNames extracts the sorted top-level property names from a
+// JSON-Schema document decoded as interface{} (map[string]interface{}). Returns
+// nil when there is no properties object.
+func inputSchemaPropertyNames(schema interface{}) []string {
+	m, ok := schema.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	props, ok := m["properties"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(props))
+	for name := range props {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // placeholderEndpoint is the RFC-2606 .invalid base URL a placeholder handler
