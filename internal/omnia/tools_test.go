@@ -436,7 +436,8 @@ func TestSchemaDrifts(t *testing.T) {
 func TestExtractSourceTools_FromToolSpecs(t *testing.T) {
 	// A minimal valid ArenaConfig: tool_specs map with per-tool http.{url,method}.
 	// A GET tool with a URL, a POST tool (lower-case method → upper-cased) with a
-	// URL, and a tool with no http block (omitted from the map).
+	// URL, and a tool with no http block (a mock tool) — now PRESENT with an empty
+	// url/method and its mode carried, which Task 5 relies on.
 	arenaConfig := `{
 		"tool_specs": {
 			"list_user_exercises": {"description": "list", "mode": "live", "http": {"url": "https://x/list", "method": "get"}},
@@ -451,8 +452,11 @@ func TestExtractSourceTools_FromToolSpecs(t *testing.T) {
 	if got := tools["create_workout"]; got.Method != "POST" || got.URL != "https://x/create" {
 		t.Errorf("create_workout = %+v, want {POST https://x/create}", got)
 	}
-	if _, ok := tools["local_only"]; ok {
-		t.Errorf("a tool with no http block must be omitted, got %v", tools)
+	// A no-http (mock) tool is now present with an empty url/method and its mode
+	// carried — Task 5 (mock detection) relies on it; deploy output is unchanged
+	// because call sites treat an empty URL as a placeholder, exactly as before.
+	if got := tools["local_only"]; got == nil || got.URL != "" || got.Method != "" || got.Mode != "mock" {
+		t.Errorf("local_only must be present with empty url/method and mode=mock, got %+v", got)
 	}
 }
 
@@ -474,7 +478,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	packTool := &prompt.PackTool{Name: "list_user_exercises", Description: "list"}
 
 	// Source carries a real URL + method → both wired straight through.
-	h := synthesizeHandler(packTool, "list_user_exercises", sourceTool{Method: "GET", URL: "https://x/list"})
+	h := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "GET", URL: "https://x/list"})
 	hc := h[keyHTTPConfig].(map[string]interface{})
 	if hc[keyMethod] != "GET" {
 		t.Errorf("method with source GET = %v, want GET", hc[keyMethod])
@@ -484,7 +488,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	}
 
 	// Empty source → placeholder URL + POST default.
-	def := synthesizeHandler(packTool, "list_user_exercises", sourceTool{})
+	def := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{})
 	dc := def[keyHTTPConfig].(map[string]interface{})
 	if dc[keyMethod] != defaultHTTPMethod {
 		t.Errorf("empty source method must fall back to %q, got %v", defaultHTTPMethod, dc[keyMethod])
@@ -494,7 +498,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	}
 
 	// URL empty but method set → placeholder URL with that method.
-	mo := synthesizeHandler(packTool, "list_user_exercises", sourceTool{Method: "DELETE"})
+	mo := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "DELETE"})
 	mc := mo[keyHTTPConfig].(map[string]interface{})
 	if mc[keyMethod] != "DELETE" {
 		t.Errorf("method-only source must keep its method, got %v", mc[keyMethod])
@@ -511,7 +515,7 @@ func TestBuildCreateRegistryHandlers_SourceWiredAndPlaceholder(t *testing.T) {
 	cfg := &Config{
 		// list_user_exercises is a live GET (has a URL) → source-wired; issue_refund
 		// is absent from the map → placeholder + POST default.
-		sourceTools: map[string]sourceTool{
+		sourceTools: map[string]*httpToolSource{
 			"list_user_exercises": {Method: "GET", URL: "https://x/list"},
 		},
 	}

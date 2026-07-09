@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
@@ -20,36 +19,11 @@ const (
 	defaultHTTPMethod = "POST"
 )
 
-// sourceTool carries the HTTP wiring an arena tool declares in its source: the
-// (upper-cased) method and the endpoint URL. Either field may be empty — a mock
-// tool has neither; a live tool has both. A non-empty URL is what lets create
-// mode wire a real handler instead of a placeholder.
-type sourceTool struct {
-	Method string
-	URL    string
-}
-
-// extractSourceTools reads the arena source config (the JSON-serialized arena
-// config the CLI threads through req.ArenaConfig) and returns a map from each
-// tool's LLM-facing name to its declared HTTP method (upper-cased) and URL. A
-// tool is kept if it has EITHER a method or a URL; a tool with neither (e.g. a
-// mock tool with no http block) is omitted. It degrades gracefully: a parse
-// failure or empty input yields a (non-nil) empty map — it NEVER fails the
-// deploy, since the real method/URL is an enhancement over the placeholder
-// defaults, not a requirement.
-func extractSourceTools(arenaConfigJSON string) map[string]sourceTool {
-	tools := make(map[string]sourceTool)
-	infos, err := adaptersdk.ExtractToolInfo(arenaConfigJSON)
-	if err != nil {
-		return tools
-	}
-	for _, info := range infos {
-		if info.HTTPMethod == "" && info.HTTPURL == "" {
-			continue
-		}
-		tools[info.Name] = sourceTool{Method: strings.ToUpper(info.HTTPMethod), URL: info.HTTPURL}
-	}
-	return tools
+// extractSourceTools returns the full HTTP wiring for each arena tool, keyed by
+// LLM-facing name. It delegates to parseArenaToolSources (which never fails), so
+// a nil/empty ArenaConfig degrades gracefully to the placeholder defaults.
+func extractSourceTools(arenaConfigJSON string) map[string]*httpToolSource {
+	return parseArenaToolSources(arenaConfigJSON)
 }
 
 // ToolBinding is the deterministic decision the resolver reaches about how a
@@ -187,7 +161,7 @@ func buildCreateRegistryHandlers(
 		}
 		src := cfg.sourceTools[name]
 		handlers = append(handlers, synthesizeHandler(pack.Tools[name], name, src))
-		if src.URL != "" {
+		if src != nil && src.URL != "" {
 			sourceWired = append(sourceWired, name)
 		} else {
 			placeholders = append(placeholders, name)
@@ -215,28 +189,28 @@ func buildCreateRegistryHandlers(
 // knows to set the real URL in Omnia. The method comes from the source too,
 // falling back to defaultHTTPMethod when none was declared. The pack tool's
 // schema is carried through.
-func synthesizeHandler(packTool *prompt.PackTool, toolName string, src sourceTool) map[string]interface{} {
+func synthesizeHandler(packTool *prompt.PackTool, toolName string, src *httpToolSource) map[string]interface{} {
 	tool := map[string]interface{}{keyName: toolName}
 	if packTool != nil {
 		tool["description"] = packTool.Description
 		tool["inputSchema"] = packTool.Parameters
 	}
 	endpoint := placeholderEndpoint + toolName
-	if src.URL != "" {
-		endpoint = src.URL
-	}
 	httpMethod := defaultHTTPMethod
-	if src.Method != "" {
-		httpMethod = src.Method
+	if src != nil {
+		if src.URL != "" {
+			endpoint = src.URL
+		}
+		if src.Method != "" {
+			httpMethod = src.Method
+		}
 	}
+	httpCfg := map[string]interface{}{keyEndpoint: endpoint, keyMethod: httpMethod}
 	return map[string]interface{}{
-		keyName: sanitizeName(toolName),
-		keyType: handlerTypeHTTP,
-		"tool":  tool,
-		keyHTTPConfig: map[string]interface{}{
-			keyEndpoint: endpoint,
-			keyMethod:   httpMethod,
-		},
+		keyName:       sanitizeName(toolName),
+		keyType:       handlerTypeHTTP,
+		"tool":        tool,
+		keyHTTPConfig: httpCfg,
 	}
 }
 
@@ -260,7 +234,7 @@ func countSynthesizedPackTools(pack *prompt.Pack, cfg *Config) (sourceWired, pla
 		if configured[name] {
 			continue
 		}
-		if cfg.sourceTools[name].URL != "" {
+		if src := cfg.sourceTools[name]; src != nil && src.URL != "" {
 			sourceWired++
 		} else {
 			placeholder++

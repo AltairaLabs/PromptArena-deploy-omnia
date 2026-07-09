@@ -10,8 +10,6 @@ import (
 // httpToolSource is the full HTTP wiring the adapter parses from the arena tool
 // source (req.ArenaConfig). It supersedes the method+URL-only sourceTool. A
 // zero-value URL marks a tool with no live endpoint (mock / no http block).
-//
-//nolint:unused // Used by later integration tasks
 type httpToolSource struct {
 	Mode                string
 	Method              string // upper-cased
@@ -29,8 +27,6 @@ type httpToolSource struct {
 
 // arenaHTTP mirrors tools.HTTPConfig with json tags (sigs.k8s.io/yaml converts
 // YAML→JSON, so this one struct parses both loaded_tools YAML and tool_specs JSON).
-//
-//nolint:unused // Used by parseArenaToolSources indirectly
 type arenaHTTP struct {
 	URL            string             `json:"url"`
 	Method         string             `json:"method"`
@@ -42,7 +38,6 @@ type arenaHTTP struct {
 	Response       *arenaHTTPResponse `json:"response"`
 }
 
-//nolint:unused // Used by parseArenaToolSources indirectly
 type arenaHTTPRequest struct {
 	QueryParams   []string          `json:"query_params"`
 	BodyMapping   string            `json:"body_mapping"`
@@ -51,12 +46,10 @@ type arenaHTTPRequest struct {
 	StaticHeaders map[string]string `json:"static_headers"`
 }
 
-//nolint:unused // Used by parseArenaToolSources indirectly
 type arenaHTTPResponse struct {
 	BodyMapping string `json:"body_mapping"`
 }
 
-//nolint:unused // Used by parseArenaToolSources indirectly
 type arenaToolSpec struct {
 	Name        string     `json:"name"`
 	Description string     `json:"description"`
@@ -64,7 +57,6 @@ type arenaToolSpec struct {
 	HTTP        *arenaHTTP `json:"http"`
 }
 
-//nolint:unused // Used by parseArenaToolSources indirectly
 type arenaToolManifest struct {
 	Metadata struct {
 		Name string `json:"name"`
@@ -72,7 +64,6 @@ type arenaToolManifest struct {
 	Spec arenaToolSpec `json:"spec"`
 }
 
-//nolint:unused // Used by parseArenaToolSources
 type arenaSourceConfig struct {
 	LoadedTools []struct {
 		FilePath string `json:"file_path"`
@@ -87,8 +78,6 @@ type arenaSourceConfig struct {
 // error or empty input yields a non-nil empty map (graceful degradation — the
 // rich wiring is an enhancement over the placeholder default, never a hard
 // requirement).
-//
-//nolint:unused // Used by integration tasks and exported for later use
 func parseArenaToolSources(arenaConfigJSON string) map[string]*httpToolSource {
 	out := make(map[string]*httpToolSource)
 	if arenaConfigJSON == "" {
@@ -104,8 +93,6 @@ func parseArenaToolSources(arenaConfigJSON string) map[string]*httpToolSource {
 }
 
 // parseToolSpecs processes structured tool_specs from arena config.
-//
-//nolint:unused // Called by parseArenaToolSources
 func parseToolSpecs(cfg *arenaSourceConfig, out map[string]*httpToolSource) {
 	for name, spec := range cfg.ToolSpecs {
 		if spec == nil {
@@ -120,8 +107,6 @@ func parseToolSpecs(cfg *arenaSourceConfig, out map[string]*httpToolSource) {
 }
 
 // parseLoadedTools processes YAML tool manifests from loaded_tools.
-//
-//nolint:unused // Called by parseArenaToolSources
 func parseLoadedTools(cfg *arenaSourceConfig, out map[string]*httpToolSource) {
 	for _, td := range cfg.LoadedTools {
 		if len(td.Data) == 0 {
@@ -145,8 +130,6 @@ func parseLoadedTools(cfg *arenaSourceConfig, out map[string]*httpToolSource) {
 }
 
 // sourceFromSpec flattens an arena tool spec into httpToolSource.
-//
-//nolint:unused // Called by parseArenaToolSources helpers
 func sourceFromSpec(spec *arenaToolSpec) *httpToolSource {
 	src := &httpToolSource{Mode: spec.Mode}
 	h := spec.HTTP
