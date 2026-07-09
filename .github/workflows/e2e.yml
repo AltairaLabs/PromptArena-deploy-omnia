@@ -146,6 +146,20 @@ jobs:
             GOWORK=off go test -tags=integration -run TestIntegration_E2EDeployAndKeep \
               ./internal/omnia/ -count=1 -v
 
+      - name: Wait for agent Deployments to be Available
+        run: |
+          # The operator names each agent's Deployment after the AgentRuntime.
+          # Do NOT trust the adapter's Status (it reports "deployed" before pods
+          # are Ready) — gate on real K8s readiness here.
+          for AGENT in e2e-basic e2e-multi-triage e2e-multi-billing; do
+            echo "===== waiting for deployment/${AGENT} ====="
+            for i in $(seq 1 40); do
+              if kubectl -n "${AGENTS_NS}" get "deployment/${AGENT}" >/dev/null 2>&1; then break; fi
+              echo "  deployment/${AGENT} not created yet ($i)"; sleep 3
+            done
+            kubectl -n "${AGENTS_NS}" rollout status "deployment/${AGENT}" --timeout=300s
+          done
+
       - name: Converse with each agent (websocket -> non-error response)
         run: |
           kubectl create configmap converse-script -n "${AGENTS_NS}" \
@@ -185,7 +199,13 @@ jobs:
         if: always()
         run: |
           echo "===== omnia-system pods ====="; kubectl get pods -n "${NS}" -o wide || true
-          echo "===== agents-ns all ====="; kubectl get all,agentruntime,promptpack,toolregistry,agentpolicy -n "${AGENTS_NS}" || true
+          echo "===== agents-ns all ====="; kubectl get all,agentruntime,promptpack,toolregistry,agentpolicy,provider -n "${AGENTS_NS}" || true
+          echo "===== agentruntime conditions ====="
+          for a in e2e-basic e2e-multi-triage e2e-multi-billing; do
+            echo "--- $a ---"; kubectl -n "${AGENTS_NS}" get agentruntime "$a" -o jsonpath='{.status.phase}{"\n"}{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>/dev/null || true
+          done
+          echo "===== provider status ====="; kubectl -n "${AGENTS_NS}" get provider "${PROVIDER}" -o jsonpath='{.status}' || true; echo
+          echo "===== agent pod logs (if any) ====="; kubectl -n "${AGENTS_NS}" logs -l app.kubernetes.io/instance=e2e-basic --all-containers --tail=40 2>/dev/null || true
           echo "===== workspace status ====="; kubectl get workspace "${WORKSPACE}" -o jsonpath='{.status}' || true; echo
           echo "===== dashboard logs (tail) ====="; kubectl -n "${NS}" logs deploy/omnia-dashboard --tail=60 || true
           echo "===== port-forward log ====="; cat /tmp/pf.log || true
