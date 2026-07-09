@@ -8,12 +8,12 @@ name: E2E (Kind)
 #   2. deploy    — adapter apply -> AgentRuntimes created         [this increment]
 #   3. converse  — websocket turn -> agent responds (needs DB-backed services)
 #
-# Triggered on push to the feature branch during bring-up; will move to
-# workflow_dispatch + nightly schedule once green on main.
+# Full-stack e2e is slow (~10 min) and pulls the whole Omnia image set, so it is
+# NOT run per-PR: it runs on demand and nightly.
 on:
   workflow_dispatch: {}
-  push:
-    branches: [feat/e2e-kind-sp2]
+  schedule:
+    - cron: "0 6 * * *"
 
 permissions:
   contents: read
