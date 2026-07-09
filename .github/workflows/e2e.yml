@@ -129,24 +129,57 @@ jobs:
             sleep 2
           done
 
-      - name: Adapter apply lifecycle (create-mode) via the real dashboard
+      - name: Deploy persistent agents via the adapter (single-prompt + fan-out)
         env:
           OMNIA_IT_ENDPOINT: "http://localhost:3000"
           OMNIA_IT_TOKEN: "anonymous"
           OMNIA_IT_WORKSPACE: ${{ env.WORKSPACE }}
           OMNIA_IT_PROVIDER: ${{ env.PROVIDER }}
+          OMNIA_IT_KEEP: "1"
         run: |
-          GOWORK=off go test -tags=integration -run TestIntegration_Lifecycle \
-            ./internal/omnia/ -count=1 -v
+          # Single-prompt pack -> one agent "e2e-basic".
+          OMNIA_IT_PACK_ID=e2e-basic OMNIA_IT_PROMPTS=main \
+            GOWORK=off go test -tags=integration -run TestIntegration_E2EDeployAndKeep \
+              ./internal/omnia/ -count=1 -v
+          # Multi-prompt pack -> fan-out to agents "e2e-multi-triage" and "e2e-multi-billing".
+          OMNIA_IT_PACK_ID=e2e-multi OMNIA_IT_PROMPTS=triage,billing \
+            GOWORK=off go test -tags=integration -run TestIntegration_E2EDeployAndKeep \
+              ./internal/omnia/ -count=1 -v
 
-      - name: Assert AgentRuntime(s) reconciled
+      - name: Converse with each agent (websocket -> non-error response)
         run: |
-          echo "===== AgentRuntimes in ${AGENTS_NS} ====="
-          kubectl get agentruntime -n "${AGENTS_NS}" -o wide || true
-          # The lifecycle test creates then destroys; assert at least the operator
-          # produced a Deployment for the agent at some point (events are the proof
-          # for a create+destroy cycle).
-          kubectl get promptpack -n "${AGENTS_NS}" -o wide || true
+          kubectl create configmap converse-script -n "${AGENTS_NS}" \
+            --from-file=converse.py=test/e2e/converse.py
+          for AGENT in e2e-basic e2e-multi-triage e2e-multi-billing; do
+            echo "===== converse: ${AGENT} ====="
+            cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata: { name: converse-${AGENT}, namespace: ${AGENTS_NS} }
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: converse
+                image: python:3.12-slim
+                command: ["bash", "-c", "pip install websockets --quiet && python /s/converse.py"]
+                env:
+                  - { name: AGENT, value: "${AGENT}" }
+                  - { name: NS, value: "${AGENTS_NS}" }
+                volumeMounts:
+                  - { name: s, mountPath: /s }
+            volumes:
+              - name: s
+                configMap: { name: converse-script }
+          EOF
+            for i in $(seq 1 60); do
+              phase=$(kubectl get pod "converse-${AGENT}" -n "${AGENTS_NS}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              if [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; then break; fi
+              sleep 3
+            done
+            kubectl logs "converse-${AGENT}" -n "${AGENTS_NS}" || true
+            kubectl logs "converse-${AGENT}" -n "${AGENTS_NS}" 2>/dev/null | grep -q "CONVERSE OK" \
+              || { echo "::error::${AGENT} did not answer without error"; exit 1; }
+          done
 
       - name: Diagnostics
         if: always()
