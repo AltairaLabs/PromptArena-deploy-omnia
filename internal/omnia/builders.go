@@ -23,6 +23,13 @@ const (
 	keyEnabled  = "enabled"
 
 	keyHTTPConfig = "httpConfig"
+
+	// Facade composition keys/values (AgentRuntime spec.facades[], Omnia#1576).
+	keyFacades           = "facades"
+	keyHandler           = "handler"
+	keyManagementPlane   = "managementPlane"
+	facadeTypeWebSocket  = "websocket"
+	facadeHandlerRuntime = "runtime"
 )
 
 // buildPromptPackRequest builds the JSON body for creating/updating a PromptPack.
@@ -89,6 +96,21 @@ func buildSkillsConfigSpec(sc *SkillsConfig) map[string]interface{} {
 	return out
 }
 
+// buildWebSocketFacade builds the single websocket facade entry for spec.facades
+// (Omnia#1576 replaced the singular spec.facade with a required facades list).
+// The agent-global externalAuth.allowManagementPlane was removed in the same
+// change in favor of per-facade managementPlane, so it is projected here.
+func buildWebSocketFacade(ea *ExternalAuthConfig) map[string]interface{} {
+	facade := map[string]interface{}{
+		keyType:    facadeTypeWebSocket,
+		keyHandler: facadeHandlerRuntime,
+	}
+	if ea != nil && ea.AllowManagementPlane != nil {
+		facade[keyManagementPlane] = *ea.AllowManagementPlane
+	}
+	return facade
+}
+
 // buildAgentRuntimeRequest builds the JSON body for creating/updating an AgentRuntime.
 func buildAgentRuntimeRequest(
 	pack *prompt.Pack, agentName string, cfg *Config,
@@ -97,10 +119,7 @@ func buildAgentRuntimeRequest(
 		"promptPackRef": map[string]interface{}{
 			keyName: sanitizeName(pack.ID),
 		},
-		"facade": map[string]interface{}{
-			keyType:   "websocket",
-			"handler": "runtime",
-		},
+		keyFacades: []map[string]interface{}{buildWebSocketFacade(cfg.ExternalAuth)},
 	}
 
 	// Emit one NamedProviderRef per binding, preserving order. The binding
@@ -233,10 +252,10 @@ func buildExternalAuthSpec(ea *ExternalAuthConfig) map[string]interface{} {
 	if ea == nil {
 		return nil
 	}
+	// Note: allowManagementPlane is intentionally NOT emitted here — Omnia#1576
+	// removed spec.externalAuth.allowManagementPlane in favor of the per-facade
+	// managementPlane gate, projected by buildWebSocketFacade.
 	out := map[string]interface{}{}
-	if ea.AllowManagementPlane != nil {
-		out["allowManagementPlane"] = *ea.AllowManagementPlane
-	}
 	if st := buildSharedTokenSpec(ea.SharedToken); st != nil {
 		out["sharedToken"] = st
 	}
