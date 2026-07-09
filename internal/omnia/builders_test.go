@@ -343,13 +343,14 @@ func TestBuildAgentRuntimeRequest(t *testing.T) {
 		t.Errorf("expected spec.promptPackRef.name %q, got %v", "test-pack", spec["promptPackRef"])
 	}
 
-	// facade is required by the CRD.
-	facade, ok := spec["facade"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected required spec.facade to be an object")
-	}
+	// facades is a required, non-empty list (Omnia#1576 replaced the singular
+	// spec.facade). A plain agent deploy carries exactly one websocket facade.
+	facade := firstFacade(t, spec)
 	if facade["type"] != "websocket" || facade["handler"] != "runtime" {
 		t.Errorf("unexpected facade: %v", facade)
+	}
+	if _, present := facade["managementPlane"]; present {
+		t.Error("managementPlane should be omitted when no externalAuth override is set")
 	}
 
 	// providers is a list of NamedProviderRef; "default" is primary.
@@ -712,6 +713,21 @@ func agentRuntimeSpec(t *testing.T, cfg *Config) map[string]interface{} {
 	return spec
 }
 
+// firstFacade returns spec.facades[0], asserting the required, non-empty list
+// shape introduced by Omnia#1576.
+func firstFacade(t *testing.T, spec map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	facades, ok := spec["facades"].([]interface{})
+	if !ok || len(facades) != 1 {
+		t.Fatalf("expected exactly 1 facade in spec.facades, got %v", spec["facades"])
+	}
+	facade, ok := facades[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected spec.facades[0] to be an object")
+	}
+	return facade
+}
+
 func TestBuildAgentRuntimeRequest_ExternalAuth(t *testing.T) {
 	cfg := &Config{
 		APIEndpoint: "https://omnia.test.com",
@@ -730,13 +746,19 @@ func TestBuildAgentRuntimeRequest_ExternalAuth(t *testing.T) {
 	}
 
 	spec := agentRuntimeSpec(t, cfg)
+
+	// Omnia#1576: allowManagementPlane moved from spec.externalAuth onto the
+	// per-facade managementPlane gate. It must NOT appear under externalAuth.
+	if mp := firstFacade(t, spec)["managementPlane"]; mp != false {
+		t.Errorf("facades[0].managementPlane = %v, want false", mp)
+	}
+
 	ea, ok := spec["externalAuth"].(map[string]interface{})
 	if !ok {
 		t.Fatal("expected spec.externalAuth to be an object")
 	}
-
-	if ea["allowManagementPlane"] != false {
-		t.Errorf("allowManagementPlane = %v, want false", ea["allowManagementPlane"])
+	if _, present := ea["allowManagementPlane"]; present {
+		t.Error("externalAuth.allowManagementPlane was removed in Omnia#1576; must not be emitted")
 	}
 
 	// sharedToken.secretRef must be a LocalObjectReference {"name": ...}.
