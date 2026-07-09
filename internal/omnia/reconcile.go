@@ -18,32 +18,30 @@ const (
 	phaseActive  = "Active"
 
 	// opReconcile is the DeployError.Operation value for reconcile-poll failures.
-	opReconcile = "reconcile" //nolint:unused // wired into Apply in a later task
+	opReconcile = "reconcile"
 
 	// reconcileDefaultMaxAttempts is the default reconcileMaxAttempts value —
 	// named so it isn't a bare magic number in the var declaration below.
 	// ~60s at the default 2s poll interval.
-	reconcileDefaultMaxAttempts = 30 //nolint:unused // wired into Apply in a later task
+	reconcileDefaultMaxAttempts = 30
 )
 
 // Reconcile-poll tuning. Vars (not consts) so tests can zero the interval and
-// cap the attempts for fast, deterministic runs. Not yet read from Apply —
-// that wiring lands in a later task, so the unused linter is silenced below
-// until then.
+// cap the attempts for fast, deterministic runs.
 var (
-	reconcilePollInterval = 2 * time.Second             //nolint:unused // wired into Apply in a later task
-	reconcileMaxAttempts  = reconcileDefaultMaxAttempts //nolint:unused // wired into Apply in a later task
+	reconcilePollInterval = 2 * time.Second
+	reconcileMaxAttempts  = reconcileDefaultMaxAttempts
 )
 
 // Terminal-failure phases: the resource reconciled into a bad state, so polling
 // further is pointless — fail loudly and immediately.
-var reconcileFailedPhases = map[string]bool{ //nolint:unused // wired into Apply in a later task
+var reconcileFailedPhases = map[string]bool{
 	phaseFailed: true,
 	phaseError:  true,
 }
 
 // Healthy phases that mean "reconciled" even without an explicit Ready condition.
-var reconcileReadyPhases = map[string]bool{ //nolint:unused // wired into Apply in a later task
+var reconcileReadyPhases = map[string]bool{
 	phaseRunning:   true,
 	phaseActive:    true,
 	conditionReady: true,
@@ -55,8 +53,6 @@ var reconcileReadyPhases = map[string]bool{ //nolint:unused // wired into Apply 
 // silently never reconciled" case — e.g. a CRD-schema mismatch the operator drops).
 // Unlike checkResource, an empty/unknown status is treated as NOT ready (keep
 // waiting), never as healthy.
-//
-//nolint:unused // wired into Apply in a later task
 func waitForReconcile(ctx context.Context, client omniaClient, resType, name string) error {
 	for attempt := 0; attempt < reconcileMaxAttempts; attempt++ {
 		state, err := reconcileState(ctx, client, resType, name)
@@ -82,19 +78,16 @@ func waitForReconcile(ctx context.Context, client omniaClient, resType, name str
 	return newReconcileTimeoutError(resType, name)
 }
 
-//nolint:unused // wired into Apply in a later task
 type reconcilePhase int
 
 const (
-	reconcilePending reconcilePhase = iota //nolint:unused // wired into Apply in a later task
-	reconcileDone                          //nolint:unused // wired into Apply in a later task
-	reconcileFailed                        //nolint:unused // wired into Apply in a later task
+	reconcilePending reconcilePhase = iota
+	reconcileDone
+	reconcileFailed
 )
 
 // reconcileState fetches the resource and classifies its readiness. A 404/transport
 // error is surfaced (the caller fails the deploy).
-//
-//nolint:unused // wired into Apply in a later task
 func reconcileState(ctx context.Context, client omniaClient, resType, name string) (reconcilePhase, error) {
 	resp, err := client.GetResource(ctx, resType, name)
 	if err != nil {
@@ -119,8 +112,6 @@ func reconcileState(ctx context.Context, client omniaClient, resType, name strin
 }
 
 // newReconcileError builds a resource-category DeployError for a reconcile failure.
-//
-//nolint:unused // wired into Apply in a later task
 func newReconcileError(resType, name string, cause error, remediation string) *DeployError {
 	return &DeployError{
 		Category:     ErrCategoryResource,
@@ -134,8 +125,6 @@ func newReconcileError(resType, name string, cause error, remediation string) *D
 }
 
 // newReconcileTimeoutError builds the "created but never reconciled" timeout error.
-//
-//nolint:unused // wired into Apply in a later task
 func newReconcileTimeoutError(resType, name string) *DeployError {
 	return &DeployError{
 		Category:     ErrCategoryTimeout,

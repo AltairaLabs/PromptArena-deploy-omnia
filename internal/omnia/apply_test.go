@@ -107,7 +107,9 @@ const multiAgentPackJSON = `{
 }`
 
 func TestApply_EmitsAccessURL(t *testing.T) {
+	reconcilePollInterval = 0
 	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
 	var events []*deploy.ApplyEvent
@@ -127,7 +129,9 @@ func TestApply_EmitsAccessURL(t *testing.T) {
 }
 
 func TestApply_AccessURL_MultiAgent(t *testing.T) {
+	reconcilePollInterval = 0
 	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
 	cfg := `{
@@ -204,7 +208,9 @@ func TestApply_NoAccessURL_OnFailure(t *testing.T) {
 }
 
 func TestApply_SingleAgent(t *testing.T) {
+	reconcilePollInterval = 0
 	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
 	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
@@ -249,7 +255,9 @@ func TestApply_SingleAgent(t *testing.T) {
 }
 
 func TestApply_MultiPromptFanOut_SharedPackNRuntimes(t *testing.T) {
+	reconcilePollInterval = 0
 	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
 	cfg := `{
@@ -292,7 +300,9 @@ func TestApply_MultiPromptFanOut_SharedPackNRuntimes(t *testing.T) {
 }
 
 func TestApply_BindMode_BindsRegistryWithoutCreating(t *testing.T) {
+	reconcilePollInterval = 0
 	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
 	// Registry exists but doesn't provide the pack's "search" tool. Apply no
 	// longer echoes the resolver advisory (the CLI surfaces the plan's warnings);
 	// what matters here is that bind mode binds without creating a registry.
@@ -375,7 +385,9 @@ func TestApply_DryRun(t *testing.T) {
 }
 
 func TestApply_WithPriorState(t *testing.T) {
+	reconcilePollInterval = 0
 	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
 	// Pre-populate the simulated client with existing LABELED resources so adopt
 	// reconciles them as the prior state (the cluster is the source of truth) and
 	// apply updates rather than creates — req.PriorState is intentionally empty.
@@ -410,8 +422,34 @@ func TestApply_WithPriorState(t *testing.T) {
 	}
 }
 
-func TestApply_ResourceFailure(t *testing.T) {
+func TestApply_FailsWhenAgentRuntimeNeverReconciles(t *testing.T) {
+	reconcilePollInterval = 0
+	reconcileMaxAttempts = 2
+
 	sim := newSimulatedClient()
+	// agentRuntimeReadyOnGet is intentionally left false: the created AgentRuntime
+	// reads back with a nil status (pending) and never reaches Ready.
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	_, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: testDeployConfig,
+	}, noopApplyCallback)
+	if err == nil {
+		t.Fatal("expected Apply to fail on a non-reconciling AgentRuntime")
+	}
+	if de := IsDeployError(err); de == nil || de.Operation != opReconcile {
+		t.Errorf("want a reconcile DeployError, got %v", err)
+	}
+}
+
+func TestApply_ResourceFailure(t *testing.T) {
+	reconcilePollInterval = 0
+	sim := newSimulatedClient()
+	// The AgentRuntime itself succeeds despite the ToolRegistry failure below, so
+	// it goes through reconcile — make it reconcile immediately so the only
+	// resource failure this test observes is the injected ToolRegistry one.
+	sim.agentRuntimeReadyOnGet = true
 	sim.failOn[resourceKey(ResTypeToolRegistry, "test-pack-tools")] = fmt.Errorf("simulated API failure")
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
