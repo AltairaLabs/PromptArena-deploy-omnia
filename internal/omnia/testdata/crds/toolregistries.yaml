@@ -1,0 +1,809 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: toolregistries.omnia.altairalabs.ai
+spec:
+  group: omnia.altairalabs.ai
+  names:
+    kind: ToolRegistry
+    listKind: ToolRegistryList
+    plural: toolregistries
+    singular: toolregistry
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Number of discovered tools
+      jsonPath: .status.discoveredToolsCount
+      name: Tools
+      type: integer
+    - description: Current phase
+      jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ToolRegistry is the Schema for the toolregistries API.
+          It defines a collection of tool handlers that expose tools to agents.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of ToolRegistry
+            properties:
+              handlers:
+                description: |-
+                  handlers defines the list of tool handlers in this registry.
+                  Each handler can expose one or more tools.
+                items:
+                  description: HandlerDefinition defines a tool handler that exposes
+                    one or more tools
+                  properties:
+                    auth:
+                      description: |-
+                        auth configures how the runtime authenticates to this handler's backend.
+                        Applies to http, openapi, grpc, and mcp handlers. Supersedes the legacy
+                        per-config authType/authSecretRef fields; setting both is rejected.
+                      properties:
+                        secretRef:
+                          description: |-
+                            secretRef holds the credential for bearer/basic. For bearer the key's value
+                            is the token; for basic it is "username:password".
+                          properties:
+                            key:
+                              description: key is the key in the secret to select.
+                              type: string
+                            name:
+                              description: name is the name of the secret.
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                        serviceAccount:
+                          description: |-
+                            serviceAccount configures an audience-bound projected SA token. The tool
+                            backend validates the token via the Kubernetes TokenReview API.
+                          properties:
+                            audience:
+                              description: |-
+                                audience the projected token is bound to; the tool backend validates it
+                                (via TokenReview) against this audience.
+                              type: string
+                          required:
+                          - audience
+                          type: object
+                        type:
+                          default: none
+                          description: |-
+                            type selects the authentication mechanism:
+                              none             — no credential (default)
+                              bearer           — Authorization: Bearer <secretRef value>
+                              basic            — Authorization: Basic <base64(secretRef "user:password")>
+                              serviceAccount   — audience-bound projected Kubernetes ServiceAccount token
+                              workloadIdentity — resolved by the runtime under the pod's ambient Azure
+                                                 identity (core)
+                          enum:
+                          - none
+                          - bearer
+                          - basic
+                          - serviceAccount
+                          - workloadIdentity
+                          type: string
+                        workloadIdentity:
+                          description: |-
+                            workloadIdentity configures hosted same-cloud identity, resolved by the
+                            runtime under the pod's ambient Azure identity (core).
+                          properties:
+                            audience:
+                              description: audience for the federated token exchange.
+                              type: string
+                            cloud:
+                              description: cloud identity provider.
+                              enum:
+                              - azure
+                              type: string
+                            header:
+                              default: Authorization
+                              description: header carries the resolved token. Defaults
+                                to Authorization.
+                              type: string
+                          required:
+                          - audience
+                          - cloud
+                          type: object
+                      required:
+                      - type
+                      type: object
+                      x-kubernetes-validations:
+                      - message: auth.type bearer/basic requires secretRef
+                        rule: self.type != 'bearer' && self.type != 'basic' || has(self.secretRef)
+                      - message: auth.type serviceAccount requires the serviceAccount
+                          block
+                        rule: self.type != 'serviceAccount' || has(self.serviceAccount)
+                      - message: auth.type workloadIdentity requires the workloadIdentity
+                          block
+                        rule: self.type != 'workloadIdentity' || has(self.workloadIdentity)
+                    clientConfig:
+                      description: |-
+                        clientConfig contains client-side tool configuration.
+                        Used when type is "client".
+                      properties:
+                        categories:
+                          description: |-
+                            categories are semantic consent categories (e.g., "location", "camera").
+                            Clients can use these to remember consent preferences per category.
+                          items:
+                            type: string
+                          type: array
+                        consentMessage:
+                          description: |-
+                            consentMessage is a human-readable message shown to the user before
+                            the tool is executed. If empty, the tool runs without a consent prompt.
+                          type: string
+                      type: object
+                    grpcConfig:
+                      description: |-
+                        grpcConfig contains gRPC-specific configuration.
+                        Required when type is "grpc".
+                      properties:
+                        endpoint:
+                          description: endpoint is the gRPC server address (host:port).
+                          type: string
+                        retryPolicy:
+                          description: |-
+                            retryPolicy configures retry behavior for this gRPC tool.
+                            When nil, tool calls are executed once with no retries.
+                          properties:
+                            backoffMultiplier:
+                              default: "2.0"
+                              description: |-
+                                backoffMultiplier multiplies the delay between successive retries.
+                                Must parse as a float >= 1.0.
+                              pattern: ^[0-9]+(\.[0-9]+)?$
+                              type: string
+                            initialBackoff:
+                              default: 100ms
+                              description: initialBackoff is the delay before the
+                                first retry attempt.
+                              type: string
+                            maxAttempts:
+                              description: |-
+                                maxAttempts is the maximum total number of attempts, including the first.
+                                A value of 1 means no retries. Must be between 1 and 10.
+                              format: int32
+                              maximum: 10
+                              minimum: 1
+                              type: integer
+                            maxBackoff:
+                              default: 30s
+                              description: maxBackoff is the upper bound on delay
+                                between retry attempts.
+                              type: string
+                            retryableStatusCodes:
+                              description: |-
+                                retryableStatusCodes is the list of gRPC status codes that trigger a retry.
+                                Defaults to ["UNAVAILABLE", "DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED"] if unset.
+                                Set to an empty list to disable status-code-based retry entirely.
+                                Values must be valid gRPC status code names.
+                              items:
+                                type: string
+                              type: array
+                          required:
+                          - maxAttempts
+                          type: object
+                        tls:
+                          description: tls enables TLS for the connection.
+                          type: boolean
+                        tlsCAPath:
+                          description: tlsCAPath is the path to the CA certificate.
+                          type: string
+                        tlsCertPath:
+                          description: tlsCertPath is the path to the TLS certificate.
+                          type: string
+                        tlsInsecureSkipVerify:
+                          description: tlsInsecureSkipVerify skips TLS verification
+                            (not recommended for production).
+                          type: boolean
+                        tlsKeyPath:
+                          description: tlsKeyPath is the path to the TLS key.
+                          type: string
+                      required:
+                      - endpoint
+                      type: object
+                    httpConfig:
+                      description: |-
+                        httpConfig contains HTTP-specific configuration.
+                        Required when type is "http".
+                      properties:
+                        authSecretRef:
+                          description: |-
+                            authSecretRef references a secret containing auth credentials.
+                            Deprecated: use the handler-level `auth` stanza. Normalized into it when set.
+                          properties:
+                            key:
+                              description: key is the key in the secret to select.
+                              type: string
+                            name:
+                              description: name is the name of the secret.
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                        authType:
+                          description: |-
+                            authType specifies the authentication type (bearer, basic).
+                            Deprecated: use the handler-level `auth` stanza. Normalized into it when set.
+                          enum:
+                          - bearer
+                          - basic
+                          type: string
+                        bodyMapping:
+                          description: |-
+                            bodyMapping is a JMESPath expression to reshape the request body
+                            before sending.
+                          type: string
+                        contentType:
+                          default: application/json
+                          description: |-
+                            contentType is the Content-Type header value.
+                            Defaults to "application/json".
+                          type: string
+                        endpoint:
+                          description: endpoint is the HTTP endpoint URL.
+                          type: string
+                        headerParams:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            headerParams maps arg names to HTTP header names using template strings.
+                            Example: {"X-Customer-ID": "{{.customer_id}}"}
+                          type: object
+                        headers:
+                          additionalProperties:
+                            type: string
+                          description: headers are additional HTTP headers to include
+                            in requests.
+                          type: object
+                        method:
+                          default: POST
+                          description: |-
+                            method is the HTTP method to use (GET, POST, PUT, DELETE).
+                            Defaults to POST.
+                          type: string
+                        queryParams:
+                          description: |-
+                            queryParams lists arg names that should be sent as URL query parameters
+                            instead of in the request body.
+                          items:
+                            type: string
+                          type: array
+                        redact:
+                          description: redact lists response field names to exclude
+                            from logs and tracing.
+                          items:
+                            type: string
+                          type: array
+                        responseMapping:
+                          description: |-
+                            responseMapping is a JMESPath expression to filter/reshape the response
+                            before returning to the LLM.
+                          type: string
+                        retryPolicy:
+                          description: |-
+                            retryPolicy configures retry behavior for this HTTP tool.
+                            When nil, tool calls are executed once with no retries.
+                          properties:
+                            backoffMultiplier:
+                              default: "2.0"
+                              description: |-
+                                backoffMultiplier multiplies the delay between successive retries.
+                                Expressed as a decimal string (e.g. "2.0", "1.5"). Must parse as a float >= 1.0.
+                              pattern: ^[0-9]+(\.[0-9]+)?$
+                              type: string
+                            initialBackoff:
+                              default: 100ms
+                              description: |-
+                                initialBackoff is the delay before the first retry attempt.
+                                Subsequent attempts apply exponential backoff via backoffMultiplier.
+                              type: string
+                            maxAttempts:
+                              description: |-
+                                maxAttempts is the maximum total number of attempts, including the first.
+                                A value of 1 means no retries. Must be between 1 and 10.
+                              format: int32
+                              maximum: 10
+                              minimum: 1
+                              type: integer
+                            maxBackoff:
+                              default: 30s
+                              description: |-
+                                maxBackoff is the upper bound on delay between retry attempts.
+                                Must be >= initialBackoff (validated by the controller).
+                              type: string
+                            respectRetryAfter:
+                              default: true
+                              description: |-
+                                respectRetryAfter honors the HTTP Retry-After header on 429 and 503 responses,
+                                overriding backoff calculations for that attempt.
+                              type: boolean
+                            retryOn:
+                              description: |-
+                                retryOn is the list of HTTP status codes that trigger a retry.
+                                Defaults to [408, 429, 500, 502, 503, 504] if unset.
+                                Set to an empty list to disable status-code-based retry entirely.
+                              items:
+                                format: int32
+                                type: integer
+                              type: array
+                            retryOnNetworkError:
+                              default: true
+                              description: |-
+                                retryOnNetworkError enables retries on connection failures, DNS failures,
+                                and request timeouts (errors returned before a status code is received).
+                              type: boolean
+                          required:
+                          - maxAttempts
+                          type: object
+                        staticBody:
+                          description: |-
+                            staticBody contains fixed JSON fields merged into the request body.
+                            These are invisible to the LLM.
+                          x-kubernetes-preserve-unknown-fields: true
+                        staticQuery:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            staticQuery contains fixed query parameters added to every request.
+                            These are invisible to the LLM.
+                          type: object
+                        urlTemplate:
+                          description: |-
+                            urlTemplate is a Go text/template for constructing the URL with path parameters.
+                            Example: "/users/{{.user_id}}/orders/{{.order_id}}"
+                            When set, overrides endpoint for URL construction; endpoint is used as the base URL.
+                          type: string
+                      required:
+                      - endpoint
+                      type: object
+                    mcpConfig:
+                      description: |-
+                        mcpConfig contains MCP-specific configuration.
+                        Required when type is "mcp".
+                      properties:
+                        args:
+                          description: args are the command arguments for stdio transport.
+                          items:
+                            type: string
+                          type: array
+                        command:
+                          description: command is the command to run for stdio transport.
+                          type: string
+                        endpoint:
+                          description: endpoint is the SSE server URL (required for
+                            SSE and streamable-http transport).
+                          type: string
+                        env:
+                          additionalProperties:
+                            type: string
+                          description: env are additional environment variables for
+                            stdio transport.
+                          type: object
+                        retryPolicy:
+                          description: |-
+                            retryPolicy configures retry behavior for CallTool failures on this handler.
+                            When nil, tool calls are executed once with no retries.
+                          properties:
+                            backoffMultiplier:
+                              default: "2.0"
+                              description: |-
+                                backoffMultiplier multiplies the delay between successive retries.
+                                Must parse as a float >= 1.0.
+                              pattern: ^[0-9]+(\.[0-9]+)?$
+                              type: string
+                            initialBackoff:
+                              default: 100ms
+                              description: initialBackoff is the delay before the
+                                first retry attempt.
+                              type: string
+                            maxAttempts:
+                              description: |-
+                                maxAttempts is the maximum total number of attempts, including the first.
+                                A value of 1 means no retries. Must be between 1 and 10.
+                              format: int32
+                              maximum: 10
+                              minimum: 1
+                              type: integer
+                            maxBackoff:
+                              default: 30s
+                              description: maxBackoff is the upper bound on delay
+                                between retry attempts.
+                              type: string
+                          required:
+                          - maxAttempts
+                          type: object
+                        toolFilter:
+                          description: toolFilter controls which tools from the MCP
+                            server are exposed.
+                          properties:
+                            allowlist:
+                              description: allowlist restricts to only these tool
+                                names. If empty, all tools are allowed.
+                              items:
+                                type: string
+                              type: array
+                            blocklist:
+                              description: blocklist excludes these tool names.
+                              items:
+                                type: string
+                              type: array
+                          type: object
+                        transport:
+                          description: transport specifies the MCP transport type.
+                          enum:
+                          - sse
+                          - stdio
+                          - streamable-http
+                          type: string
+                        workDir:
+                          description: workDir is the working directory for stdio
+                            transport.
+                          type: string
+                      required:
+                      - transport
+                      type: object
+                    name:
+                      description: name is a unique identifier for this handler within
+                        the registry.
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    openAPIConfig:
+                      description: |-
+                        openAPIConfig contains OpenAPI-specific configuration.
+                        Required when type is "openapi".
+                      properties:
+                        authSecretRef:
+                          description: |-
+                            authSecretRef references a secret containing auth credentials.
+                            Deprecated: use the handler-level `auth` stanza. Normalized into it when set.
+                          properties:
+                            key:
+                              description: key is the key in the secret to select.
+                              type: string
+                            name:
+                              description: name is the name of the secret.
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                        authType:
+                          description: |-
+                            authType specifies the authentication type (bearer, basic).
+                            Deprecated: use the handler-level `auth` stanza. Normalized into it when set.
+                          enum:
+                          - bearer
+                          - basic
+                          type: string
+                        baseURL:
+                          description: |-
+                            baseURL overrides the base URL from the OpenAPI spec.
+                            If not specified, uses the first server URL from the spec.
+                          type: string
+                        headers:
+                          additionalProperties:
+                            type: string
+                          description: headers are additional HTTP headers to include
+                            in API requests.
+                          type: object
+                        operationFilter:
+                          description: |-
+                            operationFilter limits which operations are exposed as tools.
+                            If empty, all operations are exposed.
+                          items:
+                            type: string
+                          type: array
+                        retryPolicy:
+                          description: |-
+                            retryPolicy configures retry behavior for operations exposed by this OpenAPI handler.
+                            OpenAPI handlers delegate execution to the HTTP executor, so HTTPRetryPolicy is used.
+                          properties:
+                            backoffMultiplier:
+                              default: "2.0"
+                              description: |-
+                                backoffMultiplier multiplies the delay between successive retries.
+                                Expressed as a decimal string (e.g. "2.0", "1.5"). Must parse as a float >= 1.0.
+                              pattern: ^[0-9]+(\.[0-9]+)?$
+                              type: string
+                            initialBackoff:
+                              default: 100ms
+                              description: |-
+                                initialBackoff is the delay before the first retry attempt.
+                                Subsequent attempts apply exponential backoff via backoffMultiplier.
+                              type: string
+                            maxAttempts:
+                              description: |-
+                                maxAttempts is the maximum total number of attempts, including the first.
+                                A value of 1 means no retries. Must be between 1 and 10.
+                              format: int32
+                              maximum: 10
+                              minimum: 1
+                              type: integer
+                            maxBackoff:
+                              default: 30s
+                              description: |-
+                                maxBackoff is the upper bound on delay between retry attempts.
+                                Must be >= initialBackoff (validated by the controller).
+                              type: string
+                            respectRetryAfter:
+                              default: true
+                              description: |-
+                                respectRetryAfter honors the HTTP Retry-After header on 429 and 503 responses,
+                                overriding backoff calculations for that attempt.
+                              type: boolean
+                            retryOn:
+                              description: |-
+                                retryOn is the list of HTTP status codes that trigger a retry.
+                                Defaults to [408, 429, 500, 502, 503, 504] if unset.
+                                Set to an empty list to disable status-code-based retry entirely.
+                              items:
+                                format: int32
+                                type: integer
+                              type: array
+                            retryOnNetworkError:
+                              default: true
+                              description: |-
+                                retryOnNetworkError enables retries on connection failures, DNS failures,
+                                and request timeouts (errors returned before a status code is received).
+                              type: boolean
+                          required:
+                          - maxAttempts
+                          type: object
+                        specURL:
+                          description: specURL is the URL to the OpenAPI specification
+                            (JSON or YAML).
+                          type: string
+                      required:
+                      - specURL
+                      type: object
+                    selector:
+                      description: |-
+                        selector discovers the handler endpoint from Kubernetes Services.
+                        Mutually exclusive with inline endpoint configuration.
+                      properties:
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          description: matchLabels specifies labels that must match
+                            on the Service.
+                          type: object
+                        namespace:
+                          description: |-
+                            namespace specifies the namespace to search for Services.
+                            If empty, searches in the same namespace as the ToolRegistry.
+                          type: string
+                        port:
+                          description: |-
+                            port specifies the port name or number on the Service.
+                            If empty, uses the first port.
+                          type: string
+                      type: object
+                    timeout:
+                      default: 30s
+                      description: |-
+                        timeout specifies the maximum duration for a single tool invocation (wall clock).
+                        Applies to all handler types.
+                      type: string
+                    tool:
+                      description: |-
+                        tool defines the tool interface (required for http and grpc types).
+                        Self-describing handlers (mcp, openapi) discover tools automatically.
+                      properties:
+                        description:
+                          description: description explains what the tool does (shown
+                            to LLM).
+                          type: string
+                        inputSchema:
+                          description: inputSchema is the JSON Schema for the tool's
+                            input parameters.
+                          x-kubernetes-preserve-unknown-fields: true
+                        name:
+                          description: name is the tool name that will be exposed
+                            to the LLM.
+                          maxLength: 64
+                          pattern: ^[a-z][a-z0-9_]*$
+                          type: string
+                        outputSchema:
+                          description: outputSchema is the JSON Schema for the tool's
+                            output.
+                          x-kubernetes-preserve-unknown-fields: true
+                      required:
+                      - description
+                      - inputSchema
+                      - name
+                      type: object
+                    type:
+                      description: type specifies the handler protocol.
+                      enum:
+                      - http
+                      - openapi
+                      - grpc
+                      - mcp
+                      - client
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                  x-kubernetes-validations:
+                  - message: set either the handler-level auth stanza or the legacy
+                      httpConfig/openAPIConfig authType/authSecretRef, not both
+                    rule: '!(has(self.auth) && ((has(self.httpConfig) && (has(self.httpConfig.authType)
+                      || has(self.httpConfig.authSecretRef))) || (has(self.openAPIConfig)
+                      && (has(self.openAPIConfig.authType) || has(self.openAPIConfig.authSecretRef)))))'
+                minItems: 1
+                type: array
+            required:
+            - handlers
+            type: object
+          status:
+            description: status defines the observed state of ToolRegistry
+            properties:
+              conditions:
+                description: conditions represent the current state of the ToolRegistry
+                  resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              discoveredTools:
+                description: discoveredTools contains details of each discovered tool.
+                items:
+                  description: DiscoveredTool represents a tool discovered from a
+                    handler
+                  properties:
+                    description:
+                      description: description is the tool description (for LLM)
+                      type: string
+                    endpoint:
+                      description: endpoint is the resolved endpoint URL/address
+                      type: string
+                    error:
+                      description: error contains the error message if status is Unavailable
+                      type: string
+                    handlerName:
+                      description: handlerName is the handler that provides this tool
+                      type: string
+                    inputSchema:
+                      description: inputSchema is the JSON Schema for input parameters
+                      x-kubernetes-preserve-unknown-fields: true
+                    lastChecked:
+                      description: lastChecked is the timestamp of the last availability
+                        check
+                      format: date-time
+                      type: string
+                    name:
+                      description: name is the tool name (used by LLM)
+                      type: string
+                    outputSchema:
+                      description: outputSchema is the JSON Schema for output
+                      x-kubernetes-preserve-unknown-fields: true
+                    status:
+                      description: status indicates whether the tool is available
+                      enum:
+                      - Available
+                      - Unavailable
+                      - Unknown
+                      type: string
+                  required:
+                  - description
+                  - endpoint
+                  - handlerName
+                  - name
+                  - status
+                  type: object
+                type: array
+              discoveredToolsCount:
+                description: discoveredToolsCount is the number of tools successfully
+                  discovered.
+                format: int32
+                type: integer
+              lastDiscoveryTime:
+                description: lastDiscoveryTime is the timestamp of the last successful
+                  discovery.
+                format: date-time
+                type: string
+              phase:
+                description: phase represents the current lifecycle phase of the ToolRegistry.
+                enum:
+                - Pending
+                - Ready
+                - Degraded
+                - Failed
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
