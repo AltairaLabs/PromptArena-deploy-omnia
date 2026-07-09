@@ -109,3 +109,104 @@ func keysOf(m map[string]*httpToolSource) []string {
 	}
 	return out
 }
+
+func TestParseArenaToolSources_RequestBlockLowercaseMethod(t *testing.T) {
+	arenaJSON := mustMarshalArena(t, map[string]any{
+		"tool_specs": map[string]any{
+			"q": map[string]any{
+				"name": "q", "mode": "live",
+				"http": map[string]any{
+					"url": "https://x/y", "method": "get", // lowercase -> must upper-case
+					"headers": map[string]any{"X-Static": "hdr"},
+					"request": map[string]any{
+						"query_params":   []string{"search"},
+						"body_mapping":   "{a: a}",
+						"header_params":  map[string]any{"X-H": "{{.a}}"},
+						"static_query":   map[string]any{"k": "v"},
+						"static_headers": map[string]any{"X-S": "s"},
+					},
+				},
+			},
+		},
+	})
+	src := parseArenaToolSources(arenaJSON)["q"]
+	if src == nil {
+		t.Fatal("nil src")
+	}
+	if src.Method != "GET" {
+		t.Errorf("method = %q, want GET (upper-cased)", src.Method)
+	}
+	if len(src.QueryParams) != 1 || src.QueryParams[0] != "search" {
+		t.Errorf("queryParams = %v", src.QueryParams)
+	}
+	if src.RequestBodyMapping != "{a: a}" {
+		t.Errorf("requestBodyMapping = %q", src.RequestBodyMapping)
+	}
+	if src.HeaderParams["X-H"] != "{{.a}}" {
+		t.Errorf("headerParams = %v", src.HeaderParams)
+	}
+	if src.StaticQuery["k"] != "v" {
+		t.Errorf("staticQuery = %v", src.StaticQuery)
+	}
+	if src.StaticHeaders["X-S"] != "s" { // request.static_headers overrides http.headers
+		t.Errorf("staticHeaders = %v", src.StaticHeaders)
+	}
+}
+
+func TestParseArenaToolSources_MockNoHTTPBlock(t *testing.T) {
+	toolYAML := "metadata:\n  name: search-shared\nspec:\n  name: search_shared_workouts\n  description: d\n  mode: mock\n"
+	arenaJSON := mustMarshalArena(t, map[string]any{
+		"loaded_tools": []map[string]any{{"data": []byte(toolYAML)}},
+	})
+	src := parseArenaToolSources(arenaJSON)["search_shared_workouts"]
+	if src == nil || src.Mode != "mock" || src.URL != "" || src.Method != "" {
+		t.Fatalf("mock/no-http src wrong: %+v", src)
+	}
+}
+
+func TestParseArenaToolSources_SkipsMalformedYAML(t *testing.T) {
+	good := "metadata:\n  name: g\nspec:\n  name: good_tool\n  mode: live\n  http:\n    url: https://x\n    method: POST\n"
+	arenaJSON := mustMarshalArena(t, map[string]any{
+		"loaded_tools": []map[string]any{
+			{"data": []byte("a:\n\tb: c")}, // tab indentation is invalid YAML
+			{"data": []byte(good)},
+		},
+	})
+	got := parseArenaToolSources(arenaJSON)
+	if _, ok := got["good_tool"]; !ok {
+		t.Errorf("good tool must survive a malformed sibling, got %v", keysOf(got))
+	}
+}
+
+func TestParseArenaToolSources_ToolSpecsWinsOverLoadedTools(t *testing.T) {
+	loaded := "metadata:\n  name: dup\nspec:\n  name: dup\n  mode: live\n  http:\n    url: https://from-loaded\n    method: POST\n"
+	arenaJSON := mustMarshalArena(t, map[string]any{
+		"tool_specs": map[string]any{
+			"dup": map[string]any{"name": "dup", "mode": "live",
+				"http": map[string]any{"url": "https://from-spec", "method": "POST"}},
+		},
+		"loaded_tools": []map[string]any{{"data": []byte(loaded)}},
+	})
+	src := parseArenaToolSources(arenaJSON)["dup"]
+	if src == nil || src.URL != "https://from-spec" {
+		t.Errorf("tool_specs must win over loaded_tools: got %+v", src)
+	}
+}
+
+func TestParseArenaToolSources_NameFallbacks(t *testing.T) {
+	loaded := "metadata:\n  name: meta_name\nspec:\n  description: d\n  mode: live\n  http:\n    url: https://l\n    method: GET\n"
+	arenaJSON := mustMarshalArena(t, map[string]any{
+		"tool_specs": map[string]any{
+			"key_name": map[string]any{"mode": "live",
+				"http": map[string]any{"url": "https://s", "method": "GET"}},
+		},
+		"loaded_tools": []map[string]any{{"data": []byte(loaded)}},
+	})
+	got := parseArenaToolSources(arenaJSON)
+	if _, ok := got["key_name"]; !ok {
+		t.Errorf("tool_specs empty name should fall back to map key, got %v", keysOf(got))
+	}
+	if _, ok := got["meta_name"]; !ok {
+		t.Errorf("loaded_tools empty spec.name should fall back to metadata.name, got %v", keysOf(got))
+	}
+}
