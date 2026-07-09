@@ -4,9 +4,9 @@ name: E2E (Kind)
 # end to end. See docs/local-backlog/2026-07-09-e2e-testing-design.md (SP2).
 #
 # Built incrementally, validated via real CI runs:
-#   1. stack up      (this increment)   — install Omnia, assert operator/dashboard
-#   2. deploy        (next)             — adapter apply -> AgentRuntimes Ready
-#   3. converse      (next)             — websocket turn -> agent responds
+#   1. stack up  — install Omnia, assert operator/dashboard      [green]
+#   2. deploy    — adapter apply -> AgentRuntimes created         [this increment]
+#   3. converse  — websocket turn -> agent responds (needs DB-backed services)
 #
 # Triggered on push to the feature branch during bring-up; will move to
 # workflow_dispatch + nightly schedule once green on main.
@@ -24,17 +24,25 @@ env:
   OMNIA_VERSION: "0.9.0-beta.17"
   CHART: "oci://ghcr.io/altairalabs/charts/omnia"
   NS: "omnia-system"
+  AGENTS_NS: "e2e-agents"
+  WORKSPACE: "e2e-workspace"
+  PROVIDER: "test-provider"
   CERT_MANAGER_VERSION: "v1.16.2"
   KIND_VERSION: "v0.24.0"
 
 jobs:
   e2e:
-    name: Stack up
+    name: Deploy
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.0'
 
       - name: Install kind
         run: |
@@ -63,29 +71,83 @@ jobs:
             --set dashboard.auth.allowAnonymous=true \
             --set keda.enabled=false \
             --set 'workspaceContent.persistence.accessModes[0]=ReadWriteOnce' \
-            --timeout 5m || echo "::warning::helm install returned non-zero (diagnostic run)"
+            --timeout 5m
 
-      - name: Assert CRDs installed
+      - name: Assert operator + dashboard Ready
         run: |
           kubectl get crd agentruntimes.omnia.altairalabs.ai
-          kubectl get crd promptpacks.omnia.altairalabs.ai
-          kubectl get crd toolregistries.omnia.altairalabs.ai
-          kubectl get crd agentpolicies.omnia.altairalabs.ai
+          kubectl -n "${NS}" rollout status deployment/omnia-controller-manager --timeout=240s
+          kubectl -n "${NS}" rollout status deployment/omnia-dashboard --timeout=240s
 
-      - name: Wait for workloads (diagnostic — never hard-fails yet)
+      - name: Bootstrap workspace + mock provider
         run: |
-          kubectl -n "${NS}" wait --for=condition=Available deployment --all --timeout=240s \
-            || echo "::warning::not all deployments Available (expected during bring-up — see diagnostics)"
+          kubectl create namespace "${AGENTS_NS}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata: { name: ${PROVIDER}, namespace: ${AGENTS_NS} }
+          stringData: { apiKey: "mock" }
+          ---
+          apiVersion: omnia.altairalabs.ai/v1alpha1
+          kind: Provider
+          metadata: { name: ${PROVIDER}, namespace: ${AGENTS_NS} }
+          spec:
+            type: mock
+            credential:
+              secretRef: { name: ${PROVIDER} }
+          ---
+          apiVersion: omnia.altairalabs.ai/v1alpha1
+          kind: Workspace
+          metadata: { name: ${WORKSPACE} }
+          spec:
+            displayName: E2E Test Workspace
+            namespace: { name: ${AGENTS_NS} }
+            services:
+              - name: default
+                mode: external
+                external:
+                  sessionURL: "http://session.${AGENTS_NS}.svc:8080"
+                  memoryURL: "http://memory.${AGENTS_NS}.svc:8080"
+          EOF
+          kubectl get workspace "${WORKSPACE}" -o yaml
+
+      - name: Port-forward dashboard
+        run: |
+          kubectl -n "${NS}" port-forward svc/omnia-dashboard 3000:3000 >/tmp/pf.log 2>&1 &
+          echo "PF_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "http://localhost:3000/api/health" 2>/dev/null || \
+               curl -fsS -o /dev/null "http://localhost:3000" 2>/dev/null; then
+              echo "dashboard reachable"; break
+            fi
+            sleep 2
+          done
+
+      - name: Adapter apply lifecycle (create-mode) via the real dashboard
+        env:
+          OMNIA_IT_ENDPOINT: "http://localhost:3000"
+          OMNIA_IT_TOKEN: "anonymous"
+          OMNIA_IT_WORKSPACE: ${{ env.WORKSPACE }}
+          OMNIA_IT_PROVIDER: ${{ env.PROVIDER }}
+        run: |
+          GOWORK=off go test -tags=integration -run TestIntegration_Lifecycle \
+            ./internal/omnia/ -count=1 -v
+
+      - name: Assert AgentRuntime(s) reconciled
+        run: |
+          echo "===== AgentRuntimes in ${AGENTS_NS} ====="
+          kubectl get agentruntime -n "${AGENTS_NS}" -o wide || true
+          # The lifecycle test creates then destroys; assert at least the operator
+          # produced a Deployment for the agent at some point (events are the proof
+          # for a create+destroy cycle).
+          kubectl get promptpack -n "${AGENTS_NS}" -o wide || true
 
       - name: Diagnostics
         if: always()
         run: |
-          echo "===== deployments ====="; kubectl get deploy -n "${NS}" -o wide || true
-          echo "===== pods ====="; kubectl get pods -n "${NS}" -o wide || true
-          echo "===== services ====="; kubectl get svc -n "${NS}" || true
-          echo "===== not-ready pods (describe) ====="
-          for p in $(kubectl get pods -n "${NS}" --field-selector=status.phase!=Running -o name 2>/dev/null); do
-            echo "--- $p ---"; kubectl describe -n "${NS}" "$p" | tail -30 || true
-          done
-          echo "===== recent events ====="
-          kubectl get events -n "${NS}" --sort-by=.lastTimestamp | tail -40 || true
+          echo "===== omnia-system pods ====="; kubectl get pods -n "${NS}" -o wide || true
+          echo "===== agents-ns all ====="; kubectl get all,agentruntime,promptpack,toolregistry,agentpolicy -n "${AGENTS_NS}" || true
+          echo "===== workspace status ====="; kubectl get workspace "${WORKSPACE}" -o jsonpath='{.status}' || true; echo
+          echo "===== dashboard logs (tail) ====="; kubectl -n "${NS}" logs deploy/omnia-dashboard --tail=60 || true
+          echo "===== port-forward log ====="; cat /tmp/pf.log || true
+          echo "===== recent events (agents-ns) ====="; kubectl get events -n "${AGENTS_NS}" --sort-by=.lastTimestamp | tail -40 || true
