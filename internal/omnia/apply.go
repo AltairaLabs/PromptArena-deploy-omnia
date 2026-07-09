@@ -141,19 +141,20 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	}
 
 	// Phase 3: AgentRuntime(s)
-	names := agentRuntimeNames(ac.pack)
-	for i, name := range names {
-		agentName := name // capture for closure
+	targets := agentRuntimeNames(ac.pack)
+	for i, tgt := range targets {
+		agentName := tgt.name // capture for closure
+		entry := tgt.entry    // capture for closure
 		pct := float64(stepAgentRuntime)*progressStepSize +
-			float64(i)/float64(len(names)+1)*progressStepSize
+			float64(i)/float64(len(targets)+1)*progressStepSize
 		if cbErr := ac.reporter.Progress(
-			fmt.Sprintf("Creating %s: %s", ResTypeAgentRuntime, sanitizeName(name)), pct,
+			fmt.Sprintf("Creating %s: %s", ResTypeAgentRuntime, sanitizeName(agentName)), pct,
 		); cbErr != nil {
 			return resources, cbErr
 		}
 		res, err = applyResourcePhase(ctx, ac, stepAgentRuntime, ResTypeAgentRuntime,
-			sanitizeName(name),
-			func() (json.RawMessage, error) { return buildAgentRuntimeRequest(ac.pack, agentName, ac.cfg) })
+			sanitizeName(agentName),
+			func() (json.RawMessage, error) { return buildAgentRuntimeRequest(ac.pack, agentName, entry, ac.cfg) })
 		resources = append(resources, res...)
 		applyErr = combineErrors(applyErr, err)
 
