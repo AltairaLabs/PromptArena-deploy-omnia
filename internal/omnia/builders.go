@@ -30,6 +30,11 @@ const (
 	keyManagementPlane   = "managementPlane"
 	facadeTypeWebSocket  = "websocket"
 	facadeHandlerRuntime = "runtime"
+
+	// Runtime entry-prompt override keys (spec.runtime.extraEnv).
+	keyExtraEnv        = "extraEnv"
+	keyValue           = "value"
+	envOmniaPromptName = "OMNIA_PROMPT_NAME"
 )
 
 // buildPromptPackRequest builds the JSON body for creating/updating a PromptPack.
@@ -112,8 +117,11 @@ func buildWebSocketFacade(ea *ExternalAuthConfig) map[string]interface{} {
 }
 
 // buildAgentRuntimeRequest builds the JSON body for creating/updating an AgentRuntime.
+// entry, when non-empty, pins the runtime's entry prompt via
+// spec.runtime.extraEnv (OMNIA_PROMPT_NAME) — used when fanning out one agent
+// per prompt for a plain multi-prompt pack.
 func buildAgentRuntimeRequest(
-	pack *prompt.Pack, agentName string, cfg *Config,
+	pack *prompt.Pack, agentName, entry string, cfg *Config,
 ) (json.RawMessage, error) {
 	spec := map[string]interface{}{
 		"promptPackRef": map[string]interface{}{
@@ -149,7 +157,7 @@ func buildAgentRuntimeRequest(
 		}
 	}
 
-	if runtime := buildRuntimeSpec(cfg.Runtime); runtime != nil {
+	if runtime := buildRuntimeSpecWithEntry(cfg.Runtime, entry); runtime != nil {
 		spec["runtime"] = runtime
 	}
 
@@ -194,6 +202,26 @@ func buildRuntimeSpec(rc *RuntimeConfig) map[string]interface{} {
 	if len(runtime) == 0 {
 		return nil
 	}
+	return runtime
+}
+
+// buildRuntimeSpecWithEntry builds spec.runtime and, when entry is non-empty,
+// appends an OMNIA_PROMPT_NAME override to extraEnv — LAST, so it wins over the
+// operator's hardcoded default (and any earlier collision) via K8s duplicate-env
+// last-wins semantics. Returns nil when there is nothing to emit.
+func buildRuntimeSpecWithEntry(rc *RuntimeConfig, entry string) map[string]interface{} {
+	runtime := buildRuntimeSpec(rc)
+	if entry == "" {
+		return runtime
+	}
+	if runtime == nil {
+		runtime = map[string]interface{}{}
+	}
+	env, _ := runtime[keyExtraEnv].([]map[string]interface{})
+	runtime[keyExtraEnv] = append(env, map[string]interface{}{
+		keyName:  envOmniaPromptName,
+		keyValue: entry,
+	})
 	return runtime
 }
 
@@ -563,21 +591,57 @@ func dedup(sorted []string) []string {
 	return result
 }
 
-// agentRuntimeNames returns the list of agent runtime names to create.
-func agentRuntimeNames(pack *prompt.Pack) []string {
+// minPromptsForFanOut is the prompt count at or above which a plain pack fans
+// out one agent per prompt; below it the runtime resolves the entry itself.
+const minPromptsForFanOut = 2
+
+// agentRuntimeTarget is one AgentRuntime to create: its (unsanitized) name and
+// an optional entry-prompt override (OMNIA_PROMPT_NAME). entry is "" when the
+// runtime resolves the entry itself (single-prompt, workflow, or multi-agent).
+type agentRuntimeTarget struct {
+	name  string
+	entry string
+}
+
+// agentRuntimeNames returns the AgentRuntimes to create for a pack. Multi-agent
+// packs fan out one per member (entry resolved by existing behavior); plain packs
+// yield a single agent named after the pack.
+func agentRuntimeNames(pack *prompt.Pack) []agentRuntimeTarget {
 	if adaptersdk.IsMultiAgent(pack) {
 		agents := adaptersdk.ExtractAgents(pack)
-		names := make([]string, len(agents))
+		targets := make([]agentRuntimeTarget, len(agents))
 		for i, a := range agents {
-			names[i] = a.Name
+			targets[i] = agentRuntimeTarget{name: a.Name}
 		}
-		return names
+		return targets
+	}
+	// Plain pack with 2+ prompts: each top-level prompt is an independent agent
+	// entry (a PackPrompt references no other prompt), so fan out one AgentRuntime
+	// per prompt, each pinned to its prompt via the entry override.
+	if len(pack.Prompts) >= minPromptsForFanOut {
+		return fanOutPromptTargets(pack)
 	}
 	name := pack.ID
 	if name == "" {
 		name = "default"
 	}
-	return []string{name}
+	return []agentRuntimeTarget{{name: name}}
+}
+
+// fanOutPromptTargets returns one target per prompt of a plain multi-prompt pack,
+// sorted by prompt name for deterministic planning. Each name is
+// "<pack.ID>-<prompt>" and carries its prompt as the entry override.
+func fanOutPromptTargets(pack *prompt.Pack) []agentRuntimeTarget {
+	names := make([]string, 0, len(pack.Prompts))
+	for n := range pack.Prompts {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	targets := make([]agentRuntimeTarget, len(names))
+	for i, n := range names {
+		targets[i] = agentRuntimeTarget{name: pack.ID + "-" + n, entry: n}
+	}
+	return targets
 }
 
 // resourceKey returns a unique key for a resource type+name pair.

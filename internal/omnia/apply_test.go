@@ -248,6 +248,49 @@ func TestApply_SingleAgent(t *testing.T) {
 	}
 }
 
+func TestApply_MultiPromptFanOut_SharedPackNRuntimes(t *testing.T) {
+	sim := newSimulatedClient()
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	cfg := `{
+		"api_endpoint": "https://omnia.test.com",
+		"workspace": "test-ws",
+		"api_token": "test-token",
+		"providers": {"default": "claude-prod"}
+	}`
+
+	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testMultiPromptPackJSON, // plain pack, prompts: billing, triage
+		DeployConfig: cfg,
+	}, noopApplyCallback)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var state AdapterState
+	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		t.Fatalf("failed to parse state: %v", err)
+	}
+
+	packs := 0
+	runtimes := map[string]bool{}
+	for _, r := range state.Resources {
+		switch r.Type {
+		case ResTypePromptPack:
+			packs++
+		case ResTypeAgentRuntime:
+			runtimes[r.Name] = true
+		}
+	}
+	// One shared PromptPack, one AgentRuntime per prompt.
+	if packs != 1 {
+		t.Errorf("expected exactly 1 shared PromptPack, got %d", packs)
+	}
+	if len(runtimes) != 2 || !runtimes["splitz-billing"] || !runtimes["splitz-triage"] {
+		t.Errorf("expected per-prompt runtimes splitz-billing/splitz-triage, got %v", runtimes)
+	}
+}
+
 func TestApply_BindMode_BindsRegistryWithoutCreating(t *testing.T) {
 	sim := newSimulatedClient()
 	// Registry exists but doesn't provide the pack's "search" tool. Apply no

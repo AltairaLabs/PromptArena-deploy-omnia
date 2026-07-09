@@ -80,7 +80,6 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	warnings := cfg.normalizationWarnings()
 	warnings = append(warnings, providerPhaseWarnings...)
 	warnings = append(warnings, providerWarnings(cfg.Providers)...)
-	warnings = append(warnings, promptWarnings(pack)...)
 	warnings = append(warnings, toolWarnings...)
 
 	return &deploy.PlanResponse{
@@ -88,38 +87,6 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		Summary:  summary,
 		Warnings: warnings,
 	}, nil
-}
-
-// defaultEntryName is the prompt name the Omnia runtime currently hardcodes as
-// the entry point (Omnia#1595 will replace this with the pack's declared entry).
-const defaultEntryName = "default"
-
-// promptWarnings warns when a plain-prompt pack (no workflow, no multi-agent
-// config) has no prompt named "default". The Omnia runtime currently hardcodes
-// the prompt entry to "default" (Omnia#1595), so such a pack deploys healthy but
-// fails its first request — the runtime can't resolve a prompt. Workflow and
-// multi-agent packs declare their own entry (workflow.entry / agents.entry), so
-// they are exempt. Non-blocking, mirroring the no-default-provider guardrail.
-func promptWarnings(pack *prompt.Pack) []string {
-	if pack.Workflow != nil || adaptersdk.IsMultiAgent(pack) {
-		return nil
-	}
-	if len(pack.Prompts) == 0 {
-		return nil
-	}
-	if _, ok := pack.Prompts[defaultEntryName]; ok {
-		return nil
-	}
-	names := make([]string, 0, len(pack.Prompts))
-	for n := range pack.Prompts {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return []string{fmt.Sprintf(
-		"this pack has no prompt named %[1]q (prompts: %[2]s) — the Omnia runtime currently looks "+
-			"for %[1]q and the agent won't resolve its prompt. Name the entry prompt %[1]q, or wait "+
-			"for Omnia#1595 (runtime reads the pack's declared entry).",
-		defaultEntryName, strings.Join(names, ", "))}
 }
 
 // planPriorState resolves the prior state used to diff against. In the non
@@ -216,12 +183,12 @@ func generateDesiredResources(
 	}
 
 	// Step 3: AgentRuntime(s).
-	for _, name := range agentRuntimeNames(pack) {
+	for _, tgt := range agentRuntimeNames(pack) {
 		desired = append(desired, deploy.ResourceChange{
 			Type:   ResTypeAgentRuntime,
-			Name:   sanitizeName(name),
+			Name:   sanitizeName(tgt.name),
 			Action: deploy.ActionCreate,
-			Detail: fmt.Sprintf("Create AgentRuntime for %s", name),
+			Detail: fmt.Sprintf("Create AgentRuntime for %s", tgt.name),
 		})
 	}
 

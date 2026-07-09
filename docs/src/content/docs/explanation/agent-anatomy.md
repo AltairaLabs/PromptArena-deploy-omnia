@@ -9,6 +9,20 @@ Before the [Configuration Mapping](/explanation/configuration-mapping/) page exp
 
 The `AgentRuntime` is the resource you create — or that this adapter creates for you at deploy time. It is the composition root: a deployed, serving workload with a lifecycle, an address, and an identity. **Everything else is a separate resource the AgentRuntime references.** The "agent" you think of is the whole assembly: the AgentRuntime, the CRDs it points at, the pod it reconciles to, and the shared workspace services it leans on.
 
+## How many `AgentRuntime`s a pack produces
+
+One deploy can create **more than one** `AgentRuntime` from a single pack. The adapter decides how the pack fans out:
+
+| Pack shape | AgentRuntimes created | Entry point |
+|------------|----------------------|-------------|
+| **Multi-agent** (`agents.members`) | one per member, named after the member | each member's declared entry |
+| **Workflow** or **single-prompt** plain pack | one, named after the pack | the workflow entry / the sole prompt (resolved by the runtime) |
+| **Plain pack with 2+ prompts** | **one per prompt**, named `<pack-id>-<prompt>` | each agent is pinned to its own prompt |
+
+The last row is the important one: in a plain pack (no `workflow`, no `agents`), each top-level prompt is a **self-contained, independent agent** — a prompt references no other prompt (composition is exactly what `workflow` and `agents` are for). So the adapter deploys **one agent per prompt**, and pins each to its prompt via `spec.runtime.extraEnv` (`OMNIA_PROMPT_NAME`). All of them **share** the single PromptPack, ConfigMap, ToolRegistry, and AgentPolicy — only the `AgentRuntime` fans out.
+
+> **Migration note:** a plain multi-prompt pack that previously deployed as a single agent named `<pack-id>` will, on its next deploy, be replaced by the per-prompt set (`<pack-id>-<prompt>`) — a destroy+recreate of the runtimes; the shared resources are untouched.
+
 ## What actually runs (the pod)
 
 An `AgentRuntime` reconciles to a Pod with **two containers** (plus an optional sidecar):

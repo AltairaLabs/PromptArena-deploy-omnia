@@ -37,7 +37,7 @@ func TestBuildAgentRuntimeRequest_WithRuntime(t *testing.T) {
 		Runtime:     &RuntimeConfig{Replicas: 3, CPU: "500m", Memory: "512Mi"},
 	}
 
-	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", "", cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestBuildAgentRuntimeRequest_Autoscaling(t *testing.T) {
 		},
 	}
 
-	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", "", cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestBuildAgentRuntimeRequest_MultiAgent(t *testing.T) {
 		},
 	}
 
-	body, err := buildAgentRuntimeRequest(pack, "worker", cfg)
+	body, err := buildAgentRuntimeRequest(pack, "worker", "", cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestBuildAgentRuntimeRequest_MultiRoleProviders(t *testing.T) {
 		},
 	}
 
-	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", "", cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestBuildAgentRuntimeRequest_EmptyRoleDefaultsToLLM(t *testing.T) {
 	}
 	cfg := &Config{Providers: Providers{{Name: "default", Ref: "claude-prod"}}}
 
-	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", "", cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestBuildAgentRuntimeRequest(t *testing.T) {
 		resolvedRegistryName: "test-pack-tools",
 	}
 
-	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", "", cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestBuildAgentRuntimeRequest_NoTools(t *testing.T) {
 	}
 	cfg := &Config{Providers: Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}}}
 
-	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", "", cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -531,18 +531,32 @@ func TestBuildAgentPolicyRequest(t *testing.T) {
 	}
 }
 
+// testMultiPromptPackJSON is a plain pack (no workflow, no agents) with more
+// than one top-level prompt — each an independent agent entry.
+const testMultiPromptPackJSON = `{
+	"id": "splitz",
+	"version": "1.0.0",
+	"prompts": {
+		"billing": {"system": "Handle billing", "description": "Billing"},
+		"triage": {"system": "Triage requests", "description": "Triage"}
+	}
+}`
+
 func TestAgentRuntimeNames_SingleAgent(t *testing.T) {
 	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
 	if err != nil {
 		t.Fatalf("failed to parse pack: %v", err)
 	}
 
-	names := agentRuntimeNames(pack)
-	if len(names) != 1 {
-		t.Fatalf("expected 1 name, got %d", len(names))
+	targets := agentRuntimeNames(pack)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
 	}
-	if names[0] != "test-pack" {
-		t.Errorf("expected name %q, got %q", "test-pack", names[0])
+	if targets[0].name != "test-pack" {
+		t.Errorf("expected name %q, got %q", "test-pack", targets[0].name)
+	}
+	if targets[0].entry != "" {
+		t.Errorf("single-prompt pack needs no entry override, got %q", targets[0].entry)
 	}
 }
 
@@ -552,28 +566,50 @@ func TestAgentRuntimeNames_MultiAgent(t *testing.T) {
 		t.Fatalf("failed to parse pack: %v", err)
 	}
 
-	names := agentRuntimeNames(pack)
-	if len(names) != 2 {
-		t.Fatalf("expected 2 names, got %d", len(names))
+	targets := agentRuntimeNames(pack)
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets, got %d", len(targets))
 	}
 
-	// Names should be sorted by ExtractAgents.
-	sorted := make([]string, len(names))
-	copy(sorted, names)
-	sort.Strings(sorted)
-	for i, n := range sorted {
-		if names[i] != n {
-			t.Errorf("expected names to be sorted, got %v", names)
-			break
+	names := make([]string, len(targets))
+	for i, tgt := range targets {
+		names[i] = tgt.name
+		if tgt.entry != "" {
+			t.Errorf("multi-agent targets need no entry override, got %q", tgt.entry)
 		}
 	}
-
+	if !sort.StringsAreSorted(names) {
+		t.Errorf("expected names to be sorted, got %v", names)
+	}
 	nameSet := map[string]bool{}
 	for _, n := range names {
 		nameSet[n] = true
 	}
 	if !nameSet["router"] || !nameSet["worker"] {
 		t.Errorf("expected names to include router and worker, got %v", names)
+	}
+}
+
+func TestAgentRuntimeNames_MultiPromptFanOut(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testMultiPromptPackJSON))
+	if err != nil {
+		t.Fatalf("failed to parse pack: %v", err)
+	}
+
+	targets := agentRuntimeNames(pack)
+	if len(targets) != 2 {
+		t.Fatalf("expected one agent per prompt (2), got %d: %+v", len(targets), targets)
+	}
+	// Sorted by prompt name: billing, triage. Name is <pack.ID>-<prompt>, and
+	// each carries its prompt as the entry override.
+	want := []agentRuntimeTarget{
+		{name: "splitz-billing", entry: "billing"},
+		{name: "splitz-triage", entry: "triage"},
+	}
+	for i, w := range want {
+		if targets[i] != w {
+			t.Errorf("target[%d] = %+v, want %+v", i, targets[i], w)
+		}
 	}
 }
 
@@ -691,14 +727,22 @@ func TestBuildSkillsConfigSpec_EmptyBlock(t *testing.T) {
 
 func boolPtr(v bool) *bool { return &v }
 
-// agentRuntimeSpec parses a built AgentRuntime body and returns spec.
+// agentRuntimeSpec parses a built AgentRuntime body (no entry override) and
+// returns spec.
 func agentRuntimeSpec(t *testing.T, cfg *Config) map[string]interface{} {
+	t.Helper()
+	return agentRuntimeSpecWithEntry(t, cfg, "")
+}
+
+// agentRuntimeSpecWithEntry builds an AgentRuntime with the given entry-prompt
+// override and returns spec.
+func agentRuntimeSpecWithEntry(t *testing.T, cfg *Config, entry string) map[string]interface{} {
 	t.Helper()
 	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
 	if err != nil {
 		t.Fatalf("failed to parse pack: %v", err)
 	}
-	body, err := buildAgentRuntimeRequest(pack, "test-pack", cfg)
+	body, err := buildAgentRuntimeRequest(pack, "test-pack", entry, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -711,6 +755,46 @@ func agentRuntimeSpec(t *testing.T, cfg *Config) map[string]interface{} {
 		t.Fatal("expected spec to be an object")
 	}
 	return spec
+}
+
+func TestBuildAgentRuntimeRequest_EntryOverride(t *testing.T) {
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+	}
+	spec := agentRuntimeSpecWithEntry(t, cfg, "workout_planning")
+
+	rt, ok := spec["runtime"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected spec.runtime to be present when an entry override is set")
+	}
+	env, ok := rt["extraEnv"].([]interface{})
+	if !ok || len(env) == 0 {
+		t.Fatalf("expected runtime.extraEnv to carry the entry override, got %v", rt["extraEnv"])
+	}
+	// The OMNIA_PROMPT_NAME override must be appended LAST so it wins over the
+	// operator default and any earlier collision.
+	last, ok := env[len(env)-1].(map[string]interface{})
+	if !ok || last["name"] != "OMNIA_PROMPT_NAME" || last["value"] != "workout_planning" {
+		t.Errorf("expected OMNIA_PROMPT_NAME=workout_planning as the last extraEnv, got %v", env)
+	}
+}
+
+func TestBuildAgentRuntimeRequest_NoEntryOverride(t *testing.T) {
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+	}
+	spec := agentRuntimeSpecWithEntry(t, cfg, "")
+	if rt, ok := spec["runtime"].(map[string]interface{}); ok {
+		if _, present := rt["extraEnv"]; present {
+			t.Error("runtime.extraEnv must be absent when no entry override is set")
+		}
+	}
 }
 
 // firstFacade returns spec.facades[0], asserting the required, non-empty list
