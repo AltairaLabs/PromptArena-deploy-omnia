@@ -1,0 +1,91 @@
+name: E2E (Kind)
+
+# Full-stack e2e: stand up a real Omnia on ephemeral Kind and drive the adapter
+# end to end. See docs/local-backlog/2026-07-09-e2e-testing-design.md (SP2).
+#
+# Built incrementally, validated via real CI runs:
+#   1. stack up      (this increment)   — install Omnia, assert operator/dashboard
+#   2. deploy        (next)             — adapter apply -> AgentRuntimes Ready
+#   3. converse      (next)             — websocket turn -> agent responds
+#
+# Triggered on push to the feature branch during bring-up; will move to
+# workflow_dispatch + nightly schedule once green on main.
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [feat/e2e-kind-sp2]
+
+permissions:
+  contents: read
+
+env:
+  # Omnia chart + image tag (NO leading "v" — ghcr tags are unprefixed, unlike
+  # the git tag / CRD-contract pin in testdata/crds/VERSION).
+  OMNIA_VERSION: "0.9.0-beta.17"
+  CHART: "oci://ghcr.io/altairalabs/charts/omnia"
+  NS: "omnia-system"
+  CERT_MANAGER_VERSION: "v1.16.2"
+  KIND_VERSION: "v0.24.0"
+
+jobs:
+  e2e:
+    name: Stack up
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kind
+        run: |
+          curl --retry 3 --retry-delay 5 -Lo ./kind \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
+          kind version
+
+      - name: Create cluster
+        run: |
+          kind create cluster --name e2e --wait 90s
+          kubectl cluster-info
+
+      - name: Install cert-manager
+        run: |
+          kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+          kubectl -n cert-manager rollout status deployment/cert-manager --timeout=180s
+          kubectl -n cert-manager rollout status deployment/cert-manager-webhook --timeout=180s
+          kubectl -n cert-manager rollout status deployment/cert-manager-cainjector --timeout=180s
+
+      - name: Helm install Omnia (anonymous auth, keda off)
+        run: |
+          helm install omnia "${CHART}" --version "${OMNIA_VERSION}" \
+            --namespace "${NS}" --create-namespace \
+            --set dashboard.auth.mode=anonymous \
+            --set dashboard.auth.allowAnonymous=true \
+            --set keda.enabled=false \
+            --set 'workspaceContent.persistence.accessModes[0]=ReadWriteOnce' \
+            --timeout 5m || echo "::warning::helm install returned non-zero (diagnostic run)"
+
+      - name: Assert CRDs installed
+        run: |
+          kubectl get crd agentruntimes.omnia.altairalabs.ai
+          kubectl get crd promptpacks.omnia.altairalabs.ai
+          kubectl get crd toolregistries.omnia.altairalabs.ai
+          kubectl get crd agentpolicies.omnia.altairalabs.ai
+
+      - name: Wait for workloads (diagnostic — never hard-fails yet)
+        run: |
+          kubectl -n "${NS}" wait --for=condition=Available deployment --all --timeout=240s \
+            || echo "::warning::not all deployments Available (expected during bring-up — see diagnostics)"
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          echo "===== deployments ====="; kubectl get deploy -n "${NS}" -o wide || true
+          echo "===== pods ====="; kubectl get pods -n "${NS}" -o wide || true
+          echo "===== services ====="; kubectl get svc -n "${NS}" || true
+          echo "===== not-ready pods (describe) ====="
+          for p in $(kubectl get pods -n "${NS}" --field-selector=status.phase!=Running -o name 2>/dev/null); do
+            echo "--- $p ---"; kubectl describe -n "${NS}" "$p" | tail -30 || true
+          done
+          echo "===== recent events ====="
+          kubectl get events -n "${NS}" --sort-by=.lastTimestamp | tail -40 || true
