@@ -102,6 +102,12 @@ jobs:
           spec:
             displayName: E2E Test Workspace
             namespace: { name: ${AGENTS_NS} }
+            # Anonymous auth authenticates but the dashboard still enforces
+            # workspace authz; grant the anonymous identity owner so the adapter
+            # (token "anonymous") can create/destroy resources in this test WS.
+            anonymousAccess:
+              enabled: true
+              role: owner
             services:
               - name: default
                 mode: external
