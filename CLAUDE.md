@@ -134,6 +134,7 @@ Every resource gets four managed labels (`app.kubernetes.io/managed-by`, `prompt
 - **Table-driven tests** for config validation, naming sanitization, and resource planning.
 - **Event-driven tests** for Apply/Destroy — collect callback events, assert ordering and content.
 - **JSON-RPC protocol tests**: Use `adaptersdk.ServeIO()` to run the adapter in-process.
+- **CRD contract tests** (`internal/omnia/crd_contract_test.go`): validate every builder's emitted JSON against Omnia's real CRD OpenAPI schemas, vendored under `internal/omnia/testdata/crds/` at the pin in `.../crds/VERSION`. This catches CRD drift (e.g. the `spec.facade` → `spec.facades[]` break) as a red build. Bump by editing `VERSION` then `make sync-crds`, and fix any newly-red contract tests — that diff **is** the drift signal.
 
 ## Pre-commit / CI
 
