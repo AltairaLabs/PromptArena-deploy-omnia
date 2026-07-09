@@ -9,3 +9,7 @@ coverage_pkg.out
 docs/node_modules/
 docs/dist/
 docs/.astro/
+
+# Design/spec docs live in docs/local-backlog (gitignored); never commit them,
+# including the brainstorming skill default path.
+docs/superpowers/
