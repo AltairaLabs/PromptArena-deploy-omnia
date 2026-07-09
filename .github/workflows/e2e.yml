@@ -86,7 +86,10 @@ jobs:
           apiVersion: v1
           kind: Secret
           metadata: { name: ${PROVIDER}, namespace: ${AGENTS_NS} }
-          stringData: { apiKey: "mock" }
+          # The operator requires one of the expected credential keys even for a
+          # mock provider (api-key | ANTHROPIC_API_KEY | OPENAI_API_KEY | GEMINI_API_KEY);
+          # a placeholder value is fine for type: mock.
+          stringData: { api-key: "mock" }
           ---
           apiVersion: omnia.altairalabs.ai/v1alpha1
           kind: Provider
