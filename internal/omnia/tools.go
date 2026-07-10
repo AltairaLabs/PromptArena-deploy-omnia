@@ -21,6 +21,7 @@ const (
 	keyRedact          = "redact"
 	keyQueryParams     = "queryParams"
 	keyTimeout         = "timeout"
+	keyHeaders         = "headers"
 	methodGET          = "GET"
 	authTypeBearer     = "bearer"
 )
@@ -186,7 +187,7 @@ func buildCreateRegistryHandlers(
 		}
 	}
 
-	secretName, _, credWarnings := collectToolCredentials(pack, cfg)
+	secretName, _ := collectToolCredentials(pack, cfg)
 
 	var sourceWired, placeholders, mockTools []string
 	for _, name := range packToolNames(pack) {
@@ -206,7 +207,7 @@ func buildCreateRegistryHandlers(
 	}
 
 	warnings = append(warnings, createRegistryWarnings(sourceWired, placeholders, mockTools)...)
-	warnings = append(warnings, credWarnings...)
+	warnings = append(warnings, headerEnvWarnings(pack, cfg)...)
 	return handlers, warnings
 }
 
@@ -332,6 +333,11 @@ func addSourceHTTPMappings(cfg map[string]interface{}, src *httpToolSource) {
 	}
 	if len(src.StaticQuery) > 0 {
 		cfg["staticQuery"] = src.StaticQuery
+	}
+	// Non-Authorization headers_from_env become static headers with their env
+	// value resolved at deploy time (Authorization is handled by the auth stanza).
+	if headers, _ := buildStaticHeaders(src); len(headers) > 0 {
+		cfg[keyHeaders] = headers
 	}
 }
 
