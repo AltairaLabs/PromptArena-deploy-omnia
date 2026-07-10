@@ -242,6 +242,58 @@ func (c *httpClient) ValidateSkillSource(ctx context.Context, name string) error
 	return nil
 }
 
+//nolint:revive // interface implementation
+func (c *httpClient) GetWorkspace(ctx context.Context, name string) (*WorkspaceInfo, error) {
+	url := fmt.Sprintf("%s/api/workspaces/%s", c.endpoint, name)
+	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get workspace %s: %w", name, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, c.readError(resp)
+	}
+	var ws struct {
+		Spec struct {
+			Namespace struct {
+				Name string `json:"name"`
+			} `json:"namespace"`
+		} `json:"spec"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ws); err != nil {
+		return nil, fmt.Errorf("decode workspace: %w", err)
+	}
+	return &WorkspaceInfo{Namespace: ws.Spec.Namespace.Name}, nil
+}
+
+//nolint:revive // interface implementation
+func (c *httpClient) CreateSecret(ctx context.Context, namespace, name string, data map[string]string) error {
+	body, err := json.Marshal(map[string]interface{}{
+		"namespace": namespace, "name": name, "data": data,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal secret: %w", err)
+	}
+	url := fmt.Sprintf("%s/api/secrets", c.endpoint)
+	req, err := c.newRequest(ctx, http.MethodPost, url, body)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("create secret %s/%s: %w", namespace, name, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return c.readError(resp)
+	}
+	return nil
+}
+
 func (c *httpClient) Health(ctx context.Context) error { //nolint:revive // interface implementation
 	url := fmt.Sprintf("%s/api/health", c.endpoint)
 	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
