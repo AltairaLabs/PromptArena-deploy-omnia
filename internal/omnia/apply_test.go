@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
+	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
 )
 
 func noopApplyCallback(_ *deploy.ApplyEvent) error { return nil }
@@ -483,5 +484,50 @@ func TestApply_ResourceFailure(t *testing.T) {
 	}
 	if createdCount == 0 {
 		t.Error("expected other resources to be created despite failure")
+	}
+}
+
+// TestApply_ToolRegistryPermissionDeniedDegrades asserts the RBAC gate: when the
+// deploy token lacks permission to CREATE the tool registry (e.g. a GitOps/prod
+// workspace), the create degrades to a warning and the deploy still succeeds —
+// unlike a generic failure, which is fatal (TestApply_ResourceFailure).
+func TestApply_ToolRegistryPermissionDeniedDegrades(t *testing.T) {
+	reconcilePollInterval = 0
+	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
+	sim.failOn[resourceKey(ResTypeToolRegistry, "test-pack-tools")] = &HTTPError{
+		StatusCode: httpStatusForbidden, Category: ErrCategoryPermission, Body: "forbidden",
+	}
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	var events []*deploy.ApplyEvent
+	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON:     testPackJSON,
+		DeployConfig: testDeployConfig,
+	}, capturingCallback(&events))
+	if err != nil {
+		t.Fatalf("permission-denied ToolRegistry create must degrade, not error: %v", err)
+	}
+	if countContaining(progressMessages(events), "lacks permission") == 0 {
+		t.Errorf("expected a permission advisory, got %v", progressMessages(events))
+	}
+	var state AdapterState
+	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		t.Fatalf("parse state: %v", err)
+	}
+	for _, r := range state.Resources {
+		if r.Type == ResTypeToolRegistry && (r.Status == ResStatusCreated || r.Status == ResStatusFailed) {
+			t.Errorf("registry must not be created/failed on permission denial: %+v", r)
+		}
+	}
+}
+
+func TestReportRegistryPermissionSkipped_CallbackError(t *testing.T) {
+	wantErr := fmt.Errorf("callback boom")
+	ac := &applyContext{
+		reporter: adaptersdk.NewProgressReporter(func(*deploy.ApplyEvent) error { return wantErr }),
+	}
+	if _, err := reportRegistryPermissionSkipped(ac, "p-tools", 0.5); err == nil {
+		t.Error("expected the reporter callback error to propagate")
 	}
 }
