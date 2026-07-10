@@ -244,6 +244,15 @@ func applyToolRegistryCreate(ctx context.Context, ac *applyContext) ([]ResourceS
 		if isAlreadyExists(cerr) {
 			return reportRegistryUnchanged(ac, name, pct)
 		}
+		// RBAC gate: a permission denial means this token isn't allowed to create
+		// tool registries in this workspace (e.g. a GitOps/production workspace
+		// where the registry is provisioned out-of-band). Degrade to a warning and
+		// continue — the AgentRuntime still references the registry by name and
+		// resolves its tools once an admin/GitOps provides it — rather than failing
+		// the whole deploy over a governance boundary.
+		if isPermissionDenied(cerr) {
+			return reportRegistryPermissionSkipped(ac, name, pct)
+		}
 		deployErr := newDeployError(verbCreating, ResTypeToolRegistry, name, cerr)
 		_ = ac.reporter.Error(deployErr)
 		return []ResourceState{{Type: ResTypeToolRegistry, Name: name, Status: ResStatusFailed}}, deployErr
@@ -274,6 +283,30 @@ func reportRegistryUnchanged(ac *applyContext, name string, pct float64) ([]Reso
 		return nil, cbErr
 	}
 	return []ResourceState{{Type: ResTypeToolRegistry, Name: name, Status: ResStatusUnchanged}}, nil
+}
+
+// reportRegistryPermissionSkipped records that the create-mode ToolRegistry was
+// NOT created because the deploy token lacks permission (the RBAC gate — e.g. a
+// GitOps/production workspace). It emits a clear advisory and returns no resource
+// state (nothing was created) and no error, so the deploy continues: the
+// AgentRuntime references the registry by name and resolves its tools once an
+// admin/GitOps provisions it under that name.
+func reportRegistryPermissionSkipped(ac *applyContext, name string, pct float64) ([]ResourceState, error) {
+	msg := fmt.Sprintf("tool registry %q not created — the deploy token lacks permission to create "+
+		"tool registries in this workspace. Provision it via GitOps (named %q) or grant the token "+
+		"tool-registry create permission; the agent references it by name and resolves its tools "+
+		"once it exists.", name, name)
+	if cbErr := ac.reporter.Progress(msg, pct); cbErr != nil {
+		return nil, cbErr
+	}
+	return nil, nil
+}
+
+// isPermissionDenied reports whether err is an Omnia RBAC denial (401/403),
+// classified as ErrCategoryPermission by the HTTP client.
+func isPermissionDenied(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Category == ErrCategoryPermission
 }
 
 // agentRuntimeSucceeded reports whether the AgentRuntime phase produced a
