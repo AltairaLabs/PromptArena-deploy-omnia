@@ -416,3 +416,78 @@ func TestNewHTTPClient(t *testing.T) {
 		t.Fatal("expected error when no token configured")
 	}
 }
+
+func TestHTTPClient_GetWorkspace(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspaces/my-ws" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"spec":{"namespace":{"name":"agents-ns"}}}`))
+	})
+	hc := newTestHTTPClient(t, handler)
+	wi, err := hc.GetWorkspace(context.Background(), "my-ws")
+	if err != nil {
+		t.Fatalf("GetWorkspace: %v", err)
+	}
+	if wi.Namespace != "agents-ns" {
+		t.Errorf("namespace = %q, want agents-ns", wi.Namespace)
+	}
+}
+
+func TestHTTPClient_GetWorkspace_Error(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not found"}`))
+	})
+	hc := newTestHTTPClient(t, handler)
+	if _, err := hc.GetWorkspace(context.Background(), "missing"); err == nil {
+		t.Fatal("expected error on 404 workspace")
+	}
+}
+
+func TestHTTPClient_GetWorkspace_BadJSON(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{not json`))
+	})
+	hc := newTestHTTPClient(t, handler)
+	if _, err := hc.GetWorkspace(context.Background(), "ws"); err == nil {
+		t.Fatal("expected a decode error on malformed workspace JSON")
+	}
+}
+
+func TestHTTPClient_CreateSecret(t *testing.T) {
+	var gotBody map[string]any
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/secrets" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+	})
+	hc := newTestHTTPClient(t, handler)
+	err := hc.CreateSecret(context.Background(), "agents-ns", "p-tool-credentials",
+		map[string]string{"GITHUB_TOKEN": "ghs_x"})
+	if err != nil {
+		t.Fatalf("CreateSecret: %v", err)
+	}
+	if gotBody["namespace"] != "agents-ns" || gotBody["name"] != "p-tool-credentials" {
+		t.Errorf("unexpected body: %v", gotBody)
+	}
+	data, _ := gotBody["data"].(map[string]any)
+	if data["GITHUB_TOKEN"] != "ghs_x" {
+		t.Errorf("data = %v, want GITHUB_TOKEN=ghs_x", gotBody["data"])
+	}
+}
+
+func TestHTTPClient_CreateSecret_Error(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+	})
+	hc := newTestHTTPClient(t, handler)
+	if err := hc.CreateSecret(context.Background(), "ns", "n", map[string]string{"k": "v"}); err == nil {
+		t.Fatal("expected error on 403 create secret")
+	}
+}
