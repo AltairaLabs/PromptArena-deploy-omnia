@@ -38,8 +38,19 @@ func TestWaitForReconcile_TerminalFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a failure error for phase Error")
 	}
-	if de := IsDeployError(err); de == nil {
-		t.Errorf("want *DeployError, got %T", err)
+	de := IsDeployError(err)
+	if de == nil {
+		t.Fatalf("want *DeployError, got %T", err)
+	}
+	// Assert the TERMINAL-failure path specifically: a resource-category reconcile
+	// error, NOT a timeout. Without this, a regression that misclassified phase
+	// Error as pending would loop to exhaustion and still return a (timeout)
+	// DeployError, so the test would pass vacuously.
+	if de.Category != ErrCategoryResource {
+		t.Errorf("category = %q, want %q (terminal failure, not timeout)", de.Category, ErrCategoryResource)
+	}
+	if de.Operation != opReconcile {
+		t.Errorf("operation = %q, want %q", de.Operation, opReconcile)
 	}
 }
 
