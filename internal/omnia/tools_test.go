@@ -717,6 +717,25 @@ func TestSynthesizeHandler_EmitsBearerAuthStanza(t *testing.T) {
 	}
 }
 
+func TestSynthesizeHandler_EmitsStaticHeaderFromEnv(t *testing.T) {
+	t.Setenv("WORKOUT_ACT_AS_USER", "user-42")
+	src := &httpToolSource{Mode: "live", Method: "POST", URL: "https://x/y",
+		HeadersFromEnv: []string{"Authorization=SPLITZ_AUTH", "X-Act-As-User=WORKOUT_ACT_AS_USER"}}
+	h := synthesizeHandler(nil, "create_workout", src, "p-tool-credentials")
+	hc := h[keyHTTPConfig].(map[string]interface{})
+	headers, _ := hc["headers"].(map[string]string)
+	if headers["X-Act-As-User"] != "user-42" {
+		t.Errorf("static header not emitted from env: %v", hc["headers"])
+	}
+	// Authorization stays the auth stanza, never a static header.
+	if _, ok := headers["Authorization"]; ok {
+		t.Errorf("Authorization must not be static: %v", headers)
+	}
+	if _, ok := h["auth"]; !ok {
+		t.Error("Authorization must still produce an auth stanza")
+	}
+}
+
 // --- Mock-mode pack tools get a distinct plan-time warning ------------------
 
 func TestBuildCreateRegistryHandlers_MockToolWarning(t *testing.T) {

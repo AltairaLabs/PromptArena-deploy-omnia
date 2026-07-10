@@ -17,27 +17,27 @@ import (
 func provisionToolCredentials(
 	ctx context.Context, client omniaClient, pack *prompt.Pack, cfg *Config,
 ) (provisioned bool, warnings []string) {
-	secretName, envVars, warnings := collectToolCredentials(pack, cfg)
+	secretName, envVars := collectToolCredentials(pack, cfg)
 	if len(envVars) == 0 {
-		return true, warnings // nothing to provision (non-auth-header warnings may still be present)
+		return true, nil // no Authorization credential to provision
 	}
 
 	data, missing := readCredentialEnv(envVars)
 	if len(missing) > 0 {
-		return false, append(warnings, missingEnvWarning(secretName, missing))
+		return false, []string{missingEnvWarning(secretName, missing)}
 	}
 
 	ns, err := resolveNamespace(ctx, client, cfg.Workspace)
 	if err != nil {
-		return false, append(warnings, referenceOnlyWarning(secretName, "", envVars,
-			fmt.Sprintf("could not resolve the workspace namespace: %v", err)))
+		return false, []string{referenceOnlyWarning(secretName, "", envVars,
+			fmt.Sprintf("could not resolve the workspace namespace: %v", err))}
 	}
 
 	if err := client.CreateSecret(ctx, ns, secretName, data); err != nil {
-		return false, append(warnings, referenceOnlyWarning(secretName, ns, envVars,
-			fmt.Sprintf("secret creation was rejected: %v", err)))
+		return false, []string{referenceOnlyWarning(secretName, ns, envVars,
+			fmt.Sprintf("secret creation was rejected: %v", err))}
 	}
-	return true, warnings
+	return true, nil
 }
 
 // reportCredentialProvisioning runs the best-effort provisioning step and streams
