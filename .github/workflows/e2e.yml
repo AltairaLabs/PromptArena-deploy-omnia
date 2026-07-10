@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  packages: read # pre-pull agent-pod images from ghcr into the Kind node
 
 env:
   # Omnia chart + image tag (NO leading "v" — ghcr tags are unprefixed, unlike
@@ -78,6 +79,29 @@ jobs:
           kubectl get crd agentruntimes.omnia.altairalabs.ai
           kubectl -n "${NS}" rollout status deployment/omnia-controller-manager --timeout=240s
           kubectl -n "${NS}" rollout status deployment/omnia-dashboard --timeout=240s
+
+      - name: Pre-cache agent-pod images into Kind (avoid cold-pull under the reconcile poll)
+        # The adapter's Apply now blocks until each AgentRuntime reconciles to Ready.
+        # A cold image pull for the agent pod (facade + framework/runtime +
+        # policy-broker) on a fresh Kind node can exceed that budget and fail the
+        # FIRST agent deploy. Read the real image refs from the installed operator's
+        # args (so this stays correct across version bumps) and load them into the
+        # node ahead of time. Best-effort: a miss just falls back to a normal pull.
+        run: |
+          set -x
+          args=$(kubectl -n "${NS}" get deploy omnia-controller-manager \
+            -o jsonpath='{.spec.template.spec.containers[0].args}')
+          # Agent-pod images only: facade, the promptkit framework/runtime, policy-broker.
+          # grep -o pulls the ghcr ref out of "--framework-image=promptkit=ghcr.io/...".
+          echo "$args" | tr ',' '\n' \
+            | grep -E 'facade-image|framework-image=promptkit|policy-broker-image' \
+            | grep -oE 'ghcr\.io/[^"]+' | sort -u > /tmp/agent-images.txt || true
+          echo "images to pre-cache:"; cat /tmp/agent-images.txt || true
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin || true
+          while read -r img; do
+            [ -z "$img" ] && continue
+            docker pull "$img" && kind load docker-image "$img" --name e2e || true
+          done < /tmp/agent-images.txt
 
       - name: Bootstrap workspace + mock provider
         run: |
