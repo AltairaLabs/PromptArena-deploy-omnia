@@ -1,12 +1,14 @@
 package omnia
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
+	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
@@ -232,5 +234,54 @@ func TestCRDContract_PromptPack(t *testing.T) {
 	v := loadCRDValidator(t, "promptpacks.yaml")
 	if errs := validation.ValidateCustomResource(nil, obj, v); len(errs) != 0 {
 		t.Fatalf("PromptPack body failed CRD validation: %v", errs)
+	}
+}
+
+// TestCRDContract_ToolRegistry_EnrichedSynthesizedHandler validates that a handler
+// synthesized from a pack tool's rich arena source (responseMapping, redact,
+// handler-level timeout, and inferred GET queryParams) is admissible against the
+// real ToolRegistry CRD schema — locking the field NAMES to the schema so a future
+// drift (e.g. responseMapping -> some renamed field) becomes a red build.
+func TestCRDContract_ToolRegistry_EnrichedSynthesizedHandler(t *testing.T) {
+	pack := &prompt.Pack{
+		ID:      "rich-pack",
+		Version: "1.0.0",
+		Tools: map[string]*prompt.PackTool{
+			"list_user_exercises": {
+				Name:        "list_user_exercises",
+				Description: "List the user's exercises",
+				Parameters: map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{"search": map[string]interface{}{"type": "string"}},
+				},
+			},
+		},
+	}
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com", Workspace: "test-ws", APIToken: "test-token",
+		sourceTools: map[string]*httpToolSource{
+			"list_user_exercises": {
+				Mode: "live", Method: "GET",
+				URL:                 "https://api.example.com/exercises",
+				TimeoutMs:           15000,
+				Redact:              []string{"user_id"},
+				ResponseBodyMapping: "[].{id: id, name: name}",
+			},
+		},
+	}
+	body, err := buildToolRegistryRequest(pack, cfg)
+	if err != nil {
+		t.Fatalf("build ToolRegistry: %v", err)
+	}
+	// Sanity: the enriched fields actually made it into the emitted handler, so a
+	// silent regression that drops them can't make this test pass vacuously.
+	if !bytes.Contains(body, []byte("responseMapping")) ||
+		!bytes.Contains(body, []byte("queryParams")) ||
+		!bytes.Contains(body, []byte(`"redact"`)) {
+		t.Fatalf("enriched fields missing from emitted handler: %s", body)
+	}
+	v := loadCRDValidator(t, "toolregistries.yaml")
+	if errs := validateBody(t, v, "ToolRegistry", body); len(errs) != 0 {
+		t.Fatalf("enriched ToolRegistry body failed CRD validation: %v", errs)
 	}
 }

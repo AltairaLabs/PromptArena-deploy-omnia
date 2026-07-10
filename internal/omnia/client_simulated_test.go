@@ -39,6 +39,22 @@ type simulatedClient struct {
 	// seed the resource (so the subsequent update succeeds) — to exercise the
 	// create→AlreadyExists→update fallback in applyResourcePhase.
 	createAlreadyExists map[string]bool
+
+	// statusQueue, when set for simKey(resType,name), makes each GetResource call
+	// return (and consume) the next ResourceStatus — for exercising reconcile polls
+	// that observe a not-ready→ready (or never-ready) progression. When exhausted,
+	// GetResource falls back to the stored resource's status.
+	statusQueue map[string][]*ResourceStatus
+
+	// agentRuntimeReadyOnGet, when true, makes GetResource stamp a Ready condition
+	// onto an AgentRuntime whose stored Status is nil (i.e. no one has explicitly
+	// set a status via statusQueue or by seeding one directly) — simulating an
+	// operator that reconciles the resource on the very first poll. This lets Apply
+	// tests that only care about the create/update outcome opt in to a fast,
+	// deterministic reconcile without an explicit statusQueue. statusQueue still
+	// takes precedence (checked first in GetResource) for tests exercising the
+	// pending→ready or never-ready progressions directly.
+	agentRuntimeReadyOnGet bool
 }
 
 // newSimulatedClient creates a simulatedClient with default healthy state.
@@ -127,6 +143,20 @@ func (s *simulatedClient) GetResource(
 			Body:       fmt.Sprintf("resource %s not found", key),
 			Category:   ErrCategoryNotFound,
 		}
+	}
+	if q := s.statusQueue[key]; len(q) > 0 {
+		next := q[0]
+		s.statusQueue[key] = q[1:]
+		clone := *res
+		clone.Status = next
+		return &clone, nil
+	}
+	if s.agentRuntimeReadyOnGet && resType == ResTypeAgentRuntime && res.Status == nil {
+		clone := *res
+		clone.Status = &ResourceStatus{
+			Conditions: []ResourceCondition{{Type: conditionReady, Status: conditionTrue}},
+		}
+		return &clone, nil
 	}
 	return res, nil
 }

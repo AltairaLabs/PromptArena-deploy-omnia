@@ -403,6 +403,10 @@ Setting `tools` selects **create mode**: the adapter synthesizes a `<pack-id>-to
 
 The plan summarizes this as `N handlers (C configured, S from source, P placeholder)`.
 
+**Faithful tool translation.** A synthesized `mode: live` handler carries the tool's full HTTP wiring from the pack's arena source, not just the endpoint and method: response reshaping (the arena source's `http.response.body_mapping` becomes the handler's `responseMapping`), `redact`, the request timeout (`timeout_ms` becomes the handler's `timeout`), and — for `GET` tools whose source declares no `request.query_params` — query parameters inferred from the input schema's top-level properties.
+
+**Mock-mode tools.** A pack tool declared `mode: mock` in the arena source (no live `http` block) still gets a synthesized handler, but it's a placeholder, and the adapter raises a distinct deploy-time warning for it, separate from the no-source-URL placeholder warning above: it will fail at runtime on a live deploy until real `http` wiring is supplied, either in the pack's arena source or via an explicit `tools:` override.
+
 **Create-only.** The synthesized registry is written **exactly once**. If a `<pack-id>-tools` registry already exists the adapter leaves it untouched (the operator owns it and may have completed placeholder URLs) and the registry is **never** updated on a later apply. It is also **left in place on destroy**.
 
 The handler specs are projected into the CRD's `spec.handlers[]` preserving order.
@@ -750,6 +754,10 @@ Extra labels applied to all created resources. Merged with the adapter's managed
 | **Default** | `false` |
 
 When `true`, the Apply operation simulates resource creation without making API calls. All resources are returned with `planned` status.
+
+## Apply-time reconcile verification
+
+After creating (or updating) an AgentRuntime, the adapter polls it until Omnia reports the resource `Ready`, up to a bounded number of attempts. An AgentRuntime that is admitted but never reconciles — for example an operator that isn't running, or a CRD-schema mismatch between the adapter and the cluster — fails the deploy with an attributable error instead of the apply silently reporting success while the agent never actually comes up.
 
 ## Validation rules
 

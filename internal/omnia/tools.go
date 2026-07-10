@@ -8,48 +8,27 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
 // HTTP-handler config keys and the default method a handler uses when the
 // source declares no method (or the tool isn't HTTP-backed).
 const (
-	keyEndpoint       = "endpoint"
-	keyMethod         = "method"
-	defaultHTTPMethod = "POST"
+	keyEndpoint        = "endpoint"
+	keyMethod          = "method"
+	defaultHTTPMethod  = "POST"
+	keyResponseMapping = "responseMapping"
+	keyRedact          = "redact"
+	keyQueryParams     = "queryParams"
+	keyTimeout         = "timeout"
+	methodGET          = "GET"
 )
 
-// sourceTool carries the HTTP wiring an arena tool declares in its source: the
-// (upper-cased) method and the endpoint URL. Either field may be empty — a mock
-// tool has neither; a live tool has both. A non-empty URL is what lets create
-// mode wire a real handler instead of a placeholder.
-type sourceTool struct {
-	Method string
-	URL    string
-}
-
-// extractSourceTools reads the arena source config (the JSON-serialized arena
-// config the CLI threads through req.ArenaConfig) and returns a map from each
-// tool's LLM-facing name to its declared HTTP method (upper-cased) and URL. A
-// tool is kept if it has EITHER a method or a URL; a tool with neither (e.g. a
-// mock tool with no http block) is omitted. It degrades gracefully: a parse
-// failure or empty input yields a (non-nil) empty map — it NEVER fails the
-// deploy, since the real method/URL is an enhancement over the placeholder
-// defaults, not a requirement.
-func extractSourceTools(arenaConfigJSON string) map[string]sourceTool {
-	tools := make(map[string]sourceTool)
-	infos, err := adaptersdk.ExtractToolInfo(arenaConfigJSON)
-	if err != nil {
-		return tools
-	}
-	for _, info := range infos {
-		if info.HTTPMethod == "" && info.HTTPURL == "" {
-			continue
-		}
-		tools[info.Name] = sourceTool{Method: strings.ToUpper(info.HTTPMethod), URL: info.HTTPURL}
-	}
-	return tools
+// extractSourceTools returns the full HTTP wiring for each arena tool, keyed by
+// LLM-facing name. It delegates to parseArenaToolSources (which never fails), so
+// a nil/empty ArenaConfig degrades gracefully to the placeholder defaults.
+func extractSourceTools(arenaConfigJSON string) map[string]*httpToolSource {
+	return parseArenaToolSources(arenaConfigJSON)
 }
 
 // ToolBinding is the deterministic decision the resolver reaches about how a
@@ -72,6 +51,11 @@ const (
 	toolModeBind   = "bind"
 	toolModeNone   = "none"
 )
+
+// toolModeMock is the httpToolSource.Mode value for a pack tool declared with
+// no live http block — a mock has no URL and its synthesized handler is a
+// placeholder that will fail at runtime on a live deploy.
+const toolModeMock = "mock"
 
 // resolveToolBinding decides how a deployment's tools are wired and returns the
 // decision plus advisory warnings. It is the single source of truth shared by
@@ -166,8 +150,11 @@ const registryUnchangedWarningFmt = "tool registry %q already exists — left un
 //     tool with no source URL (mock / no http block) gets a placeholder the
 //     operator completes in Omnia.
 //
-// It returns up to two advisories — one for the source-wired handlers and one
-// for the placeholders — so the deploy output is explicit about each.
+// It returns up to three advisories (via createRegistryWarnings) — one for the
+// source-wired handlers, one for placeholders with no source at all, and one
+// for tools explicitly declared mock-mode in the pack — so the deploy output
+// is explicit about each and a live deploy doesn't silently ship a mock
+// placeholder that fails at runtime.
 func buildCreateRegistryHandlers(
 	pack *prompt.Pack, cfg *Config,
 ) (handlers []map[string]interface{}, warnings []string) {
@@ -180,20 +167,33 @@ func buildCreateRegistryHandlers(
 		}
 	}
 
-	var sourceWired, placeholders []string
+	var sourceWired, placeholders, mockTools []string
 	for _, name := range packToolNames(pack) {
 		if configured[name] {
 			continue // a configured handler is authoritative; skip synthesis
 		}
 		src := cfg.sourceTools[name]
 		handlers = append(handlers, synthesizeHandler(pack.Tools[name], name, src))
-		if src.URL != "" {
+		switch {
+		case src != nil && src.URL != "":
 			sourceWired = append(sourceWired, name)
-		} else {
+		case src != nil && src.Mode == toolModeMock:
+			mockTools = append(mockTools, name)
+		default:
 			placeholders = append(placeholders, name)
 		}
 	}
 
+	warnings = append(warnings, createRegistryWarnings(sourceWired, placeholders, mockTools)...)
+	return handlers, warnings
+}
+
+// createRegistryWarnings builds the advisories for buildCreateRegistryHandlers:
+// one for source-wired handlers, one for no-source placeholders, and a distinct
+// one for pack tools that are explicitly mock-mode (no live http) — a live
+// deploy would otherwise silently ship a placeholder that fails at runtime.
+func createRegistryWarnings(sourceWired, placeholders, mockTools []string) []string {
+	var warnings []string
 	if len(sourceWired) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"tool registry: wired %d handler(s) from the arena tool definitions (%s) — "+
@@ -205,7 +205,13 @@ func buildCreateRegistryHandlers(
 			"created %d placeholder handler(s) with no source URL — set real URLs in Omnia: %s",
 			len(placeholders), strings.Join(placeholders, ", ")))
 	}
-	return handlers, warnings
+	if len(mockTools) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"tool(s) [%s] are mock-mode in the pack (no live http) — the created placeholder "+
+				"handler(s) will fail at runtime on a live deploy; provide live http in the pack "+
+				"or a tools: override with real endpoints", strings.Join(mockTools, ", ")))
+	}
+	return warnings
 }
 
 // synthesizeHandler builds an http handler for a non-configured pack tool from
@@ -215,29 +221,103 @@ func buildCreateRegistryHandlers(
 // knows to set the real URL in Omnia. The method comes from the source too,
 // falling back to defaultHTTPMethod when none was declared. The pack tool's
 // schema is carried through.
-func synthesizeHandler(packTool *prompt.PackTool, toolName string, src sourceTool) map[string]interface{} {
+func synthesizeHandler(packTool *prompt.PackTool, toolName string, src *httpToolSource) map[string]interface{} {
 	tool := map[string]interface{}{keyName: toolName}
 	if packTool != nil {
 		tool["description"] = packTool.Description
 		tool["inputSchema"] = packTool.Parameters
 	}
+	entry := map[string]interface{}{
+		keyName:       sanitizeName(toolName),
+		keyType:       handlerTypeHTTP,
+		"tool":        tool,
+		keyHTTPConfig: buildSynthHTTPConfig(toolName, src, packTool),
+	}
+	if src != nil && src.TimeoutMs > 0 {
+		entry[keyTimeout] = fmt.Sprintf("%dms", src.TimeoutMs)
+	}
+	return entry
+}
+
+// buildSynthHTTPConfig maps a tool's arena HTTP source to an Omnia httpConfig
+// block: the real endpoint+method when live (placeholder otherwise), the response
+// reshape, redact list, and request mappings the source declares, plus inferred
+// GET query params.
+func buildSynthHTTPConfig(
+	toolName string, src *httpToolSource, packTool *prompt.PackTool,
+) map[string]interface{} {
 	endpoint := placeholderEndpoint + toolName
-	if src.URL != "" {
-		endpoint = src.URL
-	}
 	httpMethod := defaultHTTPMethod
-	if src.Method != "" {
-		httpMethod = src.Method
+	cfg := map[string]interface{}{}
+	if src != nil {
+		if src.URL != "" {
+			endpoint = src.URL
+		}
+		if src.Method != "" {
+			httpMethod = src.Method
+		}
+		addSourceHTTPMappings(cfg, src)
 	}
-	return map[string]interface{}{
-		keyName: sanitizeName(toolName),
-		keyType: handlerTypeHTTP,
-		"tool":  tool,
-		keyHTTPConfig: map[string]interface{}{
-			keyEndpoint: endpoint,
-			keyMethod:   httpMethod,
-		},
+	cfg[keyEndpoint] = endpoint
+	cfg[keyMethod] = httpMethod
+	if qp := resolveQueryParams(src, httpMethod, packTool); len(qp) > 0 {
+		cfg[keyQueryParams] = qp
 	}
+	return cfg
+}
+
+// addSourceHTTPMappings copies the response/redact/request mappings a source
+// declares into an httpConfig map (only non-empty ones).
+func addSourceHTTPMappings(cfg map[string]interface{}, src *httpToolSource) {
+	if src.ResponseBodyMapping != "" {
+		cfg[keyResponseMapping] = src.ResponseBodyMapping
+	}
+	if len(src.Redact) > 0 {
+		cfg[keyRedact] = src.Redact
+	}
+	if src.RequestBodyMapping != "" {
+		cfg["bodyMapping"] = src.RequestBodyMapping
+	}
+	if len(src.HeaderParams) > 0 {
+		cfg["headerParams"] = src.HeaderParams
+	}
+	if len(src.StaticQuery) > 0 {
+		cfg["staticQuery"] = src.StaticQuery
+	}
+}
+
+// resolveQueryParams returns the arg names an httpConfig should send as query
+// parameters: the source's explicit request.query_params when set, else — for a
+// GET with none declared — every top-level input-schema property (sorted), so GET
+// args are sent as query string rather than an absent request body.
+func resolveQueryParams(src *httpToolSource, method string, packTool *prompt.PackTool) []string {
+	if src != nil && len(src.QueryParams) > 0 {
+		return src.QueryParams
+	}
+	if method != methodGET || packTool == nil {
+		return nil
+	}
+	return inputSchemaPropertyNames(packTool.Parameters)
+}
+
+// inputSchemaPropertyNames extracts the sorted top-level property names from a
+// JSON-Schema document decoded as interface{} (map[string]interface{}). Returns
+// nil when there is no properties object.
+func inputSchemaPropertyNames(schema interface{}) []string {
+	m, ok := schema.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	props, ok := m["properties"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(props))
+	for name := range props {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // placeholderEndpoint is the RFC-2606 .invalid base URL a placeholder handler
@@ -260,7 +340,7 @@ func countSynthesizedPackTools(pack *prompt.Pack, cfg *Config) (sourceWired, pla
 		if configured[name] {
 			continue
 		}
-		if cfg.sourceTools[name].URL != "" {
+		if src := cfg.sourceTools[name]; src != nil && src.URL != "" {
 			sourceWired++
 		} else {
 			placeholder++

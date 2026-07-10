@@ -143,32 +143,62 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	// Phase 3: AgentRuntime(s)
 	targets := agentRuntimeNames(ac.pack)
 	for i, tgt := range targets {
-		agentName := tgt.name // capture for closure
-		entry := tgt.entry    // capture for closure
-		pct := float64(stepAgentRuntime)*progressStepSize +
-			float64(i)/float64(len(targets)+1)*progressStepSize
-		if cbErr := ac.reporter.Progress(
-			fmt.Sprintf("Creating %s: %s", ResTypeAgentRuntime, sanitizeName(agentName)), pct,
-		); cbErr != nil {
-			return resources, cbErr
-		}
-		res, err = applyResourcePhase(ctx, ac, stepAgentRuntime, ResTypeAgentRuntime,
-			sanitizeName(agentName),
-			func() (json.RawMessage, error) { return buildAgentRuntimeRequest(ac.pack, agentName, entry, ac.cfg) })
+		res, abort, err := applyAgentRuntimeTarget(ctx, ac, i, tgt, len(targets))
 		resources = append(resources, res...)
-		applyErr = combineErrors(applyErr, err)
-
-		// On a successful create/update, surface a dashboard deep-link so the
-		// operator can open the agent immediately. The /agents/[name] route
-		// keys on the AgentRuntime metadata.name = sanitizeName(agentName).
-		if err == nil && agentRuntimeSucceeded(res) {
-			if cbErr := reportAgentAccessURL(ac, agentName, pct); cbErr != nil {
-				return resources, cbErr
-			}
+		if abort {
+			return resources, err
 		}
+		applyErr = combineErrors(applyErr, err)
 	}
 
 	return resources, applyErr
+}
+
+// applyAgentRuntimeTarget applies a single AgentRuntime target: it reports
+// progress, creates/updates the resource, and — on a successful create/update —
+// polls until the resource reconciles and, once Ready, surfaces the dashboard
+// access URL. A reconcile failure/timeout is reported and folded into the
+// returned error so a created-but-never-reconciled AgentRuntime fails the deploy
+// loudly instead of silently reporting success.
+//
+// abort reports whether a progress-callback transport error occurred (broken
+// stdio pipe, etc.) — the caller must treat that as an immediate abort of the
+// whole apply rather than accumulating it and continuing to the next target,
+// matching the existing early-return behavior for callback errors.
+func applyAgentRuntimeTarget(
+	ctx context.Context, ac *applyContext, i int, tgt agentRuntimeTarget, numTargets int,
+) (res []ResourceState, abort bool, err error) {
+	agentName := tgt.name // capture for closure
+	entry := tgt.entry    // capture for closure
+	pct := float64(stepAgentRuntime)*progressStepSize +
+		float64(i)/float64(numTargets+1)*progressStepSize
+
+	if cbErr := ac.reporter.Progress(
+		fmt.Sprintf("Creating %s: %s", ResTypeAgentRuntime, sanitizeName(agentName)), pct,
+	); cbErr != nil {
+		return nil, true, cbErr
+	}
+
+	res, applyErr := applyResourcePhase(ctx, ac, stepAgentRuntime, ResTypeAgentRuntime,
+		sanitizeName(agentName),
+		func() (json.RawMessage, error) { return buildAgentRuntimeRequest(ac.pack, agentName, entry, ac.cfg) })
+
+	// On a successful create/update, verify the AgentRuntime actually reconciles.
+	// This is correctness-critical, so it runs BEFORE the best-effort access-URL
+	// report and a reconcile failure/timeout is folded into applyErr — it is never
+	// skipped by a cosmetic progress-callback error. The dashboard deep-link is
+	// surfaced only once the agent is Ready (no link for an agent that failed to
+	// reconcile). The /agents/[name] route keys on metadata.name = sanitizeName(agentName).
+	if applyErr == nil && agentRuntimeSucceeded(res) {
+		if rerr := waitForReconcile(ctx, ac.client, ResTypeAgentRuntime, sanitizeName(agentName)); rerr != nil {
+			_ = ac.reporter.Error(rerr)
+			applyErr = combineErrors(applyErr, rerr)
+		} else if cbErr := reportAgentAccessURL(ac, agentName, pct); cbErr != nil {
+			return res, true, cbErr
+		}
+	}
+
+	return res, false, applyErr
 }
 
 // applyToolRegistryCreate applies the create-mode ToolRegistry under the

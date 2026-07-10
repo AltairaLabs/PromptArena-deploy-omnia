@@ -88,9 +88,9 @@ func checkResource(ctx context.Context, client omniaClient, res *ResourceState) 
 
 	// If phase is Running/Active, consider healthy.
 	switch resp.Status.Phase {
-	case "Running", "Active", "Ready":
+	case phaseRunning, phaseActive, conditionReady:
 		return StatusHealthy
-	case "Failed", "Error":
+	case phaseFailed, phaseError:
 		return StatusUnhealthy
 	}
 

@@ -164,7 +164,9 @@ func TestPlan_AdoptError_FallsBackToPriorState(t *testing.T) {
 }
 
 func TestApply_AdoptError_FallsBackToPriorState(t *testing.T) {
+	reconcilePollInterval = 0
 	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
 	// Make adopt fail on the first resType so apply falls back to req.PriorState.
 	sim.failOn[simKey(ResTypePromptPack, "")] = fmt.Errorf("list forbidden")
 	// Pre-seed the resources so the fallback's UPDATE path succeeds.
@@ -220,8 +222,10 @@ func TestApply_CreateAlreadyExists_FallsBackToUpdate(t *testing.T) {
 	orig := updateConflictBackoff
 	updateConflictBackoff = 0
 	defer func() { updateConflictBackoff = orig }()
+	reconcilePollInterval = 0
 
 	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
 	// adopt returns empty (nothing labeled) → apply decides CREATE for the
 	// PromptPack. But the cluster actually has it: CreateResource returns 409
 	// AlreadyExists, and applyResourcePhase must transparently switch to update.

@@ -436,7 +436,8 @@ func TestSchemaDrifts(t *testing.T) {
 func TestExtractSourceTools_FromToolSpecs(t *testing.T) {
 	// A minimal valid ArenaConfig: tool_specs map with per-tool http.{url,method}.
 	// A GET tool with a URL, a POST tool (lower-case method → upper-cased) with a
-	// URL, and a tool with no http block (omitted from the map).
+	// URL, and a tool with no http block (a mock tool) — now PRESENT with an empty
+	// url/method and its mode carried, which Task 5 relies on.
 	arenaConfig := `{
 		"tool_specs": {
 			"list_user_exercises": {"description": "list", "mode": "live", "http": {"url": "https://x/list", "method": "get"}},
@@ -451,8 +452,11 @@ func TestExtractSourceTools_FromToolSpecs(t *testing.T) {
 	if got := tools["create_workout"]; got.Method != "POST" || got.URL != "https://x/create" {
 		t.Errorf("create_workout = %+v, want {POST https://x/create}", got)
 	}
-	if _, ok := tools["local_only"]; ok {
-		t.Errorf("a tool with no http block must be omitted, got %v", tools)
+	// A no-http (mock) tool is now present with an empty url/method and its mode
+	// carried — Task 5 (mock detection) relies on it; deploy output is unchanged
+	// because call sites treat an empty URL as a placeholder, exactly as before.
+	if got := tools["local_only"]; got == nil || got.URL != "" || got.Method != "" || got.Mode != "mock" {
+		t.Errorf("local_only must be present with empty url/method and mode=mock, got %+v", got)
 	}
 }
 
@@ -474,7 +478,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	packTool := &prompt.PackTool{Name: "list_user_exercises", Description: "list"}
 
 	// Source carries a real URL + method → both wired straight through.
-	h := synthesizeHandler(packTool, "list_user_exercises", sourceTool{Method: "GET", URL: "https://x/list"})
+	h := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "GET", URL: "https://x/list"})
 	hc := h[keyHTTPConfig].(map[string]interface{})
 	if hc[keyMethod] != "GET" {
 		t.Errorf("method with source GET = %v, want GET", hc[keyMethod])
@@ -484,7 +488,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	}
 
 	// Empty source → placeholder URL + POST default.
-	def := synthesizeHandler(packTool, "list_user_exercises", sourceTool{})
+	def := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{})
 	dc := def[keyHTTPConfig].(map[string]interface{})
 	if dc[keyMethod] != defaultHTTPMethod {
 		t.Errorf("empty source method must fall back to %q, got %v", defaultHTTPMethod, dc[keyMethod])
@@ -494,7 +498,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	}
 
 	// URL empty but method set → placeholder URL with that method.
-	mo := synthesizeHandler(packTool, "list_user_exercises", sourceTool{Method: "DELETE"})
+	mo := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "DELETE"})
 	mc := mo[keyHTTPConfig].(map[string]interface{})
 	if mc[keyMethod] != "DELETE" {
 		t.Errorf("method-only source must keep its method, got %v", mc[keyMethod])
@@ -511,7 +515,7 @@ func TestBuildCreateRegistryHandlers_SourceWiredAndPlaceholder(t *testing.T) {
 	cfg := &Config{
 		// list_user_exercises is a live GET (has a URL) → source-wired; issue_refund
 		// is absent from the map → placeholder + POST default.
-		sourceTools: map[string]sourceTool{
+		sourceTools: map[string]*httpToolSource{
 			"list_user_exercises": {Method: "GET", URL: "https://x/list"},
 		},
 	}
@@ -567,5 +571,111 @@ func TestDryRunToolBinding(t *testing.T) {
 	}
 	if b := dryRunToolBinding(pack, &Config{}); b.Mode != toolModeNone {
 		t.Errorf("neither → none, got %+v", b)
+	}
+}
+
+func TestSynthesizeHandler_RichHTTPConfig(t *testing.T) {
+	src := &httpToolSource{
+		Mode: "live", Method: "POST",
+		URL:                 "https://api.splitpantz.com/api/v1/workouts",
+		TimeoutMs:           15000,
+		Redact:              []string{"user_id"},
+		ResponseBodyMapping: "{id: id, name: name}",
+	}
+	h := synthesizeHandler(nil, "create_workout", src)
+	cfg, _ := h[keyHTTPConfig].(map[string]interface{})
+	if cfg["responseMapping"] != "{id: id, name: name}" {
+		t.Errorf("responseMapping = %v", cfg["responseMapping"])
+	}
+	if cfg["timeout"] != nil {
+		t.Errorf("timeout must be handler-level, not in httpConfig")
+	}
+	if h["timeout"] != "15000ms" {
+		t.Errorf("handler timeout = %v, want 15000ms", h["timeout"])
+	}
+	redact, _ := cfg["redact"].([]string)
+	if len(redact) != 1 || redact[0] != "user_id" {
+		t.Errorf("redact = %v", cfg["redact"])
+	}
+}
+
+func TestSynthesizeHandler_GETQueryParamsInferred(t *testing.T) {
+	packTool := &prompt.PackTool{
+		Name: "list_user_exercises",
+		Parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"search": map[string]interface{}{"type": "string"}},
+		},
+	}
+	src := &httpToolSource{Mode: "live", Method: "GET", URL: "https://api.splitpantz.com/api/v1/exercises"}
+	h := synthesizeHandler(packTool, "list_user_exercises", src)
+	cfg := h[keyHTTPConfig].(map[string]interface{})
+	qp, _ := cfg[keyQueryParams].([]string)
+	if len(qp) != 1 || qp[0] != "search" {
+		t.Errorf("queryParams = %v, want [search]", cfg[keyQueryParams])
+	}
+}
+
+func TestSynthesizeHandler_POSTNoQueryParams(t *testing.T) {
+	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
+		"properties": map[string]interface{}{"name": map[string]interface{}{"type": "string"}}}}
+	src := &httpToolSource{Method: "POST", URL: "https://x/y"}
+	h := synthesizeHandler(packTool, "create_x", src)
+	if _, ok := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams]; ok {
+		t.Errorf("POST must not infer queryParams")
+	}
+}
+
+func TestSynthesizeHandler_GETExplicitQueryParamsWin(t *testing.T) {
+	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
+		"properties": map[string]interface{}{"a": map[string]interface{}{}, "b": map[string]interface{}{}}}}
+	src := &httpToolSource{Method: "GET", URL: "https://x", QueryParams: []string{"a"}}
+	h := synthesizeHandler(packTool, "t", src)
+	qp := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams].([]string)
+	if len(qp) != 1 || qp[0] != "a" {
+		t.Errorf("explicit queryParams must win, got %v", qp)
+	}
+}
+
+func TestSynthesizeHandler_RequestMappings(t *testing.T) {
+	src := &httpToolSource{
+		Method:             "POST",
+		URL:                "https://x/y",
+		RequestBodyMapping: "{payload: input}",
+		HeaderParams:       map[string]string{"X-Tenant": "tenant_id"},
+		StaticQuery:        map[string]string{"v": "2"},
+	}
+	cfg := synthesizeHandler(nil, "create_x", src)[keyHTTPConfig].(map[string]interface{})
+	if cfg["bodyMapping"] != "{payload: input}" {
+		t.Errorf("bodyMapping = %v", cfg["bodyMapping"])
+	}
+	hp, _ := cfg["headerParams"].(map[string]string)
+	if hp["X-Tenant"] != "tenant_id" {
+		t.Errorf("headerParams = %v", cfg["headerParams"])
+	}
+	sq, _ := cfg["staticQuery"].(map[string]string)
+	if sq["v"] != "2" {
+		t.Errorf("staticQuery = %v", cfg["staticQuery"])
+	}
+}
+
+// --- Mock-mode pack tools get a distinct plan-time warning ------------------
+
+func TestBuildCreateRegistryHandlers_MockToolWarning(t *testing.T) {
+	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{
+		"search_shared_workouts": {Name: "search_shared_workouts", Description: "d",
+			Parameters: map[string]interface{}{}},
+	}}
+	cfg := &Config{sourceTools: map[string]*httpToolSource{
+		"search_shared_workouts": {Mode: "mock"}, // no URL, mock mode
+	}}
+	_, warnings := buildCreateRegistryHandlers(pack, cfg)
+	// NOTE: not using a hasWarningContaining helper here — an identical one
+	// already exists in integration_test.go, but it's gated behind the
+	// "integration" build tag; redefining it in this (untagged) file would
+	// collide when CI builds with -tags=integration.
+	joined := strings.Join(warnings, "\n")
+	if !strings.Contains(joined, "mock") || !strings.Contains(joined, "search_shared_workouts") {
+		t.Errorf("expected a mock-mode warning naming the tool, got %v", warnings)
 	}
 }
