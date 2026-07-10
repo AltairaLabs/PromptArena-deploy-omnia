@@ -55,6 +55,16 @@ type simulatedClient struct {
 	// takes precedence (checked first in GetResource) for tests exercising the
 	// pending→ready or never-ready progressions directly.
 	agentRuntimeReadyOnGet bool
+
+	// workspaces maps a workspace name to its resolved info (GetWorkspace). A
+	// missing entry yields a typed 404. getWorkspaceErr forces a failure.
+	workspaces      map[string]*WorkspaceInfo
+	getWorkspaceErr error
+
+	// createdSecrets records CreateSecret calls keyed by "namespace/name".
+	// createSecretErr forces CreateSecret to fail (to exercise the degrade path).
+	createdSecrets  map[string]map[string]string
+	createSecretErr error
 }
 
 // newSimulatedClient creates a simulatedClient with default healthy state.
@@ -64,8 +74,33 @@ func newSimulatedClient() *simulatedClient {
 		failOn:            make(map[string]error),
 		validProviders:    make(map[string]bool),
 		validSkillSources: make(map[string]bool),
+		createdSecrets:    make(map[string]map[string]string),
 		healthy:           true,
 	}
+}
+
+//nolint:revive // interface implementation
+func (s *simulatedClient) GetWorkspace(_ context.Context, name string) (*WorkspaceInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.getWorkspaceErr != nil {
+		return nil, s.getWorkspaceErr
+	}
+	if wi, ok := s.workspaces[name]; ok {
+		return wi, nil
+	}
+	return nil, &HTTPError{StatusCode: httpStatusNotFound, Body: "workspace not found", Category: ErrCategoryNotFound}
+}
+
+//nolint:revive // interface implementation
+func (s *simulatedClient) CreateSecret(_ context.Context, namespace, name string, data map[string]string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.createSecretErr != nil {
+		return s.createSecretErr
+	}
+	s.createdSecrets[namespace+"/"+name] = data
+	return nil
 }
 
 func simKey(resType, name string) string {

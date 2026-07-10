@@ -22,6 +22,7 @@ const (
 	keyQueryParams     = "queryParams"
 	keyTimeout         = "timeout"
 	methodGET          = "GET"
+	authTypeBearer     = "bearer"
 )
 
 // extractSourceTools returns the full HTTP wiring for each arena tool, keyed by
@@ -82,11 +83,29 @@ func resolveToolBinding(
 		return resolveCreateMode(ctx, p, pack, cfg)
 	case cfg.ToolRegistryRef != "":
 		return resolveBindMode(ctx, p, pack, cfg, packTools)
+	case len(packTools) > 0 && hasLiveSource(pack, cfg):
+		// The pack carries translatable live tools and no explicit binding: create
+		// <pack-id>-tools from the arena source (create-only, like the explicit path).
+		return resolveCreateMode(ctx, p, pack, cfg)
 	case len(packTools) > 0:
 		return resolveDiscoverMode(ctx, p, cfg, packTools)
 	default:
 		return ToolBinding{Mode: toolModeNone}, nil, nil
 	}
+}
+
+// hasLiveSource reports whether at least one of the pack's tools has a live HTTP
+// source (a non-empty URL parsed from req.ArenaConfig). It is the signal that the
+// pack carries a translatable tool definition worth synthesizing a registry from;
+// without it, auto-creating would only produce placeholders and would ignore a
+// real covering registry, so the resolver stays in discover mode.
+func hasLiveSource(pack *prompt.Pack, cfg *Config) bool {
+	for _, name := range packToolNames(pack) {
+		if src := cfg.sourceTools[name]; src != nil && src.URL != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // registryNameFor returns the create-mode ToolRegistry name for a pack
@@ -167,13 +186,15 @@ func buildCreateRegistryHandlers(
 		}
 	}
 
+	secretName, _, credWarnings := collectToolCredentials(pack, cfg)
+
 	var sourceWired, placeholders, mockTools []string
 	for _, name := range packToolNames(pack) {
 		if configured[name] {
 			continue // a configured handler is authoritative; skip synthesis
 		}
 		src := cfg.sourceTools[name]
-		handlers = append(handlers, synthesizeHandler(pack.Tools[name], name, src))
+		handlers = append(handlers, synthesizeHandler(pack.Tools[name], name, src, secretName))
 		switch {
 		case src != nil && src.URL != "":
 			sourceWired = append(sourceWired, name)
@@ -185,6 +206,7 @@ func buildCreateRegistryHandlers(
 	}
 
 	warnings = append(warnings, createRegistryWarnings(sourceWired, placeholders, mockTools)...)
+	warnings = append(warnings, credWarnings...)
 	return handlers, warnings
 }
 
@@ -221,7 +243,9 @@ func createRegistryWarnings(sourceWired, placeholders, mockTools []string) []str
 // knows to set the real URL in Omnia. The method comes from the source too,
 // falling back to defaultHTTPMethod when none was declared. The pack tool's
 // schema is carried through.
-func synthesizeHandler(packTool *prompt.PackTool, toolName string, src *httpToolSource) map[string]interface{} {
+func synthesizeHandler(
+	packTool *prompt.PackTool, toolName string, src *httpToolSource, secretName string,
+) map[string]interface{} {
 	tool := map[string]interface{}{keyName: toolName}
 	if packTool != nil {
 		tool["description"] = packTool.Description
@@ -236,7 +260,32 @@ func synthesizeHandler(packTool *prompt.PackTool, toolName string, src *httpTool
 	if src != nil && src.TimeoutMs > 0 {
 		entry[keyTimeout] = fmt.Sprintf("%dms", src.TimeoutMs)
 	}
+	if auth := buildAuthStanza(src, secretName); auth != nil {
+		entry["auth"] = auth
+	}
 	return entry
+}
+
+// buildAuthStanza returns the handler-level auth block when the tool declares an
+// Authorization header sourced from an env var (headers_from_env
+// "Authorization=<ENV>"): a bearer credential resolved from secretName/<ENV>. The
+// secret holds the RAW token; the executor prepends "Bearer ". Returns nil when
+// the tool declares no Authorization header.
+func buildAuthStanza(src *httpToolSource, secretName string) map[string]interface{} {
+	if src == nil {
+		return nil
+	}
+	authEnv, _ := parseAuthEnv(src.HeadersFromEnv)
+	if authEnv == "" {
+		return nil
+	}
+	return map[string]interface{}{
+		keyType: authTypeBearer,
+		keySecretRef: map[string]interface{}{
+			keyName: secretName,
+			"key":   authEnv,
+		},
+	}
 }
 
 // buildSynthHTTPConfig maps a tool's arena HTTP source to an Omnia httpConfig

@@ -285,3 +285,37 @@ func TestCRDContract_ToolRegistry_EnrichedSynthesizedHandler(t *testing.T) {
 		t.Fatalf("enriched ToolRegistry body failed CRD validation: %v", errs)
 	}
 }
+
+// TestCRDContract_ToolRegistry_AuthStanzaHandler validates that a synthesized
+// handler carrying a bearer auth stanza (secretRef) is admissible against the real
+// ToolRegistry CRD schema — locking the auth-stanza shape to the schema.
+func TestCRDContract_ToolRegistry_AuthStanzaHandler(t *testing.T) {
+	pack := &prompt.Pack{
+		ID: "auth-pack", Version: "1.0.0",
+		Tools: map[string]*prompt.PackTool{
+			"github_rate_limit": {Name: "github_rate_limit", Description: "gh",
+				Parameters: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}},
+		},
+	}
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com", Workspace: "test-ws", APIToken: "test-token",
+		sourceTools: map[string]*httpToolSource{
+			"github_rate_limit": {Mode: "live", Method: "GET",
+				URL:                 "https://api.github.com/rate_limit",
+				HeadersFromEnv:      []string{"Authorization=GITHUB_TOKEN"},
+				ResponseBodyMapping: "{limit: resources.core.limit}"},
+		},
+	}
+	body, err := buildToolRegistryRequest(pack, cfg)
+	if err != nil {
+		t.Fatalf("build ToolRegistry: %v", err)
+	}
+	if !bytes.Contains(body, []byte(`"auth"`)) || !bytes.Contains(body, []byte(`"secretRef"`)) ||
+		!bytes.Contains(body, []byte("bearer")) {
+		t.Fatalf("auth stanza missing from emitted handler: %s", body)
+	}
+	v := loadCRDValidator(t, "toolregistries.yaml")
+	if errs := validateBody(t, v, "ToolRegistry", body); len(errs) != 0 {
+		t.Fatalf("auth-stanza ToolRegistry body failed CRD validation: %v", errs)
+	}
+}

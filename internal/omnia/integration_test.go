@@ -3,9 +3,11 @@
 package omnia
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -853,5 +855,160 @@ func TestIntegration_BindNonexistentRegistry(t *testing.T) {
 	if !hasWarningContaining(resp.Warnings, "no-such-registry-zzz") {
 		t.Logf("expected an advisory warning mentioning the missing registry "+
 			"(acceptable if wording differs); warnings = %v", resp.Warnings)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Live GitHub tool: auto-create + bearer auth, validated via the tool-test API
+// ----------------------------------------------------------------------------
+
+const ghToolName = "github_rate_limit"
+
+// buildGitHubToolPack returns a pack declaring a single tool, github_rate_limit,
+// with no args. Its live HTTP wiring is delivered separately via the ArenaConfig
+// (buildGitHubArenaConfig), so the adapter synthesizes the handler from source.
+func buildGitHubToolPack(packID string) string {
+	doc := map[string]any{
+		"id": packID, "name": packID, "version": "1.0.0",
+		"description": "github rate-limit tool e2e",
+		"template_engine": map[string]any{
+			"version": "v1", "syntax": "{{variable}}", "features": []string{"basic_substitution"},
+		},
+		"prompts": map[string]any{
+			"main": map[string]any{
+				"id": "main", "name": "main", "version": "1.0.0",
+				"description": "main prompt", "system_template": "You are a test agent.",
+			},
+		},
+		"tools": map[string]any{
+			ghToolName: map[string]any{
+				"name": ghToolName, "description": "Get the caller's GitHub API rate limit.",
+				"parameters": map[string]any{"type": "object", "properties": map[string]any{}},
+			},
+		},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		panic(fmt.Sprintf("buildGitHubToolPack: marshal failed: %v", err))
+	}
+	return string(b)
+}
+
+// buildGitHubArenaConfig returns an ArenaConfig JSON whose tool_specs carry the
+// github_rate_limit live HTTP block: a GET to api.github.com/rate_limit with the
+// Authorization header sourced from GITHUB_TOKEN and a response body_mapping that
+// projects the authenticated core limit — so the tool-test result is {limit: N}.
+func buildGitHubArenaConfig() string {
+	doc := map[string]any{
+		"tool_specs": map[string]any{
+			ghToolName: map[string]any{
+				"name": ghToolName, "description": "Get the caller's GitHub API rate limit.",
+				"mode": "live",
+				"http": map[string]any{
+					"url": "https://api.github.com/rate_limit", "method": "GET",
+					"timeout_ms":       10000,
+					"headers_from_env": []string{"Authorization=GITHUB_TOKEN"},
+					"response": map[string]any{
+						"body_mapping": "{limit: resources.core.limit, remaining: resources.core.remaining}",
+					},
+				},
+			},
+		},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		panic(fmt.Sprintf("buildGitHubArenaConfig: marshal failed: %v", err))
+	}
+	return string(b)
+}
+
+// toolTestResponse mirrors the dashboard tool-test API response (omnia
+// internal/tooltest TestResponse).
+type toolTestResponse struct {
+	Success bool            `json:"success"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   string          `json:"error,omitempty"`
+	Warning string          `json:"warning,omitempty"`
+}
+
+// testTool calls POST /api/workspaces/{ws}/toolregistries/{registry}/test with the
+// given handler name and empty args, using the workspace bearer token. It returns
+// the decoded response; a transport/HTTP error is fatal.
+func testTool(t *testing.T, env itConfig, registry, handlerName string) toolTestResponse {
+	t.Helper()
+	url := fmt.Sprintf("%s/api/workspaces/%s/toolregistries/%s/test",
+		strings.TrimRight(env.Endpoint, "/"), env.Workspace, registry)
+	body, _ := json.Marshal(map[string]any{"handlerName": handlerName, "arguments": map[string]any{}})
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("tool-test request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+env.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("tool-test call: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	var out toolTestResponse
+	_ = json.NewDecoder(resp.Body).Decode(&out) // a 422 body still decodes into success=false + error
+	return out
+}
+
+// TestIntegration_GitHubToolAuth deploys a pack whose only tool is a live GitHub
+// rate_limit call (auth via GITHUB_TOKEN), then proves — through the dashboard
+// tool-test endpoint (same executor as the runtime, no LLM) — that the token was
+// applied: an authenticated core rate limit is > 60, the anonymous ceiling. This
+// exercises auto-create-from-source, the enriched httpConfig, the bearer auth
+// stanza, and best-effort Secret provisioning end to end.
+func TestIntegration_GitHubToolAuth(t *testing.T) {
+	env := itEnv(t)
+	if os.Getenv("GITHUB_TOKEN") == "" {
+		t.Skip("set GITHUB_TOKEN to run the live GitHub tool-auth e2e")
+	}
+	p := NewProvider()
+	// A fixed pack id (OMNIA_IT_PACK_ID) makes the registry + credential Secret
+	// names deterministic so CI can pre-create the Secret as a fallback; falls back
+	// to a unique id for ad-hoc local runs.
+	packID := os.Getenv("OMNIA_IT_PACK_ID")
+	if packID == "" {
+		packID = uniquePackID(t)
+	}
+
+	cfg := buildDeployConfig(env, deployConfigOpts{}) // NO tools:/tool_registry_ref → auto-create
+	req := &deploy.PlanRequest{
+		PackJSON:     buildGitHubToolPack(packID),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		ArenaConfig:  buildGitHubArenaConfig(),
+	}
+	state, _ := applyAndCollect(t, p, req)
+	cleanupDeploy(t, p, env, cfg, state)
+
+	registry := sanitizeName(packID + "-tools")
+	handler := sanitizeName(ghToolName)
+
+	// Poll the tool-test until the registry is reconciled enough to execute the
+	// handler (or timeout), then assert the authenticated rate limit.
+	var resp toolTestResponse
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		resp = testTool(t, env, registry, handler)
+		if resp.Success || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if !resp.Success {
+		t.Fatalf("tool-test never succeeded: error=%q warning=%q", resp.Error, resp.Warning)
+	}
+	var got struct {
+		Limit int `json:"limit"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode tool result %s: %v", resp.Result, err)
+	}
+	if got.Limit <= 60 {
+		t.Errorf("rate limit = %d; want > 60 (auth was NOT applied — got the anonymous ceiling)", got.Limit)
 	}
 }

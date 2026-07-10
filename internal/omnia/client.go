@@ -31,8 +31,20 @@ type omniaClient interface {
 	// ValidateSkillSource checks that a SkillSource CRD exists and is synced.
 	ValidateSkillSource(ctx context.Context, name string) error
 
+	// GetWorkspace resolves a workspace's target namespace (spec.namespace.name),
+	// where tool-credential Secrets are created.
+	GetWorkspace(ctx context.Context, name string) (*WorkspaceInfo, error)
+
+	// CreateSecret creates/updates an Opaque credentials Secret in the namespace.
+	CreateSecret(ctx context.Context, namespace, name string, data map[string]string) error
+
 	// Health checks the API health endpoint.
 	Health(ctx context.Context) error
+}
+
+// WorkspaceInfo is a workspace reduced to what the adapter needs.
+type WorkspaceInfo struct {
+	Namespace string // spec.namespace.name — where tool Secrets are created
 }
 
 // omniaClientFactory creates an omniaClient for the given config.

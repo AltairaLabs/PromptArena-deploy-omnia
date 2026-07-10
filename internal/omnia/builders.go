@@ -23,6 +23,7 @@ const (
 	keyEnabled  = "enabled"
 
 	keyHTTPConfig = "httpConfig"
+	keySecretRef  = "secretRef"
 
 	// Facade composition keys/values (AgentRuntime spec.facades[], Omnia#1576).
 	keyFacades           = "facades"
@@ -309,7 +310,7 @@ func buildSharedTokenSpec(st *SharedTokenAuthConfig) map[string]interface{} {
 		return nil
 	}
 	out := map[string]interface{}{
-		"secretRef": map[string]interface{}{keyName: st.SecretRef},
+		keySecretRef: map[string]interface{}{keyName: st.SecretRef},
 	}
 	if st.TrustEndUserHeader {
 		out["trustEndUserHeader"] = true

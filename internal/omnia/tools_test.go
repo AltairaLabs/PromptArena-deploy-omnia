@@ -78,6 +78,42 @@ func TestResolveToolBinding_Discover_DynamicCandidate(t *testing.T) {
 	}
 }
 
+// --- Auto-create from live source ------------------------------------------
+
+func TestResolveToolBinding_AutoCreateFromLiveSource(t *testing.T) {
+	pack := resolverPack("do_it")
+	// A pack with a live tool source and NO explicit tools:/tool_registry_ref must
+	// auto-create <pack>-tools from the source (create-only), not fall to discover.
+	cfg := &Config{
+		Workspace:   "demo",
+		sourceTools: map[string]*httpToolSource{"do_it": {Mode: "live", Method: "POST", URL: "https://api/do"}},
+	}
+	sim := newSimulatedClient() // no existing registries
+	binding, _, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
+	if err != nil {
+		t.Fatalf("resolveToolBinding: %v", err)
+	}
+	if binding.Mode != toolModeCreate || binding.RegistryName != sanitizeName("test-pack-tools") {
+		t.Errorf("want create mode test-pack-tools, got %+v", binding)
+	}
+}
+
+func TestResolveToolBinding_NoLiveSource_KeepsDiscover(t *testing.T) {
+	pack := resolverPack("do_it")
+	// No sourceTools (no live URL) → must NOT auto-create; falls to discover and
+	// auto-binds the covering registry, preserving the prior behavior.
+	cfg := &Config{Workspace: "demo"}
+	sim := newSimulatedClient()
+	sim.toolRegistries = []ToolRegistrySummary{{Name: "covering", Tools: []RegistryTool{{Name: "do_it"}}}}
+	binding, _, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
+	if err != nil {
+		t.Fatalf("resolveToolBinding: %v", err)
+	}
+	if binding.Mode != toolModeBind || binding.RegistryName != "covering" {
+		t.Errorf("no-live-source must keep discover/auto-bind, got %+v", binding)
+	}
+}
+
 // --- Create mode -----------------------------------------------------------
 
 // seedToolRegistry stores a <pack>-tools ToolRegistry whose spec.handlers are
@@ -478,7 +514,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	packTool := &prompt.PackTool{Name: "list_user_exercises", Description: "list"}
 
 	// Source carries a real URL + method → both wired straight through.
-	h := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "GET", URL: "https://x/list"})
+	h := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "GET", URL: "https://x/list"}, "")
 	hc := h[keyHTTPConfig].(map[string]interface{})
 	if hc[keyMethod] != "GET" {
 		t.Errorf("method with source GET = %v, want GET", hc[keyMethod])
@@ -488,7 +524,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	}
 
 	// Empty source → placeholder URL + POST default.
-	def := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{})
+	def := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{}, "")
 	dc := def[keyHTTPConfig].(map[string]interface{})
 	if dc[keyMethod] != defaultHTTPMethod {
 		t.Errorf("empty source method must fall back to %q, got %v", defaultHTTPMethod, dc[keyMethod])
@@ -498,7 +534,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	}
 
 	// URL empty but method set → placeholder URL with that method.
-	mo := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "DELETE"})
+	mo := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "DELETE"}, "")
 	mc := mo[keyHTTPConfig].(map[string]interface{})
 	if mc[keyMethod] != "DELETE" {
 		t.Errorf("method-only source must keep its method, got %v", mc[keyMethod])
@@ -582,7 +618,7 @@ func TestSynthesizeHandler_RichHTTPConfig(t *testing.T) {
 		Redact:              []string{"user_id"},
 		ResponseBodyMapping: "{id: id, name: name}",
 	}
-	h := synthesizeHandler(nil, "create_workout", src)
+	h := synthesizeHandler(nil, "create_workout", src, "")
 	cfg, _ := h[keyHTTPConfig].(map[string]interface{})
 	if cfg["responseMapping"] != "{id: id, name: name}" {
 		t.Errorf("responseMapping = %v", cfg["responseMapping"])
@@ -608,7 +644,7 @@ func TestSynthesizeHandler_GETQueryParamsInferred(t *testing.T) {
 		},
 	}
 	src := &httpToolSource{Mode: "live", Method: "GET", URL: "https://api.splitpantz.com/api/v1/exercises"}
-	h := synthesizeHandler(packTool, "list_user_exercises", src)
+	h := synthesizeHandler(packTool, "list_user_exercises", src, "")
 	cfg := h[keyHTTPConfig].(map[string]interface{})
 	qp, _ := cfg[keyQueryParams].([]string)
 	if len(qp) != 1 || qp[0] != "search" {
@@ -620,7 +656,7 @@ func TestSynthesizeHandler_POSTNoQueryParams(t *testing.T) {
 	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
 		"properties": map[string]interface{}{"name": map[string]interface{}{"type": "string"}}}}
 	src := &httpToolSource{Method: "POST", URL: "https://x/y"}
-	h := synthesizeHandler(packTool, "create_x", src)
+	h := synthesizeHandler(packTool, "create_x", src, "")
 	if _, ok := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams]; ok {
 		t.Errorf("POST must not infer queryParams")
 	}
@@ -630,7 +666,7 @@ func TestSynthesizeHandler_GETExplicitQueryParamsWin(t *testing.T) {
 	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
 		"properties": map[string]interface{}{"a": map[string]interface{}{}, "b": map[string]interface{}{}}}}
 	src := &httpToolSource{Method: "GET", URL: "https://x", QueryParams: []string{"a"}}
-	h := synthesizeHandler(packTool, "t", src)
+	h := synthesizeHandler(packTool, "t", src, "")
 	qp := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams].([]string)
 	if len(qp) != 1 || qp[0] != "a" {
 		t.Errorf("explicit queryParams must win, got %v", qp)
@@ -645,7 +681,7 @@ func TestSynthesizeHandler_RequestMappings(t *testing.T) {
 		HeaderParams:       map[string]string{"X-Tenant": "tenant_id"},
 		StaticQuery:        map[string]string{"v": "2"},
 	}
-	cfg := synthesizeHandler(nil, "create_x", src)[keyHTTPConfig].(map[string]interface{})
+	cfg := synthesizeHandler(nil, "create_x", src, "")[keyHTTPConfig].(map[string]interface{})
 	if cfg["bodyMapping"] != "{payload: input}" {
 		t.Errorf("bodyMapping = %v", cfg["bodyMapping"])
 	}
@@ -656,6 +692,28 @@ func TestSynthesizeHandler_RequestMappings(t *testing.T) {
 	sq, _ := cfg["staticQuery"].(map[string]string)
 	if sq["v"] != "2" {
 		t.Errorf("staticQuery = %v", cfg["staticQuery"])
+	}
+}
+
+func TestSynthesizeHandler_EmitsBearerAuthStanza(t *testing.T) {
+	src := &httpToolSource{Mode: "live", Method: "GET", URL: "https://api.github.com/rate_limit",
+		HeadersFromEnv: []string{"Authorization=GITHUB_TOKEN"}}
+	h := synthesizeHandler(nil, "github_rate_limit", src, "p-tool-credentials")
+	auth, ok := h["auth"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("no auth stanza: %v", h)
+	}
+	if auth["type"] != "bearer" {
+		t.Errorf("auth type = %v, want bearer", auth["type"])
+	}
+	ref, _ := auth["secretRef"].(map[string]interface{})
+	if ref["name"] != "p-tool-credentials" || ref["key"] != "GITHUB_TOKEN" {
+		t.Errorf("secretRef = %v", ref)
+	}
+	// A tool with no Authorization header emits no auth stanza.
+	h2 := synthesizeHandler(nil, "no_auth", &httpToolSource{URL: "https://x"}, "p-tool-credentials")
+	if _, has := h2["auth"]; has {
+		t.Errorf("no-auth tool must not emit an auth stanza: %v", h2)
 	}
 }
 

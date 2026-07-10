@@ -126,6 +126,9 @@ func executeApplyPhases(ctx context.Context, ac *applyContext) ([]ResourceState,
 	// one is operator-owned and never updated (unlike the other resource types).
 	// Bind/none modes reference an existing registry (or none) and create nothing.
 	if ac.binding.Mode == toolModeCreate {
+		// Best-effort: provision the Secret the synthesized handlers' auth stanzas
+		// reference (from env). Advisory only — a failure warns and never blocks.
+		reportCredentialProvisioning(ctx, ac)
 		res, err = applyToolRegistryCreate(ctx, ac)
 		resources = append(resources, res...)
 		applyErr = combineErrors(applyErr, err)
