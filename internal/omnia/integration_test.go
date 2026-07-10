@@ -967,7 +967,13 @@ func TestIntegration_GitHubToolAuth(t *testing.T) {
 		t.Skip("set GITHUB_TOKEN to run the live GitHub tool-auth e2e")
 	}
 	p := NewProvider()
-	packID := uniquePackID(t)
+	// A fixed pack id (OMNIA_IT_PACK_ID) makes the registry + credential Secret
+	// names deterministic so CI can pre-create the Secret as a fallback; falls back
+	// to a unique id for ad-hoc local runs.
+	packID := os.Getenv("OMNIA_IT_PACK_ID")
+	if packID == "" {
+		packID = uniquePackID(t)
+	}
 
 	cfg := buildDeployConfig(env, deployConfigOpts{}) // NO tools:/tool_registry_ref → auto-create
 	req := &deploy.PlanRequest{

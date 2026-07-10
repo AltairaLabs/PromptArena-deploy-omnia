@@ -155,6 +155,32 @@ jobs:
             GOWORK=off go test -tags=integration -run TestIntegration_E2EDeployAndKeep \
               ./internal/omnia/ -count=1 -v
 
+      - name: Deploy GitHub tool + validate bearer auth via tool-test
+        # Deploys a pack whose only tool is a live GitHub rate_limit call (auth from
+        # GITHUB_TOKEN), then asserts via the dashboard tool-test API that the token
+        # was applied (authenticated core limit > 60). This exercises auto-create-
+        # from-source, the enriched httpConfig, the bearer auth stanza, and Secret
+        # provisioning end to end — the customer's #1 and #3 lessons.
+        env:
+          OMNIA_IT_ENDPOINT: "http://localhost:3000"
+          OMNIA_IT_TOKEN: "anonymous"
+          OMNIA_IT_WORKSPACE: ${{ env.WORKSPACE }}
+          OMNIA_IT_PROVIDER: ${{ env.PROVIDER }}
+          OMNIA_IT_PACK_ID: "e2e-ghtool"
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Fallback: pre-create the credential Secret the adapter's auth stanza
+          # references, in case the adapter's POST /api/secrets lacks CREDENTIALS_*
+          # perms for the anonymous token. The name MUST equal
+          # credentialSecretName(pack id) = "<pack-id>-tool-credentials", and the key
+          # MUST equal the env var the tool declares (GITHUB_TOKEN), holding the RAW
+          # token (the executor prepends "Bearer "). Idempotent apply.
+          kubectl -n "${AGENTS_NS}" create secret generic e2e-ghtool-tool-credentials \
+            --from-literal=GITHUB_TOKEN="${{ github.token }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          GOWORK=off go test -tags=integration -run TestIntegration_GitHubToolAuth \
+            ./internal/omnia/ -count=1 -v
+
       - name: Wait for agent Deployments to be Available
         run: |
           # The operator names each agent's Deployment after the AgentRuntime.
