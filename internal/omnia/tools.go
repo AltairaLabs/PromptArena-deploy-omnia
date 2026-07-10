@@ -82,11 +82,29 @@ func resolveToolBinding(
 		return resolveCreateMode(ctx, p, pack, cfg)
 	case cfg.ToolRegistryRef != "":
 		return resolveBindMode(ctx, p, pack, cfg, packTools)
+	case len(packTools) > 0 && hasLiveSource(pack, cfg):
+		// The pack carries translatable live tools and no explicit binding: create
+		// <pack-id>-tools from the arena source (create-only, like the explicit path).
+		return resolveCreateMode(ctx, p, pack, cfg)
 	case len(packTools) > 0:
 		return resolveDiscoverMode(ctx, p, cfg, packTools)
 	default:
 		return ToolBinding{Mode: toolModeNone}, nil, nil
 	}
+}
+
+// hasLiveSource reports whether at least one of the pack's tools has a live HTTP
+// source (a non-empty URL parsed from req.ArenaConfig). It is the signal that the
+// pack carries a translatable tool definition worth synthesizing a registry from;
+// without it, auto-creating would only produce placeholders and would ignore a
+// real covering registry, so the resolver stays in discover mode.
+func hasLiveSource(pack *prompt.Pack, cfg *Config) bool {
+	for _, name := range packToolNames(pack) {
+		if src := cfg.sourceTools[name]; src != nil && src.URL != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // registryNameFor returns the create-mode ToolRegistry name for a pack

@@ -78,6 +78,42 @@ func TestResolveToolBinding_Discover_DynamicCandidate(t *testing.T) {
 	}
 }
 
+// --- Auto-create from live source ------------------------------------------
+
+func TestResolveToolBinding_AutoCreateFromLiveSource(t *testing.T) {
+	pack := resolverPack("do_it")
+	// A pack with a live tool source and NO explicit tools:/tool_registry_ref must
+	// auto-create <pack>-tools from the source (create-only), not fall to discover.
+	cfg := &Config{
+		Workspace:   "demo",
+		sourceTools: map[string]*httpToolSource{"do_it": {Mode: "live", Method: "POST", URL: "https://api/do"}},
+	}
+	sim := newSimulatedClient() // no existing registries
+	binding, _, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
+	if err != nil {
+		t.Fatalf("resolveToolBinding: %v", err)
+	}
+	if binding.Mode != toolModeCreate || binding.RegistryName != sanitizeName("test-pack-tools") {
+		t.Errorf("want create mode test-pack-tools, got %+v", binding)
+	}
+}
+
+func TestResolveToolBinding_NoLiveSource_KeepsDiscover(t *testing.T) {
+	pack := resolverPack("do_it")
+	// No sourceTools (no live URL) → must NOT auto-create; falls to discover and
+	// auto-binds the covering registry, preserving the prior behavior.
+	cfg := &Config{Workspace: "demo"}
+	sim := newSimulatedClient()
+	sim.toolRegistries = []ToolRegistrySummary{{Name: "covering", Tools: []RegistryTool{{Name: "do_it"}}}}
+	binding, _, err := resolveToolBinding(context.Background(), resolverProvider(sim), pack, cfg)
+	if err != nil {
+		t.Fatalf("resolveToolBinding: %v", err)
+	}
+	if binding.Mode != toolModeBind || binding.RegistryName != "covering" {
+		t.Errorf("no-live-source must keep discover/auto-bind, got %+v", binding)
+	}
+}
+
 // --- Create mode -----------------------------------------------------------
 
 // seedToolRegistry stores a <pack>-tools ToolRegistry whose spec.handlers are
