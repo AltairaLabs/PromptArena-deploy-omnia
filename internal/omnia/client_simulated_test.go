@@ -65,6 +65,26 @@ type simulatedClient struct {
 	// createSecretErr forces CreateSecret to fail (to exercise the degrade path).
 	createdSecrets  map[string]map[string]string
 	createSecretErr error
+
+	// intentEnabled makes the simulated server serve the deploy-intent API. It
+	// defaults to FALSE — an Omnia predating the API — so a test that says nothing
+	// about deploy-intent exercises the per-resource path exactly as before:
+	// GetDeployProfile advertises no versions and PostDeployment answers 404.
+	intentEnabled bool
+
+	// deployProfileErr forces GetDeployProfile to fail (transport/permission).
+	deployProfileErr error
+
+	// deployResult, when set, is returned by PostDeployment verbatim; otherwise an
+	// intent-enabled server derives a success result from the submitted intent
+	// (mirroring the server's object naming) and seeds the objects so reconcile
+	// polls find them. deployErr forces PostDeployment to fail — set it to a typed
+	// 404/405/400 to exercise the fallback, or a 403/500 to prove it does NOT.
+	deployResult *DeployResult
+	deployErr    error
+
+	// postedIntents records every DeployIntent body submitted, in order.
+	postedIntents []json.RawMessage
 }
 
 // newSimulatedClient creates a simulatedClient with default healthy state.
@@ -105,6 +125,106 @@ func (s *simulatedClient) CreateSecret(_ context.Context, namespace, name string
 
 func simKey(resType, name string) string {
 	return resType + "/" + name
+}
+
+//nolint:revive // interface implementation
+func (s *simulatedClient) GetDeployProfile(_ context.Context) (*DeployProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deployProfileErr != nil {
+		return nil, s.deployProfileErr
+	}
+	if !s.intentEnabled {
+		return &DeployProfile{}, nil
+	}
+	return &DeployProfile{SupportedDeployIntentVersions: []string{intentAPIVersionV1}}, nil
+}
+
+// simulatedIntentNotFound is the answer an Omnia predating the deploy-intent API
+// gives: the route simply is not there.
+func simulatedIntentNotFound() error {
+	return &HTTPError{
+		StatusCode: httpStatusNotFound,
+		Body:       "Cannot POST /api/workspaces/test-ws/deployments",
+		Category:   ErrCategoryNotFound,
+	}
+}
+
+// PostDeployment simulates the server-owned deploy-intent endpoint: it records
+// the submitted intent, then either replays an injected result/error or derives
+// a success result the way the real server would — naming the PromptPack and its
+// content ConfigMap per-version, and the remaining objects as the intent named
+// them. Derived objects are seeded into the resource map so the adapter's
+// post-apply reconcile polls find them.
+func (s *simulatedClient) PostDeployment(
+	_ context.Context, intent json.RawMessage,
+) (*DeployResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.postedIntents = append(s.postedIntents, intent)
+	if s.deployErr != nil {
+		return nil, s.deployErr
+	}
+	if s.deployResult != nil {
+		return s.deployResult, nil
+	}
+	if !s.intentEnabled {
+		return nil, simulatedIntentNotFound()
+	}
+
+	var parsed deployIntent
+	if err := json.Unmarshal(intent, &parsed); err != nil {
+		return nil, fmt.Errorf("simulated deploy: invalid intent body: %w", err)
+	}
+	return &DeployResult{Succeeded: true, Results: s.simulateIntentApply(parsed)}, nil
+}
+
+// simulateIntentApply derives the per-resource outcome for an intent and seeds
+// the corresponding resources. The caller holds s.mu.
+func (s *simulatedClient) simulateIntentApply(intent deployIntent) []DeployResourceResult {
+	packObject := promptPackObjectName(intent.Pack.Name, intent.Pack.Version)
+
+	results := []DeployResourceResult{
+		{Kind: "ConfigMap", Name: packObject + "-content", Action: intentActionCreated},
+		{Kind: "PromptPack", Name: packObject, Action: intentActionCreated},
+	}
+	s.seedResource(ResTypePromptPack, packObject)
+
+	if intent.Tools != nil && len(intent.Tools.Handlers) > 0 {
+		name := toolRegistryObjectName(intent.Pack.Name)
+		results = append(results, DeployResourceResult{
+			Kind: "ToolRegistry", Name: name, Action: intentActionCreated,
+		})
+		s.seedResource(ResTypeToolRegistry, name)
+	}
+	if intent.Policy != nil && len(intent.Policy.ToolBlocklist) > 0 {
+		name := intent.Pack.Name + "-policy"
+		results = append(results, DeployResourceResult{
+			Kind: "AgentPolicy", Name: name, Action: intentActionCreated,
+		})
+		s.seedResource(ResTypeAgentPolicy, name)
+	}
+	for _, a := range intent.Agents {
+		results = append(results, DeployResourceResult{
+			Kind: "AgentRuntime", Name: a.Name, Action: intentActionCreated,
+		})
+		s.seedResource(ResTypeAgentRuntime, a.Name)
+	}
+	return results
+}
+
+// seedResource records an object the simulated server created. The caller holds
+// s.mu. An existing entry is left alone (the server reports it unchanged).
+func (s *simulatedClient) seedResource(resType, name string) {
+	key := simKey(resType, name)
+	if _, exists := s.resources[key]; exists {
+		return
+	}
+	s.resources[key] = &ResourceResponse{
+		Kind:     resType,
+		Metadata: ResourceMetadata{Name: name, UID: "uid-" + name, ResourceVersion: "1"},
+	}
 }
 
 func (s *simulatedClient) injectedError(resType, name string) error {

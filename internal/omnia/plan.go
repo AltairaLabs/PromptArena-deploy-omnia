@@ -73,7 +73,11 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 		return nil, perr
 	}
 
-	desired := generateDesiredResources(pack, cfg, binding)
+	// Learn which path Apply will take so the preview names the objects that will
+	// actually land — the deploy-intent API names PromptPacks per-version.
+	intentPath, pathWarnings := p.planDeployPath(ctx, pack, cfg, binding)
+
+	desired := generateDesiredResources(pack, cfg, binding, intentPath)
 	changes := diffResources(desired, prior)
 	summary := buildSummary(changes)
 
@@ -81,6 +85,7 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	warnings = append(warnings, providerPhaseWarnings...)
 	warnings = append(warnings, providerWarnings(cfg.Providers)...)
 	warnings = append(warnings, toolWarnings...)
+	warnings = append(warnings, pathWarnings...)
 
 	return &deploy.PlanResponse{
 		Changes:  changes,
@@ -143,16 +148,49 @@ func dryRunToolBinding(pack *prompt.Pack, cfg *Config) ToolBinding {
 	}
 }
 
+// planDeployPath reports whether Apply will use the server-owned deploy-intent
+// API, plus the advisories explaining that choice. The decision is made the same
+// way Apply makes it: the config must be fully expressible in intent v1 (checked
+// locally, for free) AND the server must advertise the contract.
+//
+// Dry-run never contacts the API, so it previews the per-resource path — the same
+// way it skips provider and skill validation.
+func (p *Provider) planDeployPath(
+	ctx context.Context, pack *prompt.Pack, cfg *Config, binding ToolBinding,
+) (intentPath bool, warnings []string) {
+	if cfg.DryRun {
+		return false, nil
+	}
+
+	reasons := preflightIntentV1(pack, cfg, binding)
+	if len(reasons) > 0 {
+		return false, []string{fmt.Sprintf(
+			"deploying via the per-resource path: %s. These settings cannot be expressed in the "+
+				"deploy-intent contract (%s), so they would be dropped by the server-owned path",
+			strings.Join(reasons, "; "), intentAPIVersionV1)}
+	}
+
+	if !p.intentSupported(ctx, cfg) {
+		return false, nil
+	}
+	return true, []string{fmt.Sprintf(
+		"deploying via the deploy-intent API (%s): Omnia builds the resources server-side and "+
+			"names the PromptPack per-version, so each pack version is its own immutable object",
+		intentAPIVersionV1)}
+}
+
 // generateDesiredResources builds the list of desired Omnia resources from the
-// pack, deploy config, and the resolved tool binding.
+// pack, deploy config, and the resolved tool binding. intentPath selects the
+// PromptPack naming Apply will use: the deploy-intent API derives an immutable
+// per-version object name, while the per-resource path names it after the pack.
 func generateDesiredResources(
-	pack *prompt.Pack, cfg *Config, binding ToolBinding,
+	pack *prompt.Pack, cfg *Config, binding ToolBinding, intentPath bool,
 ) []deploy.ResourceChange {
-	// Step 0: PromptPack CRD (dashboard folds pack content into a managed ConfigMap).
+	// Step 0: PromptPack CRD (the server folds pack content into a managed ConfigMap).
 	desired := []deploy.ResourceChange{
 		{
 			Type:   ResTypePromptPack,
-			Name:   sanitizeName(pack.ID),
+			Name:   plannedPackObjectName(pack, intentPath),
 			Action: deploy.ActionCreate,
 			Detail: fmt.Sprintf("Create PromptPack for %s", pack.ID),
 		},
@@ -193,6 +231,16 @@ func generateDesiredResources(
 	}
 
 	return desired
+}
+
+// plannedPackObjectName is the PromptPack object name the selected apply path
+// will create. The deploy-intent server derives an immutable per-version name;
+// the per-resource path names the object after the pack itself.
+func plannedPackObjectName(pack *prompt.Pack, intentPath bool) string {
+	if intentPath {
+		return promptPackObjectName(sanitizeName(pack.ID), pack.Version)
+	}
+	return sanitizeName(pack.ID)
 }
 
 // diffResources compares desired resources against prior state.

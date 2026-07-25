@@ -540,8 +540,10 @@ func addIfPresent(entry map[string]interface{}, key string, m map[string]interfa
 	}
 }
 
-// buildAgentPolicyRequest builds the JSON body for creating/updating an AgentPolicy CRD.
-func buildAgentPolicyRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, error) {
+// collectToolBlocklist gathers every prompt's tool blocklist into one sorted,
+// deduplicated list. Shared by the passthrough AgentPolicy builder and the
+// deploy-intent policy block so both paths deny exactly the same tools.
+func collectToolBlocklist(pack *prompt.Pack) []string {
 	var blocklist []string
 	for _, p := range pack.Prompts {
 		if p != nil && p.ToolPolicy != nil && len(p.ToolPolicy.Blocklist) > 0 {
@@ -549,8 +551,12 @@ func buildAgentPolicyRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, e
 		}
 	}
 	sort.Strings(blocklist)
-	// Deduplicate.
-	blocklist = dedup(blocklist)
+	return dedup(blocklist)
+}
+
+// buildAgentPolicyRequest builds the JSON body for creating/updating an AgentPolicy CRD.
+func buildAgentPolicyRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, error) {
+	blocklist := collectToolBlocklist(pack)
 
 	spec := map[string]interface{}{}
 	if len(blocklist) > 0 {
