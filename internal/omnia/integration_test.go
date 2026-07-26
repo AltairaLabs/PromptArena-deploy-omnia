@@ -590,16 +590,25 @@ func TestIntegration_Lifecycle(t *testing.T) {
 	// event stream, for the registry.
 	assertToolRegistryUnchanged(t, state2)
 
-	// PromptPack and AgentRuntime DO emit resource events, with status updated.
-	for _, rt := range []string{ResTypePromptPack, ResTypeAgentRuntime} {
-		r, ok := reapplied[rt]
-		if !ok {
-			t.Errorf("Apply #2: no resource event for %q", rt)
-			continue
-		}
-		if r.Status != ResStatusUpdated {
-			t.Errorf("Apply #2: %s status = %q, want %q", rt, r.Status, ResStatusUpdated)
-		}
+	// The AgentRuntime is always upserted, so a re-apply updates it on either path.
+	if r, ok := reapplied[ResTypeAgentRuntime]; !ok {
+		t.Errorf("Apply #2: no resource event for %q", ResTypeAgentRuntime)
+	} else if r.Status != ResStatusUpdated {
+		t.Errorf("Apply #2: %s status = %q, want %q",
+			ResTypeAgentRuntime, r.Status, ResStatusUpdated)
+	}
+
+	// The PromptPack's re-apply status is path-dependent, and BOTH answers are
+	// correct — which one you get says which path the server served:
+	//   - deploy-intent API: pack objects are immutable and named per-version, so
+	//     re-applying the same version rewrites nothing and reports "unchanged";
+	//   - per-resource path: the pack object is named after the pack and is
+	//     rewritten in place, reporting "updated".
+	if r, ok := reapplied[ResTypePromptPack]; !ok {
+		t.Errorf("Apply #2: no resource event for %q", ResTypePromptPack)
+	} else if r.Status != ResStatusUpdated && r.Status != ResStatusUnchanged {
+		t.Errorf("Apply #2: %s status = %q, want %q (deploy-intent) or %q (per-resource)",
+			ResTypePromptPack, r.Status, ResStatusUnchanged, ResStatusUpdated)
 	}
 
 	// --- Destroy ---
