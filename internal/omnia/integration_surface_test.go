@@ -260,7 +260,9 @@ func TestIntegration_SkillsBindToPromptPack(t *testing.T) {
 	packID := uniquePackID(t)
 	cfg := buildDeployConfig(env, deployConfigOpts{
 		skills: []map[string]any{
-			{"source": source, "mountAs": "it-mounted"},
+			// include narrows which skills mount; it is a separate passthrough from
+			// the bare source reference and the mountAs rename.
+			{"source": source, "mountAs": "it-mounted", "include": []string{"pdf", "xlsx"}},
 		},
 		skillsConfig: map[string]any{"maxActive": 2, "selector": "tag"},
 	})
@@ -284,6 +286,11 @@ func TestIntegration_SkillsBindToPromptPack(t *testing.T) {
 	}
 	if got, _ := binding["mountAs"].(string); got != "it-mounted" {
 		t.Errorf("skills[0].mountAs = %q, want it-mounted", got)
+	}
+	include, _ := binding["include"].([]any)
+	if len(include) != 2 {
+		t.Errorf("skills[0].include = %v, want the 2 configured entries — a dropped "+
+			"include silently mounts every skill in the source", binding["include"])
 	}
 
 	sc, _ := spec["skillsConfig"].(map[string]any)
@@ -1473,4 +1480,111 @@ func TestIntegration_ViewerCannotDeploy(t *testing.T) {
 			"fell back to the per-resource path — a fallback must never route around authz")
 	}
 	t.Logf("viewer deploy correctly refused: %v", err)
+}
+
+// TestIntegration_NoAccessWorkspaceIsRefused covers the access-denied path that a
+// dashboard in anonymous auth mode makes untestable via a bogus token: a
+// workspace the calling identity holds NO role in at all.
+//
+// This is distinct from the viewer case — there the identity has a role, just an
+// insufficient one. Here it has none, which is the shape a genuinely invalid or
+// foreign token produces. Plan must fail cleanly rather than mislabelling the
+// refusal as a missing resource.
+//
+// Set OMNIA_IT_NOACCESS_WORKSPACE to a workspace the token cannot read.
+func TestIntegration_NoAccessWorkspaceIsRefused(t *testing.T) {
+	env := itEnv(t)
+	workspace := os.Getenv("OMNIA_IT_NOACCESS_WORKSPACE")
+	if workspace == "" {
+		t.Skip("set OMNIA_IT_NOACCESS_WORKSPACE to a workspace the token has no role in")
+	}
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{workspaceOverride: workspace})
+
+	_, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON:     buildPack(packID),
+		DeployConfig: cfg,
+		Environment:  workspace,
+	})
+	if err == nil {
+		t.Fatal("Plan succeeded against a workspace the token has no access to")
+	}
+
+	// An access refusal must not be dressed up as a missing resource — that sends
+	// the operator hunting for a provider that exists and is readable.
+	if strings.Contains(strings.ToLower(err.Error()), "not found in workspace") {
+		t.Errorf("access denial mislabelled as a missing resource: %v", err)
+	}
+	t.Logf("no-access workspace correctly refused: %v", err)
+}
+
+// TestIntegration_MultiRoleProvidersReachAgent binds two providers in different
+// roles — the default llm plus an embedding provider — and asserts both arrive
+// as distinct NamedProviderRef entries with their roles intact.
+//
+// Roles matter at runtime: the agent resolves its LLM by role, and a binding
+// whose role was dropped or defaulted to llm would give the agent two LLM
+// providers and no embedder. The deploy profile only advertises llm-role
+// providers, so a non-llm binding is exactly the case least likely to be
+// exercised by hand.
+//
+// Set OMNIA_IT_EMBED_PROVIDER to a non-llm Provider in the workspace.
+func TestIntegration_MultiRoleProvidersReachAgent(t *testing.T) {
+	env := itEnv(t)
+	embed := os.Getenv("OMNIA_IT_EMBED_PROVIDER")
+	if embed == "" {
+		t.Skip("set OMNIA_IT_EMBED_PROVIDER to an embedding-role Provider in the workspace")
+	}
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{
+		extraProviders: []map[string]any{
+			{"name": "embedder", "ref": embed, "role": "embedding"},
+		},
+	})
+
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPack(packID),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	agentName := stateResourceName(t, state, ResTypeAgentRuntime)
+	spec := specOf(t, itClient(t, cfg), ResTypeAgentRuntime, agentName)
+
+	providers, _ := spec["providers"].([]any)
+	byName := map[string]map[string]any{}
+	for _, entry := range providers {
+		e, _ := entry.(map[string]any)
+		if name, _ := e["name"].(string); name != "" {
+			byName[name] = e
+		}
+	}
+	if len(byName) != 2 {
+		t.Fatalf("spec.providers = %s, want both the llm and embedding bindings",
+			jsonOf(t, spec["providers"]))
+	}
+
+	llm, ok := byName[itProviderDefault]
+	if !ok {
+		t.Fatalf("no %q provider binding; got %v", itProviderDefault, byName)
+	}
+	if got, _ := llm["role"].(string); got != itRoleLLM {
+		t.Errorf("default binding role = %q, want %q", got, itRoleLLM)
+	}
+
+	emb, ok := byName["embedder"]
+	if !ok {
+		t.Fatalf("the embedding binding was dropped; got %v", byName)
+	}
+	if got, _ := emb["role"].(string); got != "embedding" {
+		t.Errorf("embedder role = %q, want embedding — a role silently coerced to llm "+
+			"gives the agent two LLMs and no embedder", got)
+	}
+	if got := nestedString(emb, "providerRef", "name"); got != embed {
+		t.Errorf("embedder providerRef.name = %q, want %q", got, embed)
+	}
 }
