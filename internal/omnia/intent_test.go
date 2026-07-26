@@ -486,37 +486,36 @@ func TestPreflightIntentV1(t *testing.T) {
 			want: "runtime.autoscaling",
 		},
 		{
-			name: "shared token",
+			// Omnia removed sharedToken, so the per-resource path cannot deliver it
+			// either — diverting would buy an identical silent drop. It is migrated
+			// onto client keys and reported by removedFieldWarnings instead.
+			name: "shared token does not divert",
 			pack: plainPack, binding: boundRegistry,
 			cfg: &Config{ExternalAuth: &ExternalAuthConfig{
 				SharedToken: &SharedTokenAuthConfig{SecretRef: "s"},
 			}},
-			want: "externalAuth.sharedToken",
 		},
 		{
-			name: "oidc role claim",
+			name: "oidc role claim does not divert",
 			pack: plainPack, binding: boundRegistry,
 			cfg: &Config{ExternalAuth: &ExternalAuthConfig{OIDC: &OIDCAuthConfig{
 				Issuer: "i", Audience: "a",
 				ClaimMapping: &OIDCClaimMappingConfig{Role: "roles"},
 			}}},
-			want: "oidc.claimMapping.role",
 		},
 		{
-			name: "edge trust role header",
+			name: "edge trust role header does not divert",
 			pack: plainPack, binding: boundRegistry,
 			cfg: &Config{ExternalAuth: &ExternalAuthConfig{EdgeTrust: &EdgeTrustAuthConfig{
 				HeaderMapping: &EdgeTrustHeaderMappingConfig{Role: "x-role"},
 			}}},
-			want: "edgeTrust.headerMapping.role",
 		},
 		{
-			name: "handler selector",
+			name: "handler selector does not divert",
 			pack: plainPack, binding: boundRegistry,
 			cfg: &Config{Tools: []ToolHandler{
 				{Name: "search", Selector: map[string]interface{}{"matchLabels": "x"}},
 			}},
-			want: "selector",
 		},
 		{
 			name: "blocklist without a registry",

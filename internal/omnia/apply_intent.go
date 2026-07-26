@@ -56,6 +56,8 @@ var intentActionToStatus = map[string]string{
 // reported as a failure, never retried down the other path, so no resource is
 // ever written twice.
 func executeApply(ctx context.Context, ac *applyContext) ([]ResourceState, error) {
+	reportRemovedFields(ac)
+
 	if reasons := preflightIntentV1(ac.pack, ac.cfg, ac.binding); len(reasons) > 0 {
 		reportIntentSkipped(ac, reasons)
 		return executeApplyPhases(ctx, ac)
@@ -70,13 +72,23 @@ func executeApply(ctx context.Context, ac *applyContext) ([]ResourceState, error
 
 // reportIntentSkipped tells the user why this deploy uses the CRD passthrough
 // path even though the server may support the deploy-intent API. Each reason
-// names a config field the v1 contract cannot carry — deploying it through the
-// intent API would silently drop it.
+// names a config field the v1 contract cannot carry but the per-resource path
+// still delivers — the only case where diverting is worth anything.
 func reportIntentSkipped(ac *applyContext, reasons []string) {
 	_ = ac.reporter.Progress(fmt.Sprintf(
 		"Using the per-resource deploy path — %d config setting(s) cannot be expressed in the "+
 			"deploy-intent contract: %s", len(reasons), strings.Join(reasons, "; ")),
 		intentPctSubmit)
+}
+
+// reportRemovedFields surfaces, at apply time, every config setting naming a
+// field Omnia has removed. These are undeliverable by either deploy path, so
+// without this the deploy would report success while the setting quietly did
+// nothing. Advisory only — it never blocks the deploy.
+func reportRemovedFields(ac *applyContext) {
+	for _, warning := range removedFieldWarnings(ac.cfg) {
+		_ = ac.reporter.Progress(warning, intentPctSubmit)
+	}
 }
 
 // applyViaIntent submits the whole deploy as one DeployIntent and maps the

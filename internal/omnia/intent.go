@@ -382,26 +382,43 @@ func intentFacades(ea *ExternalAuthConfig) []facadeIntent {
 
 // intentExternalAuth maps the auth validators the intent can express. The
 // adapter's apiKeys block is the same concept as the intent's clientKeys.
-// sharedToken has no intent equivalent — preflightIntentV1 diverts a config
-// using it to the passthrough path, so it is never silently dropped here.
+//
+// sharedToken was removed by Omnia (#1775) with client keys named as its
+// replacement, so a config still using it is migrated here rather than dropped.
+// The migration is partial by nature and removedFieldWarnings says so: only
+// trustEndUserHeader has a counterpart, because client keys are created in the
+// dashboard and stored hashed rather than declared via a secretRef.
 func intentExternalAuth(ea *ExternalAuthConfig) *externalAuthIntent {
 	if ea == nil {
 		return nil
 	}
 	out := &externalAuthIntent{
-		OIDC:      intentOIDC(ea.OIDC),
-		EdgeTrust: intentEdgeTrust(ea.EdgeTrust),
-	}
-	if ea.APIKeys != nil {
-		out.ClientKeys = &clientKeysIntent{
-			DefaultRole:        ea.APIKeys.DefaultRole,
-			TrustEndUserHeader: ea.APIKeys.TrustEndUserHeader,
-		}
+		OIDC:       intentOIDC(ea.OIDC),
+		EdgeTrust:  intentEdgeTrust(ea.EdgeTrust),
+		ClientKeys: intentClientKeys(ea),
 	}
 	if out.ClientKeys == nil && out.OIDC == nil && out.EdgeTrust == nil {
 		return nil
 	}
 	return out
+}
+
+// intentClientKeys builds the client-keys block from an explicit apiKeys block,
+// falling back to migrating a removed sharedToken. An explicit apiKeys always
+// wins: it is the current vocabulary, so it must not be overridden by a
+// migration of the legacy one.
+func intentClientKeys(ea *ExternalAuthConfig) *clientKeysIntent {
+	if ea.APIKeys != nil {
+		return &clientKeysIntent{
+			DefaultRole:        ea.APIKeys.DefaultRole,
+			TrustEndUserHeader: ea.APIKeys.TrustEndUserHeader,
+		}
+	}
+	if ea.SharedToken != nil {
+		// secretRef has no counterpart — see sharedTokenWarning.
+		return &clientKeysIntent{TrustEndUserHeader: ea.SharedToken.TrustEndUserHeader}
+	}
+	return nil
 }
 
 // intentOIDC maps the OIDC validator and its optional claim mapping.
@@ -471,16 +488,21 @@ func intentEvals(e *EvalsConfig) *evalsIntent {
 }
 
 // preflightIntentV1 reports every reason this deploy CANNOT be expressed as a
-// v1 DeployIntent. A non-empty result means the deploy takes the CRD passthrough
-// path instead, so a config using a field the contract cannot carry deploys with
-// full fidelity rather than silently losing it.
+// v1 DeployIntent. A non-empty result diverts the deploy to the per-resource
+// path, which is worth doing ONLY for a field that path can actually deliver.
+//
+// It deliberately does NOT list fields Omnia has removed (sharedToken, the role
+// mappings, handler selectors). Those are undeliverable by either route — the
+// per-resource path proxies raw JSON to an apiserver that prunes unknown fields
+// and returns success — so diverting for them would trade a working deploy for
+// an identical silent drop. They are reported by removedFieldWarnings instead,
+// and sharedToken is migrated onto client keys.
 //
 // Each reason is user-facing: it names the config field and what would be lost.
 func preflightIntentV1(pack *prompt.Pack, cfg *Config, binding ToolBinding) []string {
 	var reasons []string
 	reasons = append(reasons, preflightRuntimeReasons(cfg.Runtime)...)
-	reasons = append(reasons, preflightExternalAuthReasons(cfg.ExternalAuth)...)
-	reasons = append(reasons, preflightToolReasons(pack, cfg, binding)...)
+	reasons = append(reasons, preflightToolReasons(pack, binding)...)
 	return reasons
 }
 
@@ -493,39 +515,14 @@ func preflightRuntimeReasons(rc *RuntimeConfig) []string {
 		"resource requests only"}
 }
 
-// preflightExternalAuthReasons reports auth fields intent v1 cannot carry.
-func preflightExternalAuthReasons(ea *ExternalAuthConfig) []string {
-	if ea == nil {
-		return nil
-	}
+// preflightToolReasons reports tool and policy shapes intent v1 cannot carry: a
+// tool blocklist with no registry to bind it to, and a registry name the
+// server's own naming would not reproduce.
+//
+// Handler selectors are absent by design — Omnia removed them, so neither path
+// can deliver one (see removedToolWarnings).
+func preflightToolReasons(pack *prompt.Pack, binding ToolBinding) []string {
 	var reasons []string
-	if ea.SharedToken != nil {
-		reasons = append(reasons, "externalAuth.sharedToken — the deploy-intent contract "+
-			"expresses clientKeys, oidc and edgeTrust only")
-	}
-	if ea.OIDC != nil && ea.OIDC.ClaimMapping != nil && ea.OIDC.ClaimMapping.Role != "" {
-		reasons = append(reasons, "externalAuth.oidc.claimMapping.role — the deploy-intent "+
-			"claim mapping carries subject and endUser only")
-	}
-	if ea.EdgeTrust != nil && ea.EdgeTrust.HeaderMapping != nil && ea.EdgeTrust.HeaderMapping.Role != "" {
-		reasons = append(reasons, "externalAuth.edgeTrust.headerMapping.role — the deploy-intent "+
-			"header mapping carries subject, endUser and email only")
-	}
-	return reasons
-}
-
-// preflightToolReasons reports tool and policy shapes intent v1 cannot carry:
-// a handler selector, a tool blocklist with no registry to bind it to, and a
-// registry name the server's own naming would not reproduce.
-func preflightToolReasons(pack *prompt.Pack, cfg *Config, binding ToolBinding) []string {
-	var reasons []string
-	for _, h := range cfg.Tools {
-		if len(h.Selector) > 0 {
-			reasons = append(reasons, fmt.Sprintf(
-				"tools[%q].selector — the deploy-intent handler contract carries no selector", h.Name))
-			break
-		}
-	}
 	if len(collectToolBlocklist(pack)) > 0 && binding.RegistryName == "" {
 		reasons = append(reasons, "the pack declares a tool blocklist but no tool registry is "+
 			"bound — the deploy-intent API builds the policy against the deploy's registry")

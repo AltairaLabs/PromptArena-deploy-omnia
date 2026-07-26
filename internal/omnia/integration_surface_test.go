@@ -1588,3 +1588,61 @@ func TestIntegration_MultiRoleProvidersReachAgent(t *testing.T) {
 		t.Errorf("embedder providerRef.name = %q, want %q", got, embed)
 	}
 }
+
+// TestIntegration_SharedTokenMigratesToClientKeys proves the migration lands.
+//
+// Omnia removed spec.externalAuth.sharedToken (#1775). The adapter used to
+// divert such a config to the per-resource path believing that preserved it — but
+// that path proxies raw JSON to an apiserver which prunes the unknown field and
+// returns success, so the agent came out with NO external auth at all while the
+// deploy reported green.
+//
+// Now the block is migrated onto clientKeys. This asserts the real object: the
+// agent ends up with working client-key auth rather than a silently empty
+// externalAuth.
+func TestIntegration_SharedTokenMigratesToClientKeys(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{
+		externalAuth: map[string]any{
+			"sharedToken": map[string]any{
+				"secretRef":          "legacy-agent-token",
+				"trustEndUserHeader": true,
+			},
+		},
+	})
+
+	state, events := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPack(packID),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	agentName := stateResourceName(t, state, ResTypeAgentRuntime)
+	spec := specOf(t, itClient(t, cfg), ResTypeAgentRuntime, agentName)
+
+	ea, _ := spec["externalAuth"].(map[string]any)
+	if ea == nil {
+		t.Fatal("spec.externalAuth is absent — the sharedToken config produced an agent with " +
+			"no external auth, which is the silent-drop this migration exists to prevent")
+	}
+	clientKeys, _ := ea["clientKeys"].(map[string]any)
+	if clientKeys == nil {
+		t.Fatalf("spec.externalAuth = %s, want a migrated clientKeys block", jsonOf(t, ea))
+	}
+	if trust, _ := clientKeys["trustEndUserHeader"].(bool); !trust {
+		t.Error("clientKeys.trustEndUserHeader = false, want the value carried from sharedToken")
+	}
+	if _, stale := ea["sharedToken"]; stale {
+		t.Error("spec.externalAuth still carries sharedToken; Omnia removed that field")
+	}
+
+	// The operator must be told their Secret is now inert — the part no
+	// automatic migration can do for them.
+	if countContaining(progressMessages(events), "SECRET IS NO LONGER READ") == 0 {
+		t.Errorf("expected the deploy to warn that the Secret is unused, got %v",
+			progressMessages(events))
+	}
+}
