@@ -423,3 +423,303 @@ func jsonOf(t *testing.T, v any) string {
 	}
 	return string(b)
 }
+
+// ----------------------------------------------------------------------------
+// Full config surface
+// ----------------------------------------------------------------------------
+
+// TestIntegration_ConfigSurfaceReachesAgentRuntime is the round-trip guard for
+// every optional block the adapter can express. On the deploy-intent path the
+// SERVER owns the intent->CRD translation, so nothing here is covered by the
+// adapter's own CRD contract tests: a block the server forgets to map would be
+// silently dropped, and the deploy would still report success.
+//
+// The OIDC issuer is a real, reachable provider on purpose — the controller
+// fetches {issuer}/.well-known/openid-configuration, so a fake issuer would fail
+// reconcile for reasons that have nothing to do with the mapping under test.
+func TestIntegration_ConfigSurfaceReachesAgentRuntime(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{
+		runtime: map[string]any{"replicas": 2, "cpu": "100m", "memory": "128Mi"},
+		externalAuth: map[string]any{
+			"allowManagementPlane": false,
+			"apiKeys":              map[string]any{"defaultRole": "editor", "trustEndUserHeader": true},
+			"oidc": map[string]any{
+				"issuer":       "https://accounts.google.com",
+				"audience":     "it-audience",
+				"claimMapping": map[string]any{"subject": "sub", "endUser": "email"},
+			},
+			"edgeTrust": map[string]any{
+				"headerMapping":     map[string]any{"subject": "x-sub", "email": "x-mail"},
+				"claimsFromHeaders": map[string]any{"tenant": "x-tenant"},
+			},
+		},
+		memory: map[string]any{
+			"enabled": true,
+			"retrieval": map[string]any{
+				"strategy":     "keyword",
+				"limit":        7,
+				"accessFilter": map[string]any{"denyCEL": "identity.role == 'guest'"},
+			},
+		},
+		evals: map[string]any{
+			"enabled": true,
+			"inline":  map[string]any{"groups": []string{"fast-running"}},
+			"worker":  map[string]any{"groups": []string{"slow-running"}},
+		},
+	})
+
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPack(packID),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	agentName := stateResourceName(t, state, ResTypeAgentRuntime)
+	spec := specOf(t, itClient(t, cfg), ResTypeAgentRuntime, agentName)
+
+	assertRuntimeSizing(t, spec)
+	assertExternalAuth(t, spec)
+	assertMemory(t, spec)
+	assertEvals(t, spec)
+	assertFacadeManagementPlane(t, spec)
+}
+
+func assertRuntimeSizing(t *testing.T, spec map[string]any) {
+	t.Helper()
+	runtime, _ := spec["runtime"].(map[string]any)
+	if runtime == nil {
+		t.Fatal("spec.runtime missing — replicas and resource requests were dropped")
+	}
+	if got, _ := runtime["replicas"].(float64); got != 2 {
+		t.Errorf("runtime.replicas = %v, want 2", runtime["replicas"])
+	}
+	if got := nestedString(runtime, "resources", "requests", "cpu"); got != "100m" {
+		t.Errorf("runtime.resources.requests.cpu = %q, want 100m", got)
+	}
+	if got := nestedString(runtime, "resources", "requests", "memory"); got != "128Mi" {
+		t.Errorf("runtime.resources.requests.memory = %q, want 128Mi", got)
+	}
+}
+
+func assertExternalAuth(t *testing.T, spec map[string]any) {
+	t.Helper()
+	ea, _ := spec["externalAuth"].(map[string]any)
+	if ea == nil {
+		t.Fatal("spec.externalAuth missing — the whole auth block was dropped")
+	}
+	// The adapter's apiKeys block is the CRD's clientKeys.
+	if got := nestedString(ea, "clientKeys", "defaultRole"); got != "editor" {
+		t.Errorf("externalAuth.clientKeys.defaultRole = %q, want editor", got)
+	}
+	if got := nestedString(ea, "oidc", "issuer"); got != "https://accounts.google.com" {
+		t.Errorf("externalAuth.oidc.issuer = %q", got)
+	}
+	if got := nestedString(ea, "oidc", "audience"); got != "it-audience" {
+		t.Errorf("externalAuth.oidc.audience = %q, want it-audience", got)
+	}
+	if got := nestedString(ea, "oidc", "claimMapping", "endUser"); got != "email" {
+		t.Errorf("externalAuth.oidc.claimMapping.endUser = %q, want email", got)
+	}
+	if got := nestedString(ea, "edgeTrust", "headerMapping", "email"); got != "x-mail" {
+		t.Errorf("externalAuth.edgeTrust.headerMapping.email = %q, want x-mail", got)
+	}
+	if got := nestedString(ea, "edgeTrust", "claimsFromHeaders", "tenant"); got != "x-tenant" {
+		t.Errorf("externalAuth.edgeTrust.claimsFromHeaders.tenant = %q, want x-tenant", got)
+	}
+}
+
+func assertMemory(t *testing.T, spec map[string]any) {
+	t.Helper()
+	mem, _ := spec["memory"].(map[string]any)
+	if mem == nil {
+		t.Fatal("spec.memory missing — the memory block was dropped")
+	}
+	if enabled, _ := mem["enabled"].(bool); !enabled {
+		t.Error("memory.enabled = false, want true")
+	}
+	if got := nestedString(mem, "retrieval", "strategy"); got != "keyword" {
+		t.Errorf("memory.retrieval.strategy = %q, want keyword", got)
+	}
+	retrieval, _ := mem["retrieval"].(map[string]any)
+	if got, _ := retrieval["limit"].(float64); got != 7 {
+		t.Errorf("memory.retrieval.limit = %v, want 7", retrieval["limit"])
+	}
+	if got := nestedString(mem, "retrieval", "accessFilter", "denyCEL"); got != "identity.role == 'guest'" {
+		t.Errorf("memory.retrieval.accessFilter.denyCEL = %q, want the configured CEL", got)
+	}
+}
+
+func assertEvals(t *testing.T, spec map[string]any) {
+	t.Helper()
+	evals, _ := spec["evals"].(map[string]any)
+	if evals == nil {
+		t.Fatal("spec.evals missing — the evals block was dropped")
+	}
+	if enabled, _ := evals["enabled"].(bool); !enabled {
+		t.Error("evals.enabled = false, want true")
+	}
+	for path, want := range map[string]string{"inline": "fast-running", "worker": "slow-running"} {
+		block, _ := evals[path].(map[string]any)
+		groups, _ := block["groups"].([]any)
+		if len(groups) != 1 {
+			t.Errorf("evals.%s.groups = %v, want exactly [%s]", path, block["groups"], want)
+			continue
+		}
+		if got, _ := groups[0].(string); got != want {
+			t.Errorf("evals.%s.groups[0] = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func assertFacadeManagementPlane(t *testing.T, spec map[string]any) {
+	t.Helper()
+	facades, _ := spec["facades"].([]any)
+	if len(facades) == 0 {
+		t.Fatal("spec.facades is empty — the agent has no facade to reach it on")
+	}
+	facade, _ := facades[0].(map[string]any)
+	mp, present := facade["managementPlane"]
+	if !present {
+		t.Fatal("facades[0].managementPlane missing — allowManagementPlane was not projected")
+	}
+	if enabled, _ := mp.(bool); enabled {
+		t.Error("facades[0].managementPlane = true, want the configured false")
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Fan-out and policy
+// ----------------------------------------------------------------------------
+
+// TestIntegration_MultiPromptFanOut deploys a plain pack with two prompts, which
+// the adapter fans out into one AgentRuntime per prompt, each pinned to its own
+// entry prompt. The pin travels as the intent's promptName and must arrive as an
+// OMNIA_PROMPT_NAME env override — without it both agents would run the
+// operator's default prompt and be indistinguishable.
+func TestIntegration_MultiPromptFanOut(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildMultiPromptPack(packID, "triage", "billing"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	for prompt, agent := range map[string]string{
+		"triage":  sanitizeName(packID + "-triage"),
+		"billing": sanitizeName(packID + "-billing"),
+	} {
+		spec := specOf(t, client, ResTypeAgentRuntime, agent)
+		if got := promptNameEnv(spec); got != prompt {
+			t.Errorf("agent %q OMNIA_PROMPT_NAME = %q, want %q", agent, got, prompt)
+		}
+	}
+
+	_ = state
+}
+
+// promptNameEnv returns the OMNIA_PROMPT_NAME value from spec.runtime.extraEnv,
+// or "" when absent. Duplicate entries are last-wins (K8s env semantics), which
+// is how the adapter guarantees its override beats the operator's default.
+func promptNameEnv(spec map[string]any) string {
+	runtime, _ := spec["runtime"].(map[string]any)
+	env, _ := runtime["extraEnv"].([]any)
+	value := ""
+	for _, e := range env {
+		entry, _ := e.(map[string]any)
+		if name, _ := entry["name"].(string); name == envOmniaPromptName {
+			value, _ = entry["value"].(string)
+		}
+	}
+	return value
+}
+
+// TestIntegration_AgentPolicyFromBlocklist deploys a pack whose prompt declares
+// a tool blocklist and asserts the AgentPolicy actually materializes carrying
+// the blocked tool. A dropped policy fails open — the agent would keep full
+// access to a tool the pack author explicitly denied — so this must be asserted
+// against the real object, not the plan.
+func TestIntegration_AgentPolicyFromBlocklist(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{createTools: true})
+
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackWithBlocklist(packID, itToolListName),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	policyName := stateResourceName(t, state, ResTypeAgentPolicy)
+	spec := specOf(t, itClient(t, cfg), ResTypeAgentPolicy, policyName)
+
+	// Assert on the rendered spec rather than a fixed shape: the server builds
+	// toolAccess{denylist, rules[]} and the exact nesting is its business — what
+	// must not happen is the blocked tool going missing.
+	rendered := jsonOf(t, spec)
+	if !strings.Contains(rendered, itToolListName) {
+		t.Errorf("agent policy %q does not deny %q; spec = %s",
+			policyName, itToolListName, rendered)
+	}
+}
+
+// TestIntegration_BindModeReusesRegistry covers the intent's OTHER tools branch:
+// tools.ref, which points the agent at an existing registry instead of supplying
+// handlers to create. It deploys a create-mode pack to produce a registry, then
+// deploys a second pack that binds it by name, and asserts the second deploy
+// referenced the registry WITHOUT creating one of its own — binding must never
+// fork a duplicate registry, and must never mutate the one it borrows.
+func TestIntegration_BindModeReusesRegistry(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	// Deploy #1 produces the registry the second deploy will borrow.
+	ownerID := uniquePackID(t)
+	ownerCfg := buildDeployConfig(env, deployConfigOpts{createTools: true})
+	applyTracked(t, p, env, ownerCfg, &deploy.PlanRequest{
+		PackJSON:     buildPack(ownerID),
+		DeployConfig: ownerCfg,
+		Environment:  env.Workspace,
+	})
+
+	registryName := sanitizeName(ownerID + "-tools")
+	client := itClient(t, ownerCfg)
+	before := jsonOf(t, specOf(t, client, ResTypeToolRegistry, registryName))
+
+	// Deploy #2 binds that registry by name.
+	borrowerID := uniquePackID(t)
+	borrowerCfg := buildDeployConfig(env, deployConfigOpts{bindRegistry: registryName})
+	state, _ := applyTracked(t, p, env, borrowerCfg, &deploy.PlanRequest{
+		PackJSON:     buildPack(borrowerID),
+		DeployConfig: borrowerCfg,
+		Environment:  env.Workspace,
+	})
+
+	agentName := stateResourceName(t, state, ResTypeAgentRuntime)
+	agentSpec := specOf(t, client, ResTypeAgentRuntime, agentName)
+	if got := nestedString(agentSpec, "toolRegistryRef", "name"); got != registryName {
+		t.Errorf("borrower agent toolRegistryRef = %q, want the bound %q", got, registryName)
+	}
+
+	// Binding must not fork a registry of the borrower's own.
+	forked := sanitizeName(borrowerID + "-tools")
+	if _, err := client.GetResource(context.Background(), ResTypeToolRegistry, forked); err == nil {
+		t.Errorf("bind mode created a second registry %q; it must reuse %q", forked, registryName)
+	}
+
+	// Nor mutate the registry it borrowed.
+	if after := jsonOf(t, specOf(t, client, ResTypeToolRegistry, registryName)); after != before {
+		t.Errorf("bind mode mutated the borrowed registry\nbefore = %s\nafter  = %s", before, after)
+	}
+}

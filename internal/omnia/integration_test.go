@@ -130,6 +130,15 @@ type deployConfigOpts struct {
 	// validates them.
 	skills       []map[string]any
 	skillsConfig map[string]any
+
+	// Optional AgentRuntime config blocks, emitted verbatim when non-empty. They
+	// exist so one test can round-trip the WHOLE surface the adapter expresses —
+	// on the deploy-intent path the server owns the intent->CRD mapping, so a
+	// block it forgets is dropped silently.
+	runtime      map[string]any
+	externalAuth map[string]any
+	memory       map[string]any
+	evals        map[string]any
 }
 
 // createModeHandlers returns the http handlers used in create mode. Only
@@ -201,6 +210,16 @@ func buildDeployConfig(env itConfig, opts deployConfigOpts) string {
 	if len(opts.skillsConfig) > 0 {
 		doc["skillsConfig"] = opts.skillsConfig
 	}
+	for key, block := range map[string]map[string]any{
+		"runtime":      opts.runtime,
+		"externalAuth": opts.externalAuth,
+		"memory":       opts.memory,
+		"evals":        opts.evals,
+	} {
+		if len(block) > 0 {
+			doc[key] = block
+		}
+	}
 
 	b, err := json.Marshal(doc)
 	if err != nil {
@@ -220,10 +239,15 @@ func buildPack(packID string) string {
 // the same pack ID is what drives the deploy-intent path's per-version pack
 // objects (and any version-triggered rollout).
 func buildPackVersion(packID, version string) string {
+	return mustMarshal(basePackDoc(packID, version))
+}
+
+// basePackDoc is the shared pack document the builders specialize.
+func basePackDoc(packID, version string) map[string]any {
 	// Shape mirrors a real compiled pack (omnia's PromptPack schema validates it):
 	// root needs name + template_engine; each prompt needs id/name/version/
 	// system_template (NOT "system"); each tool's parameters needs "properties".
-	doc := map[string]any{
+	return map[string]any{
 		"id":          packID,
 		"name":        packID,
 		"version":     version,
@@ -255,9 +279,42 @@ func buildPackVersion(packID, version string) string {
 			},
 		},
 	}
+}
+
+// buildMultiPromptPack returns a plain (non-multi-agent) pack carrying several
+// top-level prompts. The adapter fans these out into one AgentRuntime per
+// prompt, each pinned to its own entry via OMNIA_PROMPT_NAME.
+func buildMultiPromptPack(packID string, prompts ...string) string {
+	doc := basePackDoc(packID, "1.0.0")
+	promptMap := map[string]any{}
+	for _, name := range prompts {
+		promptMap[name] = map[string]any{
+			"id":              name,
+			"name":            name,
+			"description":     name + " prompt",
+			"version":         "1.0.0",
+			"system_template": "You are the " + name + " agent.",
+		}
+	}
+	doc["prompts"] = promptMap
+	return mustMarshal(doc)
+}
+
+// buildPackWithBlocklist returns a pack whose single prompt denies the named
+// tools, which the adapter turns into an AgentPolicy.
+func buildPackWithBlocklist(packID string, blocked ...string) string {
+	doc := basePackDoc(packID, "1.0.0")
+	prompts, _ := doc["prompts"].(map[string]any)
+	main, _ := prompts["main"].(map[string]any)
+	main["tool_policy"] = map[string]any{"blocklist": blocked}
+	return mustMarshal(doc)
+}
+
+// mustMarshal renders a pack document, panicking on the impossible error.
+func mustMarshal(doc map[string]any) string {
 	b, err := json.Marshal(doc)
 	if err != nil {
-		panic(fmt.Sprintf("buildPack: marshal failed: %v", err))
+		panic(fmt.Sprintf("marshal pack: %v", err))
 	}
 	return string(b)
 }
