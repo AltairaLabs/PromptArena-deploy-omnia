@@ -5,8 +5,10 @@ package omnia
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
@@ -1298,4 +1300,177 @@ func TestIntegration_DestroyRemovesIntentObjects(t *testing.T) {
 			_ = client.DeleteResource(context.Background(), ResTypeToolRegistry, registryName)
 		})
 	}
+}
+
+// ----------------------------------------------------------------------------
+// Concurrency
+// ----------------------------------------------------------------------------
+
+// concurrentApplies runs n Applies in parallel and returns their errors in
+// order. It deliberately does NOT use applyTracked: t.Fatalf is invalid from a
+// non-test goroutine, and a concurrency test needs every outcome, not the first
+// failure.
+func concurrentApplies(n int, p *Provider, req *deploy.PlanRequest) []error {
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := range n {
+		go func() {
+			defer wg.Done()
+			_, errs[i] = p.Apply(context.Background(), req,
+				func(*deploy.ApplyEvent) error { return nil })
+		}()
+	}
+	wg.Wait()
+	return errs
+}
+
+// destroyByPack registers teardown for a pack deployed outside applyTracked,
+// reconstructing the state from a throwaway sequential apply's return value.
+func destroyByPack(t *testing.T, p *Provider, env itConfig, deployConfig, state string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if state == "" {
+			return
+		}
+		if err := p.Destroy(context.Background(), &deploy.DestroyRequest{
+			DeployConfig: deployConfig,
+			Environment:  env.Workspace,
+			PriorState:   state,
+		}, func(_ *deploy.DestroyEvent) error { return nil }); err != nil {
+			t.Logf("cleanup Destroy (non-fatal): %v", err)
+		}
+	})
+}
+
+// TestIntegration_ConcurrentDeploysSamePack races several deploys of the same
+// pack, the way parallel CI jobs or a retried pipeline would.
+//
+// Every apply is idempotent in intent — same pack, same version, same config —
+// so all of them should succeed. They contend on the single AgentRuntime upsert,
+// which is Get->mutate->Update with no retry, so this is the same defect as the
+// trigger-mode 409 but reachable without any rollout involved.
+func TestIntegration_ConcurrentDeploysSamePack(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+
+	// Establish the deploy first, so the race is purely on the update path.
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	// 10, not 2-3: each Apply is a full HTTP round trip through the dashboard
+	// proxy, so a small racer count almost never lands inside the server's
+	// Get->Update window. A high count is needed to make client-side
+	// concurrency actually contend.
+	const racers = 10
+	errs := concurrentApplies(racers, p, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state,
+	})
+
+	var failed []string
+	for i, err := range errs {
+		if err != nil {
+			failed = append(failed, fmt.Sprintf("apply %d: %v", i, err))
+		}
+	}
+	if len(failed) > 0 {
+		t.Errorf("%d of %d concurrent idempotent deploys failed:\n  %s\n\n"+
+			"  Concurrent deploys of the same pack are ordinary in CI (parallel jobs, "+
+			"pipeline retries). They contend on the AgentRuntime upsert, which does "+
+			"Get->mutate->Update with no conflict retry, so one writer wins and the rest "+
+			"error. No rollout is involved — this is the plain concurrency case.",
+			len(failed), racers, strings.Join(failed, "\n  "))
+	}
+}
+
+// TestIntegration_ConcurrentDeploysDifferentPacks races deploys of INDEPENDENT
+// packs. These share no object, so nothing should contend: a failure here would
+// mean the deploy path serializes badly or corrupts unrelated deploys, which is
+// far more serious than the same-pack case.
+func TestIntegration_ConcurrentDeploysDifferentPacks(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+
+	const racers = 3
+	packs := make([]string, racers)
+	for i := range packs {
+		packs[i] = fmt.Sprintf("%s-%d", uniquePackID(t), i)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	states := make([]string, racers)
+	wg.Add(racers)
+	for i := range racers {
+		go func() {
+			defer wg.Done()
+			states[i], errs[i] = p.Apply(context.Background(), &deploy.PlanRequest{
+				PackJSON:     buildPackVersion(packs[i], "1.0.0"),
+				DeployConfig: cfg,
+				Environment:  env.Workspace,
+			}, func(*deploy.ApplyEvent) error { return nil })
+		}()
+	}
+	wg.Wait()
+
+	for i := range racers {
+		destroyByPack(t, p, env, cfg, states[i])
+	}
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("independent pack %q failed while deployed concurrently with others: %v",
+				packs[i], err)
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Authorization
+// ----------------------------------------------------------------------------
+
+// TestIntegration_ViewerCannotDeploy checks the deploy-intent endpoint's
+// editor gate against a real workspace where the caller only has viewer.
+//
+// Two things must hold, and the second is the subtle one: the deploy must fail,
+// AND the adapter must NOT treat the refusal as "this server has no
+// deploy-intent API" and quietly retry down the per-resource path. A permission
+// denial that triggered a fallback would route around the authorization gate.
+//
+// Set OMNIA_IT_VIEWER_WORKSPACE to a workspace where the token holds viewer.
+func TestIntegration_ViewerCannotDeploy(t *testing.T) {
+	env := itEnv(t)
+	workspace := os.Getenv("OMNIA_IT_VIEWER_WORKSPACE")
+	if workspace == "" {
+		t.Skip("set OMNIA_IT_VIEWER_WORKSPACE to a workspace where the token has viewer only")
+	}
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{workspaceOverride: workspace})
+
+	var events []*deploy.ApplyEvent
+	_, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON:     buildPack(packID),
+		DeployConfig: cfg,
+		Environment:  workspace,
+	}, capturingCallback(&events))
+
+	if err == nil {
+		t.Fatal("a viewer-only token deployed successfully; the editor gate is not enforced")
+	}
+	if countContaining(progressMessages(events), "does not serve the deploy-intent API") > 0 {
+		t.Error("the adapter treated a permission denial as an absent deploy-intent API and " +
+			"fell back to the per-resource path — a fallback must never route around authz")
+	}
+	t.Logf("viewer deploy correctly refused: %v", err)
 }
