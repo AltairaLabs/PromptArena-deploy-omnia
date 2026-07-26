@@ -123,6 +123,13 @@ type deployConfigOpts struct {
 	// bothToolsAndRef forces BOTH tools and tool_registry_ref to be set, to
 	// exercise the mutually-exclusive validation error.
 	bothToolsAndRef string
+
+	// skills / skillsConfig emit the deploy-config skills blocks. Both are
+	// omitted when empty, so they never perturb the tests that don't use them.
+	// Every referenced source must exist and be Ready in the workspace — Plan
+	// validates them.
+	skills       []map[string]any
+	skillsConfig map[string]any
 }
 
 // createModeHandlers returns the http handlers used in create mode. Only
@@ -188,6 +195,13 @@ func buildDeployConfig(env itConfig, opts deployConfigOpts) string {
 		doc["tool_registry_ref"] = opts.bindRegistry
 	}
 
+	if len(opts.skills) > 0 {
+		doc["skills"] = opts.skills
+	}
+	if len(opts.skillsConfig) > 0 {
+		doc["skillsConfig"] = opts.skillsConfig
+	}
+
 	b, err := json.Marshal(doc)
 	if err != nil {
 		panic(fmt.Sprintf("buildDeployConfig: marshal failed: %v", err))
@@ -199,13 +213,20 @@ func buildDeployConfig(env itConfig, opts deployConfigOpts) string {
 // (covered by a configured handler in create mode) and list_things (uncovered,
 // so it becomes a placeholder handler with an advisory warning).
 func buildPack(packID string) string {
+	return buildPackVersion(packID, "1.0.0")
+}
+
+// buildPackVersion is buildPack at an explicit pack version. A new version of
+// the same pack ID is what drives the deploy-intent path's per-version pack
+// objects (and any version-triggered rollout).
+func buildPackVersion(packID, version string) string {
 	// Shape mirrors a real compiled pack (omnia's PromptPack schema validates it):
 	// root needs name + template_engine; each prompt needs id/name/version/
 	// system_template (NOT "system"); each tool's parameters needs "properties".
 	doc := map[string]any{
 		"id":          packID,
 		"name":        packID,
-		"version":     "1.0.0",
+		"version":     version,
 		"description": "integration test",
 		"template_engine": map[string]any{
 			"version":  "v1",
