@@ -398,10 +398,14 @@ func TestIntentResourceAction(t *testing.T) {
 }
 
 func TestReportIntentResults_SkipsUntrackedKinds(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("ParsePack: %v", err)
+	}
 	var events []*deploy.ApplyEvent
-	ac := &applyContext{reporter: newTestReporter(&events)}
+	ac := &applyContext{pack: pack, reporter: newTestReporter(&events)}
 
-	resources, err := reportIntentResults(ac, &DeployResult{
+	resources, rerr := reportIntentResults(ac, &DeployResult{
 		Succeeded: true,
 		Results: []DeployResourceResult{
 			{Kind: "ConfigMap", Name: "pp-abc-content", Action: intentActionCreated},
@@ -410,7 +414,7 @@ func TestReportIntentResults_SkipsUntrackedKinds(t *testing.T) {
 			{Kind: "Mystery", Name: "m", Action: intentActionCreated},
 		},
 	})
-	if err != nil {
+	if err := rerr; err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(resources) != 2 {
@@ -429,18 +433,73 @@ func TestReportIntentResults_SkipsUntrackedKinds(t *testing.T) {
 }
 
 func TestReportIntentResults_UnknownActionDefaultsToUnchanged(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("ParsePack: %v", err)
+	}
 	var events []*deploy.ApplyEvent
-	ac := &applyContext{reporter: newTestReporter(&events)}
+	ac := &applyContext{pack: pack, reporter: newTestReporter(&events)}
 
-	resources, err := reportIntentResults(ac, &DeployResult{
+	resources, rerr := reportIntentResults(ac, &DeployResult{
 		Succeeded: true,
 		Results:   []DeployResourceResult{{Kind: "PromptPack", Name: "pp-x", Action: "reconciled"}},
 	})
-	if err != nil {
+	if err := rerr; err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(resources) != 1 || resources[0].Status != ResStatusUnchanged {
 		t.Errorf("an unrecognized action must degrade to unchanged, got %+v", resources)
+	}
+}
+
+func TestReportIntentResults_WarnsWhenPackAlreadyPublished(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("ParsePack: %v", err)
+	}
+
+	var events []*deploy.ApplyEvent
+	ac := &applyContext{pack: pack, reporter: newTestReporter(&events)}
+
+	if _, err := reportIntentResults(ac, &DeployResult{
+		Succeeded: true,
+		Results:   []DeployResourceResult{{Kind: "PromptPack", Name: "pp-x", Action: intentActionUnchanged}},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := progressMessages(events)
+	if countContaining(msgs, "already published") == 0 {
+		t.Errorf("an unchanged pack must warn that content was not republished, got %v", msgs)
+	}
+	if countContaining(msgs, "bump its version") == 0 {
+		t.Errorf("the advisory must name the remedy, got %v", msgs)
+	}
+}
+
+func TestReportIntentResults_NoWarningWhenPackCreated(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("ParsePack: %v", err)
+	}
+
+	var events []*deploy.ApplyEvent
+	ac := &applyContext{pack: pack, reporter: newTestReporter(&events)}
+
+	if _, err := reportIntentResults(ac, &DeployResult{
+		Succeeded: true,
+		Results: []DeployResourceResult{
+			{Kind: "PromptPack", Name: "pp-x", Action: intentActionCreated},
+			{Kind: "AgentRuntime", Name: "a", Action: intentActionUnchanged},
+		},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// A fresh publish is not a no-op, and an unchanged AGENT says nothing about
+	// pack content — neither may trigger the advisory.
+	if got := countContaining(progressMessages(events), "already published"); got != 0 {
+		t.Errorf("unexpected already-published advisory (%d) for a created pack", got)
 	}
 }
 

@@ -884,3 +884,418 @@ func TestIntegration_OutOfBandSpecSurvivesDeploy(t *testing.T) {
 		t.Errorf("runtime.autoscaling.enabled = false after deploy, want the configured true")
 	}
 }
+
+// outOfBandSpecFields are AgentRuntime spec blocks an operator can set that the
+// deploy-intent translation never populates. Values are deliberately simple and
+// free-form so the apiserver accepts them without extra CRDs existing; anything
+// it rejects is dropped by the calibration step below rather than failing the
+// test, so this stays honest about what it actually measured.
+func outOfBandSpecFields() map[string]any {
+	return map[string]any{
+		"extraPodAnnotations": map[string]any{"ops.example.com/oncall": "platform"},
+		"podOverrides": map[string]any{
+			"labels":      map[string]any{"ops.example.com/tier": "gold"},
+			"annotations": map[string]any{"ops.example.com/owner": "platform"},
+		},
+		"console":      map[string]any{"maxFiles": 3},
+		"media":        map[string]any{"basePath": "/media"},
+		"serviceGroup": "default",
+		// inputSchema/outputSchema are deliberately absent: the CRD rejects them
+		// unless spec.mode is "function", and switching mode would change the
+		// agent's whole shape rather than measure field preservation.
+	}
+}
+
+// TestIntegration_SpecClobberBlastRadius measures exactly which operator-set
+// AgentRuntime fields a routine deploy destroys, rather than inferring it from
+// the translation source.
+//
+// It is self-calibrating: it writes the fields out of band, re-reads to see
+// which ones the apiserver actually kept, and only then deploys. Fields the
+// cluster refused are excluded from the verdict, so a green run means "these
+// fields genuinely survive" and a red run names only real losses.
+func TestIntegration_SpecClobberBlastRadius(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+	if !itServesIntentAPI(t, cfg) {
+		t.Skip("workspace does not serve the deploy-intent API")
+	}
+
+	state1, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	agentName := stateResourceName(t, state1, ResTypeAgentRuntime)
+
+	// Write every candidate field out of band.
+	spec := specOf(t, client, ResTypeAgentRuntime, agentName)
+	for key, value := range outOfBandSpecFields() {
+		spec[key] = value
+	}
+	putAgentSpec(t, client, agentName, spec)
+
+	// Calibrate: keep only what the cluster actually stored.
+	settled := specOf(t, client, ResTypeAgentRuntime, agentName)
+	established := map[string]string{}
+	for key := range outOfBandSpecFields() {
+		if v, ok := settled[key]; ok && v != nil {
+			established[key] = jsonOf(t, v)
+		}
+	}
+	if len(established) == 0 {
+		t.Fatal("no out-of-band field was accepted by the cluster; nothing to measure")
+	}
+	t.Logf("measuring %d operator-set fields: %v", len(established), sortedKeys(established))
+
+	// A routine deploy that mentions none of them.
+	applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "2.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state1,
+	})
+
+	after := specOf(t, client, ResTypeAgentRuntime, agentName)
+	var lost, mutated []string
+	for key, before := range established {
+		v, present := after[key]
+		switch {
+		case !present || v == nil:
+			lost = append(lost, key)
+		case jsonOf(t, v) != before:
+			mutated = append(mutated, key)
+		}
+	}
+	sortStrings(lost)
+	sortStrings(mutated)
+
+	if len(lost) > 0 {
+		t.Errorf("deploy DESTROYED %d operator-set spec field(s): %v\n"+
+			"  These were set out of band (dashboard/GitOps) and the deploy did not mention them.\n"+
+			"  Cause: reconcileAgentRuntimeSpec assigns live.Spec = desired.Spec wholesale.",
+			len(lost), lost)
+	}
+	if len(mutated) > 0 {
+		t.Errorf("deploy MUTATED %d operator-set spec field(s): %v", len(mutated), mutated)
+	}
+}
+
+// TestIntegration_NonTriggerRolloutSurvivesDeploy covers the rollout shapes that
+// are NOT version-triggered: a manually-driven candidate plus stickySession and
+// rollback tuning. The preservation in reconcileAgentRuntimeSpec keys on
+// rollout.trigger, so these take the unguarded path.
+//
+// The source documents the manual-candidate case as an accepted Plan A
+// limitation. stickySession and rollback are not mentioned — losing them
+// mid-rollout changes traffic routing and removes the automatic-rollback safety
+// net while a rollout is live.
+func TestIntegration_NonTriggerRolloutSurvivesDeploy(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+	if !itServesIntentAPI(t, cfg) {
+		t.Skip("workspace does not serve the deploy-intent API")
+	}
+
+	state1, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	agentName := stateResourceName(t, state1, ResTypeAgentRuntime)
+
+	spec := specOf(t, client, ResTypeAgentRuntime, agentName)
+	spec["rollout"] = map[string]any{
+		// No trigger: a manually-driven rollout.
+		"steps":         []any{map[string]any{"setWeight": 10}},
+		"stickySession": map[string]any{"hashOn": "session"},
+	}
+	putAgentSpec(t, client, agentName, spec)
+
+	settled, _ := specOf(t, client, ResTypeAgentRuntime, agentName)["rollout"].(map[string]any)
+	if settled == nil || settled["stickySession"] == nil {
+		t.Skip("cluster did not accept the non-trigger rollout shape; nothing to measure")
+	}
+
+	applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "2.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state1,
+	})
+
+	after, _ := specOf(t, client, ResTypeAgentRuntime, agentName)["rollout"].(map[string]any)
+	if after == nil {
+		t.Fatal("the whole non-trigger rollout block was destroyed by the deploy")
+	}
+	if after["stickySession"] == nil {
+		t.Error("rollout.stickySession destroyed — consistent hashing stops mid-rollout, " +
+			"so users can be bounced between versions")
+	}
+}
+
+// TestIntegration_AgentPolicyRulesSurviveDeploy checks the same clobber class on
+// the AgentPolicy, which the server updates in place (unlike the create-only
+// ToolRegistry). The adapter sends only a flat toolBlocklist, so any rule an
+// operator added by hand rides on a spec the deploy rewrites.
+//
+// A lost policy rule fails OPEN — access the operator denied silently returns.
+func TestIntegration_AgentPolicyRulesSurviveDeploy(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{createTools: true})
+
+	state1, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackWithBlocklist(packID, itToolListName),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	policyName := stateResourceName(t, state1, ResTypeAgentPolicy)
+
+	// An operator tightens the policy out of band: permissive -> enforce, and
+	// deny on evaluation failure. Both are real AgentPolicySpec fields the
+	// adapter never sends, so they ride on a spec the deploy rewrites.
+	spec := specOf(t, client, ResTypeAgentPolicy, policyName)
+	spec["mode"] = "enforce"
+	spec["onFailure"] = "deny"
+	body, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"name": policyName},
+		"spec":     spec,
+	})
+	if err != nil {
+		t.Fatalf("marshal policy: %v", err)
+	}
+	if _, uerr := client.UpdateResource(
+		context.Background(), ResTypeAgentPolicy, policyName, body,
+	); uerr != nil {
+		t.Skipf("cluster rejected the out-of-band policy edit, nothing to measure: %v", uerr)
+	}
+	if got, _ := specOf(t, client, ResTypeAgentPolicy, policyName)["mode"].(string); got != "enforce" {
+		t.Skipf("cluster did not persist the out-of-band policy mode (got %q); nothing to measure", got)
+	}
+
+	applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackWithBlocklist(packID, itToolListName),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state1,
+	})
+
+	settled := specOf(t, client, ResTypeAgentPolicy, policyName)
+	if got, _ := settled["mode"].(string); got != "enforce" {
+		t.Errorf("AgentPolicy mode = %q after deploy, want the operator-set enforce — "+
+			"a policy downgraded to permissive stops blocking anything", got)
+	}
+	if got, _ := settled["onFailure"].(string); got != "deny" {
+		t.Errorf("AgentPolicy onFailure = %q after deploy, want the operator-set deny — "+
+			"the policy now fails OPEN when evaluation errors", got)
+	}
+}
+
+// TestIntegration_SameVersionContentChange pins what happens when a pack's
+// CONTENT changes but its version does not — the everyday inner-loop mistake.
+//
+// Pack objects are immutable and per-version, so the server answers AlreadyExists
+// and reports the pack unchanged. The edited prompt never reaches the cluster.
+// That is defensible versioning, but the deploy currently reports success with
+// nothing in the output saying the new content was discarded, so the operator
+// has no signal that their edit did not ship.
+func TestIntegration_SameVersionContentChange(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+	if !itServesIntentAPI(t, cfg) {
+		t.Skip("workspace does not serve the deploy-intent API")
+	}
+
+	state1, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	// Same version, different prompt content.
+	edited := basePackDoc(packID, "1.0.0")
+	prompts, _ := edited["prompts"].(map[string]any)
+	main, _ := prompts["main"].(map[string]any)
+	main["system_template"] = "You are a COMPLETELY DIFFERENT agent."
+
+	_, events := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     mustMarshal(edited),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state1,
+	})
+
+	// The pack must be reported unchanged — proving the edit did not ship.
+	unchanged := false
+	for _, e := range events {
+		if e.Resource != nil && e.Resource.Type == ResTypePromptPack &&
+			e.Resource.Status == ResStatusUnchanged {
+			unchanged = true
+		}
+	}
+	if !unchanged {
+		t.Skip("pack was not reported unchanged; immutable-version semantics may have changed")
+	}
+
+	// ...and the operator must be told. Any message naming the version or saying
+	// the content was not republished would do.
+	var messages []string
+	for _, e := range events {
+		messages = append(messages, e.Message)
+	}
+	warned := countContaining(messages, "version") > 0 || countContaining(messages, "unchanged") > 0
+	if !warned {
+		t.Errorf("a same-version content change shipped nothing and said nothing — "+
+			"the deploy reported success with no indication the edited pack was discarded.\n"+
+			"  messages: %v", messages)
+	}
+}
+
+// sortedKeys returns a map's keys in stable order.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sortStrings(out)
+	return out
+}
+
+// sortStrings sorts in place (insertion sort keeps the helper dependency-free).
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
+// TestIntegration_MultiAgentPackFanOut covers the OTHER fan-out shape: a pack
+// declaring agents{} members, one AgentRuntime per member. Unlike the
+// multi-prompt fan-out these carry no OMNIA_PROMPT_NAME — each member resolves
+// its own entry — so this asserts the agents exist under their member names and
+// all share the one pack.
+func TestIntegration_MultiAgentPackFanOut(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildMultiAgentPack(packID, "alice", "bob"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	var s AdapterState
+	if err := json.Unmarshal([]byte(state), &s); err != nil {
+		t.Fatalf("parse state: %v", err)
+	}
+	agents := map[string]bool{}
+	for _, r := range s.Resources {
+		if r.Type == ResTypeAgentRuntime {
+			agents[r.Name] = true
+		}
+	}
+	if len(agents) != 2 {
+		t.Fatalf("want one AgentRuntime per member, got %d: %v", len(agents), agents)
+	}
+
+	client := itClient(t, cfg)
+	for _, member := range []string{"alice", "bob"} {
+		if !agents[member] {
+			t.Errorf("no AgentRuntime for member %q; got %v", member, agents)
+			continue
+		}
+		spec := specOf(t, client, ResTypeAgentRuntime, member)
+		if got := nestedString(spec, "promptPackRef", "name"); got != packID {
+			t.Errorf("member %q promptPackRef.name = %q, want the shared pack %q",
+				member, got, packID)
+		}
+		// Members resolve their own entry — a prompt pin here would override it.
+		if got := promptNameEnv(spec); got != "" {
+			t.Errorf("member %q carries OMNIA_PROMPT_NAME=%q; members must resolve their own entry",
+				member, got)
+		}
+	}
+}
+
+// TestIntegration_DestroyRemovesIntentObjects verifies teardown on the
+// deploy-intent path, whose object names come from the server rather than the
+// adapter. A destroy that misses them leaves live agents serving traffic after
+// the operator believes the deploy is gone.
+//
+// The content ConfigMap is deliberately not asserted: it has no ownerReference
+// and no delete route (Omnia#1913), so the adapter cannot remove it. That
+// omission is tracked upstream rather than papered over here.
+func TestIntegration_DestroyRemovesIntentObjects(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{createTools: true})
+
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackWithBlocklist(packID, itToolListName),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	packName := stateResourceName(t, state, ResTypePromptPack)
+	agentName := stateResourceName(t, state, ResTypeAgentRuntime)
+	policyName := stateResourceName(t, state, ResTypeAgentPolicy)
+
+	if err := p.Destroy(context.Background(), &deploy.DestroyRequest{
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state,
+	}, func(_ *deploy.DestroyEvent) error { return nil }); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	for _, target := range []struct{ resType, name string }{
+		{ResTypeAgentRuntime, agentName},
+		{ResTypeAgentPolicy, policyName},
+		{ResTypePromptPack, packName},
+	} {
+		if _, err := client.GetResource(
+			context.Background(), target.resType, target.name,
+		); err == nil {
+			t.Errorf("%s %q still exists after Destroy", target.resType, target.name)
+		}
+	}
+
+	// The ToolRegistry is operator-owned: destroy must LEAVE it, since another
+	// deploy may bind the same registry.
+	registryName := sanitizeName(packID + "-tools")
+	if _, err := client.GetResource(
+		context.Background(), ResTypeToolRegistry, registryName,
+	); err != nil {
+		t.Errorf("ToolRegistry %q was deleted by Destroy; it is operator-owned and must survive: %v",
+			registryName, err)
+	} else {
+		t.Cleanup(func() {
+			_ = client.DeleteResource(context.Background(), ResTypeToolRegistry, registryName)
+		})
+	}
+}

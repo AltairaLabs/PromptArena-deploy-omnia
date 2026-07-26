@@ -163,8 +163,31 @@ func reportIntentResults(ac *applyContext, result *DeployResult) ([]ResourceStat
 		}); cbErr != nil {
 			return resources, cbErr
 		}
+
+		if cbErr := reportPackAlreadyPublished(ac, resType, status); cbErr != nil {
+			return resources, cbErr
+		}
 	}
 	return resources, nil
+}
+
+// reportPackAlreadyPublished warns when the deploy's PromptPack came back
+// unchanged. Pack objects are immutable per version, so a deploy whose pack
+// content changed WITHOUT a version bump publishes nothing: the server answers
+// AlreadyExists and the edited prompts never reach the cluster.
+//
+// Without this the deploy reports plain success, which reads as "my edit
+// shipped" — the everyday inner-loop trap of tweaking a prompt and redeploying.
+// The advisory names the remedy so the operator is never left guessing.
+func reportPackAlreadyPublished(ac *applyContext, resType, status string) error {
+	if resType != ResTypePromptPack || status != ResStatusUnchanged || ac.pack == nil {
+		return nil
+	}
+	return ac.reporter.Progress(fmt.Sprintf(
+		"pack %q version %s is already published and pack versions are immutable — its content "+
+			"was NOT republished. If you changed the pack, bump its version to ship the change; "+
+			"the agents keep running the published content until you do.",
+		ac.pack.ID, ac.pack.Version), intentPctApplied)
 }
 
 // intentResourceAction maps a server action onto the SDK's action vocabulary.

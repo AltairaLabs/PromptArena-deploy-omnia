@@ -300,6 +300,28 @@ func buildMultiPromptPack(packID string, prompts ...string) string {
 	return mustMarshal(doc)
 }
 
+// buildMultiAgentPack returns a pack declaring agents{} members. The adapter
+// fans these out into one AgentRuntime per member, each resolving its own entry
+// (so, unlike the multi-prompt fan-out, no OMNIA_PROMPT_NAME pin).
+func buildMultiAgentPack(packID string, members ...string) string {
+	doc := basePackDoc(packID, "1.0.0")
+	promptMap := map[string]any{}
+	memberMap := map[string]any{}
+	for _, name := range members {
+		promptMap[name] = map[string]any{
+			"id":              name,
+			"name":            name,
+			"description":     name + " prompt",
+			"version":         "1.0.0",
+			"system_template": "You are " + name + ".",
+		}
+		memberMap[name] = map[string]any{"description": name + " agent"}
+	}
+	doc["prompts"] = promptMap
+	doc["agents"] = map[string]any{"entry": members[0], "members": memberMap}
+	return mustMarshal(doc)
+}
+
 // buildPackWithBlocklist returns a pack whose single prompt denies the named
 // tools, which the adapter turns into an AgentPolicy.
 func buildPackWithBlocklist(packID string, blocked ...string) string {
