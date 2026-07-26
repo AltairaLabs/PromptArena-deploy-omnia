@@ -723,3 +723,164 @@ func TestIntegration_BindModeReusesRegistry(t *testing.T) {
 		t.Errorf("bind mode mutated the borrowed registry\nbefore = %s\nafter  = %s", before, after)
 	}
 }
+
+// TestIntegration_TrackModeSurvivesDeploy covers the OTHER auto-update mode an
+// AgentRuntime can be in. spec.promptPackRef.track ("stable" / "prerelease")
+// makes the agent follow a release channel instead of pinning a version — the
+// controller moves the stable pods to the newest version on that channel.
+//
+// track is mutually exclusive with rollout.trigger, so a track-mode agent has NO
+// rollout block. That matters because the deploy-intent API's preservation is
+// keyed exclusively on trigger mode:
+//
+//	triggerMode := live.Spec.Rollout != nil && live.Spec.Rollout.Trigger != nil
+//
+// A track-mode agent therefore takes the unguarded path (live.Spec =
+// desired.Spec), and the adapter always sends a version-pinned promptPackRef.
+// If that overwrites the track, a routine deploy silently converts a
+// channel-following agent into a pinned one and its auto-update stops — with the
+// deploy still reporting success.
+func TestIntegration_TrackModeSurvivesDeploy(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+	if !itServesIntentAPI(t, cfg) {
+		t.Skip("workspace does not serve the deploy-intent API")
+	}
+
+	state1, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	agentName := stateResourceName(t, state1, ResTypeAgentRuntime)
+
+	// Put the agent on the stable channel, as a dashboard or GitOps config would.
+	// version and track are mutually exclusive, so the pin must be dropped.
+	spec := specOf(t, client, ResTypeAgentRuntime, agentName)
+	ref, _ := spec["promptPackRef"].(map[string]any)
+	delete(ref, "version")
+	ref["track"] = "stable"
+	spec["promptPackRef"] = ref
+	putAgentSpec(t, client, agentName, spec)
+
+	if got := nestedString(specOf(t, client, ResTypeAgentRuntime, agentName),
+		"promptPackRef", "track"); got != "stable" {
+		t.Fatalf("setup failed: agent track = %q, want stable before the deploy", got)
+	}
+
+	// A routine deploy of a new pack version.
+	applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "2.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state1,
+	})
+
+	after, _ := specOf(t, client, ResTypeAgentRuntime, agentName)["promptPackRef"].(map[string]any)
+	if got, _ := after["track"].(string); got != "stable" {
+		t.Errorf("promptPackRef.track = %q after the deploy, want stable preserved — "+
+			"the agent was silently converted from channel-following to version-pinned "+
+			"(full ref = %s)", got, jsonOf(t, after))
+	}
+	if v, pinned := after["version"]; pinned {
+		t.Errorf("promptPackRef.version = %v — a pin was written onto a track-mode agent, "+
+			"which the CRD documents as mutually exclusive with track", v)
+	}
+}
+
+// putAgentSpec writes a whole AgentRuntime spec back, standing in for whatever
+// out-of-band actor (dashboard, GitOps, controller) owns that field.
+func putAgentSpec(t *testing.T, client omniaClient, agentName string, spec map[string]any) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"name": agentName},
+		"spec":     spec,
+	})
+	if err != nil {
+		t.Fatalf("marshal agent update: %v", err)
+	}
+	if _, err := client.UpdateResource(
+		context.Background(), ResTypeAgentRuntime, agentName, body,
+	); err != nil {
+		t.Fatalf("update agent %q: %v", agentName, err)
+	}
+}
+
+// TestIntegration_OutOfBandSpecSurvivesDeploy generalizes the track-mode finding.
+//
+// The deploy-intent translation populates only part of AgentRuntimeSpec
+// (promptPackRef, providers, runtime, facades, externalAuth, memory, evals,
+// rollout, toolRegistryRef). The apply then assigns the whole spec —
+// live.Spec = desired.Spec — guarded ONLY for trigger-mode rollouts. Every other
+// field an operator set out of band (dashboard, GitOps, another controller) is
+// therefore zeroed by a routine deploy, silently, with the deploy reporting
+// success.
+//
+// This asserts two concrete examples: extraPodAnnotations (free-form ops
+// metadata) and runtime.autoscaling — the latter especially, because the adapter
+// cannot express autoscaling in intent v1 at all, so a deploy can only ever
+// destroy it, never restate it.
+func TestIntegration_OutOfBandSpecSurvivesDeploy(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+	if !itServesIntentAPI(t, cfg) {
+		t.Skip("workspace does not serve the deploy-intent API")
+	}
+
+	state1, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	agentName := stateResourceName(t, state1, ResTypeAgentRuntime)
+
+	// Configure the agent out of band, as an operator would.
+	spec := specOf(t, client, ResTypeAgentRuntime, agentName)
+	spec["extraPodAnnotations"] = map[string]any{"ops.example.com/oncall": "platform"}
+	runtime, _ := spec["runtime"].(map[string]any)
+	if runtime == nil {
+		runtime = map[string]any{}
+	}
+	runtime["autoscaling"] = map[string]any{
+		"enabled": true, "minReplicas": 2, "maxReplicas": 5,
+	}
+	spec["runtime"] = runtime
+	putAgentSpec(t, client, agentName, spec)
+
+	// A routine deploy that says nothing about either field.
+	applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "2.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state1,
+	})
+
+	after := specOf(t, client, ResTypeAgentRuntime, agentName)
+
+	if got := nestedString(after, "extraPodAnnotations", "ops.example.com/oncall"); got != "platform" {
+		t.Errorf("extraPodAnnotations lost: oncall = %q, want platform (spec.extraPodAnnotations = %v)",
+			got, after["extraPodAnnotations"])
+	}
+
+	afterRuntime, _ := after["runtime"].(map[string]any)
+	autoscaling, _ := afterRuntime["autoscaling"].(map[string]any)
+	if autoscaling == nil {
+		t.Errorf("runtime.autoscaling was zeroed by the deploy — the adapter cannot express "+
+			"autoscaling in intent v1, so a deploy can only destroy it (runtime = %s)",
+			jsonOf(t, afterRuntime))
+		return
+	}
+	if enabled, _ := autoscaling["enabled"].(bool); !enabled {
+		t.Errorf("runtime.autoscaling.enabled = false after deploy, want the configured true")
+	}
+}
