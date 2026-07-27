@@ -1713,3 +1713,217 @@ func TestIntegration_AutoscalingReachesAgentRuntime(t *testing.T) {
 			jsonOf(t, after))
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Version accumulation, destroy, drift
+// ----------------------------------------------------------------------------
+
+// TestIntegration_MultiVersionAccumulationAndDestroy exercises the adapter's
+// superseded-pack tracking against a real cluster — code that until now was only
+// unit-tested.
+//
+// Pack objects are immutable and per-version, so deploying three versions leaves
+// three PromptPacks. The deploy only WRITES the newest, so the older two are
+// carried into state as superseded (orphanedPackObjects). If that tracking is
+// wrong, destroy silently leaves live pack objects behind and the workspace
+// accumulates them forever with nothing referencing them.
+func TestIntegration_MultiVersionAccumulationAndDestroy(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+	client := itClient(t, cfg)
+
+	versions := []string{"1.0.0", "2.0.0", "3.0.0"}
+	state := ""
+	for _, v := range versions {
+		var events []*deploy.ApplyEvent
+		s, err := p.Apply(context.Background(), &deploy.PlanRequest{
+			PackJSON:     buildPackVersion(packID, v),
+			DeployConfig: cfg,
+			Environment:  env.Workspace,
+			PriorState:   state,
+		}, capturingCallback(&events))
+		if err != nil {
+			t.Fatalf("deploy %s: %v", v, describeApplyFailure(err))
+		}
+		state = s
+	}
+
+	// All three pack objects should exist and all three should be tracked.
+	var tracked AdapterState
+	if err := json.Unmarshal([]byte(state), &tracked); err != nil {
+		t.Fatalf("parse state: %v", err)
+	}
+	trackedPacks := map[string]bool{}
+	for _, r := range tracked.Resources {
+		if r.Type == ResTypePromptPack {
+			trackedPacks[r.Name] = true
+		}
+	}
+	for _, v := range versions {
+		name := promptPackObjectName(sanitizeName(packID), v)
+		if _, err := client.GetResource(context.Background(), ResTypePromptPack, name); err != nil {
+			t.Errorf("PromptPack for version %s (%s) does not exist: %v", v, name, err)
+		}
+		if !trackedPacks[name] {
+			t.Errorf("version %s (%s) is not tracked in state — destroy would leave it behind; "+
+				"tracked = %v", v, name, trackedPacks)
+		}
+	}
+
+	// Destroy must remove every version, not just the newest.
+	if err := p.Destroy(context.Background(), &deploy.DestroyRequest{
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state,
+	}, func(_ *deploy.DestroyEvent) error { return nil }); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	for _, v := range versions {
+		name := promptPackObjectName(sanitizeName(packID), v)
+		if _, err := client.GetResource(context.Background(), ResTypePromptPack, name); err == nil {
+			t.Errorf("PromptPack for version %s (%s) survived Destroy", v, name)
+		}
+	}
+}
+
+// TestIntegration_DestroyIsIdempotent runs Destroy twice with the same state.
+// The second pass finds everything already gone, which must be reported as a
+// clean teardown rather than an error — a retried pipeline or a re-run after a
+// partial failure hits this every time.
+func TestIntegration_DestroyIsIdempotent(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPack(packID),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	destroy := func() error {
+		return p.Destroy(context.Background(), &deploy.DestroyRequest{
+			DeployConfig: cfg,
+			Environment:  env.Workspace,
+			PriorState:   state,
+		}, func(_ *deploy.DestroyEvent) error { return nil })
+	}
+	if err := destroy(); err != nil {
+		t.Fatalf("first Destroy: %v", err)
+	}
+	if err := destroy(); err != nil {
+		t.Errorf("second Destroy on already-torn-down state returned an error: %v\n"+
+			"  A retried teardown must be a no-op, not a failure.", err)
+	}
+}
+
+// TestIntegration_PlanDetectsRemovedAgents deploys a two-agent pack, then plans
+// a one-agent pack under the same ID. The agent that is no longer in the pack
+// must be planned for DELETE — otherwise it keeps running, serving a prompt the
+// pack no longer contains, and nothing ever reports it.
+func TestIntegration_PlanDetectsRemovedAgents(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildMultiPromptPack(packID, "triage", "billing"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	// Re-plan with billing removed. One prompt left means no fan-out, so the
+	// agent is named after the pack and BOTH fanned-out agents become stale.
+	resp, err := p.Plan(context.Background(), &deploy.PlanRequest{
+		PackJSON:     buildMultiPromptPack(packID, "triage"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state,
+	})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	deletes := map[string]bool{}
+	for _, c := range resp.Changes {
+		if c.Action == deploy.ActionDelete {
+			deletes[c.Name] = true
+		}
+	}
+	stale := sanitizeName(packID + "-billing")
+	if !deletes[stale] {
+		t.Errorf("plan did not schedule %q for deletion; it would keep running a prompt the "+
+			"pack no longer has. changes = %+v", stale, resp.Changes)
+	}
+}
+
+// TestIntegration_ConcurrentDeploysDivergentConfigs races two deploys of the
+// same pack carrying DIFFERENT configs — two branches, two pipelines, one agent.
+//
+// Both must succeed (the server retries on conflict), and the agent must end up
+// matching ONE of the two configs exactly. A blend of the two would mean the
+// merge is not atomic: a reader could observe half of each deploy.
+func TestIntegration_ConcurrentDeploysDivergentConfigs(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfgA := buildDeployConfig(env, deployConfigOpts{
+		runtime: map[string]any{"replicas": 1, "cpu": "100m"},
+	})
+	cfgB := buildDeployConfig(env, deployConfigOpts{
+		runtime: map[string]any{"replicas": 3, "cpu": "250m"},
+	})
+
+	// Establish the agent so both racers take the update path.
+	state, _ := applyTracked(t, p, env, cfgA, &deploy.PlanRequest{
+		PackJSON:     buildPack(packID),
+		DeployConfig: cfgA,
+		Environment:  env.Workspace,
+	})
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	configs := []string{cfgA, cfgB}
+	wg.Add(2)
+	for i := range 2 {
+		go func() {
+			defer wg.Done()
+			_, errs[i] = p.Apply(context.Background(), &deploy.PlanRequest{
+				PackJSON:     buildPack(packID),
+				DeployConfig: configs[i],
+				Environment:  env.Workspace,
+				PriorState:   state,
+			}, func(*deploy.ApplyEvent) error { return nil })
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("divergent concurrent deploy %d failed: %v", i, describeApplyFailure(err))
+		}
+	}
+
+	agentName := stateResourceName(t, state, ResTypeAgentRuntime)
+	runtime, _ := specOf(t, itClient(t, cfgA), ResTypeAgentRuntime, agentName)["runtime"].(map[string]any)
+	replicas, _ := runtime["replicas"].(float64)
+	cpu := nestedString(runtime, "resources", "requests", "cpu")
+
+	// Whichever writer won, replicas and cpu must come from the SAME config.
+	switch {
+	case replicas == 1 && cpu == "100m":
+	case replicas == 3 && cpu == "250m":
+	default:
+		t.Errorf("agent ended up with a BLEND of both configs: replicas=%v cpu=%q. "+
+			"Each deploy sets replicas and cpu together, so a mix means the spec merge "+
+			"is not atomic under concurrent writers.", replicas, cpu)
+	}
+}
