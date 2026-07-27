@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/AltairaLabs/PromptKit/runtime/deploy"
 )
@@ -1925,5 +1926,87 @@ func TestIntegration_ConcurrentDeploysDivergentConfigs(t *testing.T) {
 		t.Errorf("agent ended up with a BLEND of both configs: replicas=%v cpu=%q. "+
 			"Each deploy sets replicas and cpu together, so a mix means the spec merge "+
 			"is not atomic under concurrent writers.", replicas, cpu)
+	}
+}
+
+// TestIntegration_VersionBumpTriggersCanary is the other half of rollout
+// coverage, and the one the preservation tests do NOT give.
+//
+// Those assert a deploy does not BREAK an existing rollout. This asserts a
+// deploy actually DRIVES one: publishing a new pack version must cause the
+// version-trigger controller to pick it up as the rollout candidate. Without
+// this, a deploy against a trigger-mode agent could preserve the pin, the
+// trigger and the steps perfectly and still be a silent no-op — the new version
+// published, nothing ever canarying to it, and the deploy reporting success.
+//
+// It is also #1866's stated acceptance criterion: a version bump on a
+// trigger-mode agent starts a canary rather than hard-swapping the pin.
+func TestIntegration_VersionBumpTriggersCanary(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+	if !itServesIntentAPI(t, cfg) {
+		t.Skip("workspace does not serve the deploy-intent API")
+	}
+
+	state1, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	agentName := stateResourceName(t, state1, ResTypeAgentRuntime)
+
+	// Trigger mode, watching stable, IDLE — no candidate yet. The deploy is what
+	// should produce one.
+	putAgentRollout(t, client, agentName, map[string]any{
+		"trigger": map[string]any{"promptPackChannel": "stable"},
+		"steps": []any{
+			map[string]any{"setWeight": 25},
+			map[string]any{"pause": map[string]any{"duration": "30s"}},
+		},
+	})
+	pinBefore := jsonOf(t, specOf(t, client, ResTypeAgentRuntime, agentName)["promptPackRef"])
+
+	// Publish a newer version on the channel.
+	applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "2.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state1,
+	})
+
+	// The controller runs asynchronously, so poll for the candidate it sets.
+	var candidateVersion string
+	var lastRollout map[string]any
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		rollout, _ := specOf(t, client, ResTypeAgentRuntime, agentName)["rollout"].(map[string]any)
+		lastRollout = rollout
+		candidateVersion = nestedString(rollout, "candidate", "promptPackRef", "version")
+		if candidateVersion != "" {
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+	if candidateVersion == "" {
+		t.Fatalf("no rollout candidate appeared within the timeout — the new version was "+
+			"published but nothing canaries to it, so the deploy is a silent no-op for this "+
+			"agent (rollout = %s)", jsonOf(t, lastRollout))
+	}
+	if candidateVersion != "2.0.0" {
+		t.Errorf("rollout candidate version = %q, want 2.0.0 — the controller did not pick "+
+			"up the newly published version", candidateVersion)
+	}
+
+	// ...and it must be a canary, not a hard swap: the stable pin stays put.
+	pinAfter := jsonOf(t, specOf(t, client, ResTypeAgentRuntime, agentName)["promptPackRef"])
+	if pinAfter != pinBefore {
+		t.Errorf("stable pin moved from %s to %s — traffic hard-swapped to the new version "+
+			"instead of canarying to it", pinBefore, pinAfter)
 	}
 }
