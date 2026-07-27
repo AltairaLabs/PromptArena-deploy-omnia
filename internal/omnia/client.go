@@ -16,6 +16,16 @@ type omniaClient interface {
 	// ListResources returns resources matching the label selector.
 	ListResources(ctx context.Context, resType, labelSelector string) ([]ResourceResponse, error)
 
+	// PostDeployment submits a whole deploy as a single versioned DeployIntent to
+	// the server-owned deploy-intent API, which builds the CRDs itself. Returns
+	// the per-resource apply outcome.
+	PostDeployment(ctx context.Context, intent json.RawMessage) (*DeployResult, error)
+
+	// GetDeployProfile returns the workspace's deploy profile, whose
+	// supportedDeployIntentVersions advertises whether the deploy-intent API is
+	// available on this server.
+	GetDeployProfile(ctx context.Context) (*DeployProfile, error)
+
 	// ValidateProvider checks that a Provider CRD exists.
 	ValidateProvider(ctx context.Context, name string) error
 
@@ -40,6 +50,53 @@ type omniaClient interface {
 
 	// Health checks the API health endpoint.
 	Health(ctx context.Context) error
+}
+
+// DeployResult is the deploy-intent API's response: a best-effort apply with a
+// per-resource outcome. Succeeded is false when any resource failed; the
+// resources that did apply are still reported.
+type DeployResult struct {
+	Succeeded bool                   `json:"succeeded"`
+	Results   []DeployResourceResult `json:"results"`
+}
+
+// DeployResourceResult is the outcome for a single object the server applied.
+// Kind is the Kubernetes kind (PromptPack, ConfigMap, ToolRegistry, AgentPolicy,
+// AgentRuntime); Name is the object name the SERVER chose.
+type DeployResourceResult struct {
+	Kind   string `json:"kind"`
+	Name   string `json:"name"`
+	Action string `json:"action"` // created|updated|unchanged|failed
+	Error  string `json:"error,omitempty"`
+}
+
+// Deploy-intent action values reported per resource by the server.
+const (
+	intentActionCreated   = "created"
+	intentActionUpdated   = "updated"
+	intentActionUnchanged = "unchanged"
+	intentActionFailed    = "failed"
+)
+
+// DeployProfile is the workspace's deploy discovery document, reduced to what
+// the adapter reads. An empty SupportedDeployIntentVersions means the server
+// predates the deploy-intent API and only serves the per-resource CRD routes.
+type DeployProfile struct {
+	SupportedDeployIntentVersions []string `json:"supportedDeployIntentVersions"`
+}
+
+// supportsIntentV1 reports whether the profile advertises the DeployIntent
+// contract version this adapter emits.
+func (p *DeployProfile) supportsIntentV1() bool {
+	if p == nil {
+		return false
+	}
+	for _, v := range p.SupportedDeployIntentVersions {
+		if v == intentAPIVersionV1 {
+			return true
+		}
+	}
+	return false
 }
 
 // WorkspaceInfo is a workspace reduced to what the adapter needs.

@@ -76,12 +76,14 @@ func (e *HTTPError) Error() string {
 
 // HTTP status code ranges for error classification.
 const (
-	httpStatusUnauthorized  = 401
-	httpStatusForbidden     = 403
-	httpStatusNotFound      = 404
-	httpStatusConflict      = 409
-	httpStatusUnprocessable = 422
-	httpStatusServerError   = 500
+	httpStatusBadRequest       = 400
+	httpStatusUnauthorized     = 401
+	httpStatusForbidden        = 403
+	httpStatusNotFound         = 404
+	httpStatusMethodNotAllowed = 405
+	httpStatusConflict         = 409
+	httpStatusUnprocessable    = 422
+	httpStatusServerError      = 500
 )
 
 // classifyHTTPError maps an HTTP status code to an error category and remediation hint.

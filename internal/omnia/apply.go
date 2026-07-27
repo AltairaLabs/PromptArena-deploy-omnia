@@ -94,7 +94,7 @@ func (p *Provider) Apply(
 		binding:  binding,
 	}
 
-	resources, applyErr := executeApplyPhases(ctx, ac)
+	resources, applyErr := executeApply(ctx, ac)
 
 	state := AdapterState{
 		Resources: resources,
@@ -468,7 +468,9 @@ func (p *Provider) applyDryRun(
 	reporter := adaptersdk.NewProgressReporter(callback)
 	binding := dryRunToolBinding(pack, cfg)
 	cfg.resolvedRegistryName = binding.RegistryName
-	desired := generateDesiredResources(pack, cfg, binding)
+	// Dry-run makes no API calls, so it cannot know whether the server serves the
+	// deploy-intent API — it previews the per-resource path, mirroring Plan.
+	desired := generateDesiredResources(pack, cfg, binding, false)
 
 	resources := make([]ResourceState, 0, len(desired))
 	for i, d := range desired {

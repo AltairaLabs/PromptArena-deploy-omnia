@@ -506,6 +506,8 @@ func TestBuildAgentPolicyRequest(t *testing.T) {
 		Workspace:   "test-ws",
 		APIToken:    "test-token",
 		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "llm"}},
+		// toolAccess rules name a registry, so the policy needs a bound one.
+		resolvedRegistryName: "blocked-pack-tools",
 	}
 
 	body, err := buildAgentPolicyRequest(pack, cfg)
@@ -522,12 +524,30 @@ func TestBuildAgentPolicyRequest(t *testing.T) {
 	if !ok {
 		t.Fatal("expected spec to be an object")
 	}
-	blocklist, ok := spec["toolBlocklist"].([]interface{})
-	if !ok {
-		t.Fatal("expected spec.toolBlocklist to be an array")
+	// spec.toolBlocklist is NOT a CRD field — emitting it got the whole list
+	// pruned and the policy created empty, failing open. The blocklist belongs in
+	// toolAccess{mode: denylist, rules: [{registry, tools}]}.
+	if _, present := spec["toolBlocklist"]; present {
+		t.Error("spec.toolBlocklist is not a CRD field; it is pruned and the policy fails open")
 	}
-	if len(blocklist) != 2 {
-		t.Fatalf("expected 2 blocked tools, got %d", len(blocklist))
+	ta, ok := spec["toolAccess"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected spec.toolAccess to be an object, got spec = %v", spec)
+	}
+	if ta["mode"] != "denylist" {
+		t.Errorf("toolAccess.mode = %v, want denylist", ta["mode"])
+	}
+	rules, ok := ta["rules"].([]interface{})
+	if !ok || len(rules) != 1 {
+		t.Fatalf("expected exactly one toolAccess rule, got %v", ta["rules"])
+	}
+	rule, _ := rules[0].(map[string]interface{})
+	if rule["registry"] != "blocked-pack-tools" {
+		t.Errorf("rule.registry = %v, want the bound registry", rule["registry"])
+	}
+	tools, ok := rule["tools"].([]interface{})
+	if !ok || len(tools) != 2 {
+		t.Fatalf("expected 2 blocked tools, got %v", rule["tools"])
 	}
 }
 
@@ -845,20 +865,22 @@ func TestBuildAgentRuntimeRequest_ExternalAuth(t *testing.T) {
 		t.Error("externalAuth.allowManagementPlane was removed in Omnia#1576; must not be emitted")
 	}
 
-	// sharedToken.secretRef must be a LocalObjectReference {"name": ...}.
-	st, ok := ea["sharedToken"].(map[string]interface{})
+	// Omnia#1775 removed spec.externalAuth.sharedToken. The block migrates onto
+	// clientKeys — emitting the old name would be pruned by the apiserver and the
+	// agent would come out with no auth at all.
+	if _, present := ea["sharedToken"]; present {
+		t.Error("externalAuth.sharedToken was removed in Omnia#1775; must not be emitted")
+	}
+	ck, ok := ea["clientKeys"].(map[string]interface{})
 	if !ok {
-		t.Fatal("expected sharedToken to be an object")
+		t.Fatalf("expected a migrated clientKeys object, got externalAuth = %v", ea)
 	}
-	secretRef, ok := st["secretRef"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected sharedToken.secretRef to be an object, got %T", st["secretRef"])
+	if ck["trustEndUserHeader"] != true {
+		t.Errorf("clientKeys.trustEndUserHeader = %v, want the value carried from sharedToken",
+			ck["trustEndUserHeader"])
 	}
-	if secretRef["name"] != "partner-token" {
-		t.Errorf("sharedToken.secretRef.name = %v, want partner-token", secretRef["name"])
-	}
-	if st["trustEndUserHeader"] != true {
-		t.Errorf("sharedToken.trustEndUserHeader = %v, want true", st["trustEndUserHeader"])
+	if _, present := ck["secretRef"]; present {
+		t.Error("clientKeys has no secretRef — keys are dashboard-created, not declared")
 	}
 
 	// oidc carries issuer/audience and the claimMapping.
@@ -880,9 +902,10 @@ func TestBuildAgentRuntimeRequest_ExternalAuth(t *testing.T) {
 		t.Error("oidc.claimMapping.role should be omitted when unset")
 	}
 
-	// unset validator blocks are omitted.
+	// unset validator blocks are omitted. apiKeys is never emitted at all — the
+	// CRD field is clientKeys.
 	if _, present := ea["apiKeys"]; present {
-		t.Error("apiKeys should be omitted when unset")
+		t.Error("apiKeys is not a CRD field; the adapter emits clientKeys")
 	}
 	if _, present := ea["edgeTrust"]; present {
 		t.Error("edgeTrust should be omitted when unset")
@@ -907,12 +930,19 @@ func TestBuildAgentRuntimeRequest_ExternalAuth_EdgeTrustAndAPIKeys(t *testing.T)
 	spec := agentRuntimeSpec(t, cfg)
 	ea := spec["externalAuth"].(map[string]interface{})
 
-	ak := ea["apiKeys"].(map[string]interface{})
+	// The adapter's apiKeys block maps onto the CRD's clientKeys.
+	if _, present := ea["apiKeys"]; present {
+		t.Error("apiKeys is not a CRD field; the adapter emits clientKeys")
+	}
+	ak, ok := ea["clientKeys"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected clientKeys, got externalAuth = %v", ea)
+	}
 	if ak["defaultRole"] != "editor" {
-		t.Errorf("apiKeys.defaultRole = %v, want editor", ak["defaultRole"])
+		t.Errorf("clientKeys.defaultRole = %v, want editor", ak["defaultRole"])
 	}
 	if _, present := ak["trustEndUserHeader"]; present {
-		t.Error("apiKeys.trustEndUserHeader should be omitted when false")
+		t.Error("clientKeys.trustEndUserHeader should be omitted when false")
 	}
 
 	et := ea["edgeTrust"].(map[string]interface{})
@@ -958,14 +988,16 @@ func TestBuildExternalAuthSpec_EmptyBlocks(t *testing.T) {
 	if got := buildExternalAuthSpec(ea); got != nil {
 		t.Errorf("expected nil when edgeTrust has only empty sub-blocks, got %v", got)
 	}
-	// apiKeys empty struct still emits an (empty) block — presence is meaningful.
+	// An empty apiKeys struct still emits an (empty) clientKeys block — the CRD
+	// treats mere presence as "keys labeled for this agent are valid", so {} is
+	// meaningful and must not collapse away.
 	ea = &ExternalAuthConfig{APIKeys: &APIKeysAuthConfig{}}
 	got := buildExternalAuthSpec(ea)
 	if got == nil {
-		t.Fatal("expected apiKeys empty struct to emit a block")
+		t.Fatal("expected an empty apiKeys struct to emit a clientKeys block")
 	}
-	if _, present := got["apiKeys"]; !present {
-		t.Errorf("expected apiKeys block present, got %v", got)
+	if _, present := got["clientKeys"]; !present {
+		t.Errorf("expected clientKeys block present, got %v", got)
 	}
 }
 

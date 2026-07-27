@@ -1,6 +1,9 @@
 package omnia
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"strings"
 )
 
@@ -38,4 +41,25 @@ func sanitizeName(name string) string {
 	}
 
 	return s
+}
+
+// packObjectHashLen is the number of hex characters of the pack digest kept in a
+// PromptPack object name. It mirrors omnia's v1alpha1.PromptPackObjectName.
+const packObjectHashLen = 12
+
+// promptPackObjectName reproduces omnia's v1alpha1.PromptPackObjectName: the
+// immutable, per-version PromptPack object name the deploy-intent server derives
+// from the pack name and version. The adapter computes it locally ONLY to
+// preview the object in a plan — apply always takes the name from the server's
+// response, so a future change to the server's scheme cannot corrupt state.
+func promptPackObjectName(packName, version string) string {
+	sum := sha256.Sum256([]byte(packName + "@" + version))
+	return "pp-" + hex.EncodeToString(sum[:])[:packObjectHashLen]
+}
+
+// toolRegistryObjectName is the ToolRegistry name the deploy-intent server
+// derives for a create-mode deploy ("<pack>-tools"). The adapter compares this
+// against its own resolver's decision before taking the intent path.
+func toolRegistryObjectName(packName string) string {
+	return fmt.Sprintf("%s-tools", packName)
 }

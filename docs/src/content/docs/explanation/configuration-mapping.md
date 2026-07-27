@@ -95,9 +95,14 @@ skills:
 
 Each source is **pre-flighted at apply**: a missing source, or one whose `status.phase` is not `Ready`, fails the deployment. `config.skillsConfig` (`maxActive`, `selector`) maps to `spec.skillsConfig`. Skills are not part of the pack — they are bound entirely here.
 
-### Tool policy → `AgentPolicy.spec.toolBlocklist`
+### Tool policy → `AgentPolicy.spec.toolAccess`
 
 This one flows the *other* way: the blocklist is read from the **pack** (each prompt's tool policy), deduplicated and sorted, into an `AgentPolicy` CRD. It is created only when a prompt defines a policy. Nothing in `deploy.config` feeds it.
+
+The blocklist becomes a denylist rule against the deploy's tool registry:
+`spec.toolAccess.mode: denylist` with one `rules[]` entry naming the registry and
+the denied tools. A rule needs a registry, so a pack blocklist with no registry
+bound emits no policy.
 
 ### `runtime`, `externalAuth`, `memory`, `evals` → `AgentRuntime.spec.*`
 
@@ -113,7 +118,7 @@ These are faithful passthroughs onto the AgentRuntime — only the fields you se
 | `config.skills` / `skillsConfig` | `PromptPack.spec.skills[]` / `spec.skillsConfig` |
 | `config.runtime` / `externalAuth` / `memory` / `evals` | `AgentRuntime.spec.*` |
 | Pack content (prompts, **tool schemas**, eval defs) | `PromptPack.content` (folded dashboard-side into a managed ConfigMap) |
-| Pack tool policy | `AgentPolicy.spec.toolBlocklist` |
+| Pack tool policy | `AgentPolicy.spec.toolAccess` (denylist rule) |
 | Pack agents | One `AgentRuntime` each |
 
 ## See also

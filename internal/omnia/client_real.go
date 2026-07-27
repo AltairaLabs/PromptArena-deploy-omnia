@@ -92,6 +92,54 @@ func (c *httpClient) ListResources( //nolint:revive // interface implementation
 	return items, nil
 }
 
+// PostDeployment submits a DeployIntent to the workspace's deploy-intent
+// endpoint. The dashboard proxies it to the operator, which owns the
+// translation into CRDs. A non-2xx returns the typed *HTTPError so the caller
+// can tell "this server has no deploy-intent API" (404/405/400-version) from a
+// genuine failure.
+func (c *httpClient) PostDeployment(ctx context.Context, intent json.RawMessage) (*DeployResult, error) {
+	url := fmt.Sprintf("%s/deployments", c.baseURL)
+	req, err := c.newRequest(ctx, http.MethodPost, url, intent)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("post deployment: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, c.readError(resp)
+	}
+	var result DeployResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode deployment response: %w", err)
+	}
+	return &result, nil
+}
+
+//nolint:revive // interface implementation
+func (c *httpClient) GetDeployProfile(ctx context.Context) (*DeployProfile, error) {
+	url := fmt.Sprintf("%s/deploy-profile", c.baseURL)
+	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get deploy profile: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // response body close
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, c.readError(resp)
+	}
+	var profile DeployProfile
+	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
+		return nil, fmt.Errorf("decode deploy profile: %w", err)
+	}
+	return &profile, nil
+}
+
 //nolint:revive // interface implementation
 func (c *httpClient) ValidateProvider(ctx context.Context, name string) error {
 	url := fmt.Sprintf("%s/providers/%s", c.baseURL, name)

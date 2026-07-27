@@ -175,7 +175,7 @@ The adapter validates configuration against the following JSON Schema:
         },
         "sharedToken": {
           "type": "object",
-          "description": "Single shared bearer token in a Secret.",
+          "description": "REMOVED UPSTREAM. Accepted for compatibility and migrated onto client keys with a warning; secretRef is no longer read.",
           "required": ["secretRef"],
           "properties": {
             "secretRef": { "type": "string", "description": "Name of the Secret holding the token (key 'token')" },
@@ -185,7 +185,7 @@ The adapter validates configuration against the following JSON Schema:
         },
         "apiKeys": {
           "type": "object",
-          "description": "Per-caller API keys (key list lives in Secrets, not here).",
+          "description": "Per-caller client keys, emitted as the CRD's clientKeys (key list lives in Secrets, not here).",
           "properties": {
             "defaultRole": { "type": "string", "enum": ["viewer", "editor", "admin"] },
             "trustEndUserHeader": { "type": "boolean" }
@@ -598,7 +598,9 @@ Data-plane authentication for the deployed agent. Faithful passthrough to the Ag
 
 The validators are evaluated with **OR** logic: a request is admitted if **any** configured validator accepts it. They are independent — configuring one does not affect the others.
 
-**Dashboard-only by default.** When `externalAuth` is omitted entirely — or present but with **no** validator configured — the agent is reachable **only** from the Omnia dashboard (the management plane) and serves no external traffic. To accept external traffic you must configure **at least one** validator (`sharedToken`, `apiKeys`, `oidc`, or `edgeTrust`).
+**Dashboard-only by default.** When `externalAuth` is omitted entirely — or present but with **no** validator configured — the agent is reachable **only** from the Omnia dashboard (the management plane) and serves no external traffic. To accept external traffic you must configure **at least one** validator (`apiKeys`, `oidc`, or `edgeTrust`).
+
+**Removed upstream.** Omnia removed `sharedToken` and the `role` entry in `oidc.claimMapping` / `edgeTrust.headerMapping`. They are no longer AgentRuntime fields, so no deploy path can apply them — the apiserver discards unknown fields and returns success. The adapter migrates `sharedToken` onto client keys and warns; a `role` mapping is ignored with a warning (roles are now ordinary claims, readable as `identity.claims.<name>`). A tool handler `selector` was likewise removed and is ignored — configure the handler endpoint inline instead.
 
 | Sub-field | Type | Required | Description |
 |---|---|---|---|
