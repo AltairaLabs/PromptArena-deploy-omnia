@@ -182,12 +182,17 @@ Conditional. Only created when at least one prompt in the pack defines a tool po
     "labels": { ... }
   },
   "spec": {
-    "toolBlocklist": ["blocked-tool-a", "blocked-tool-b"]
+    "toolAccess": {
+      "mode": "denylist",
+      "rules": [
+        { "registry": "<pack-id>-tools", "tools": ["blocked-tool-a", "blocked-tool-b"] }
+      ]
+    }
   }
 }
 ```
 
-The blocklist is the deduplicated, sorted union of all blocklists across all prompts in the pack.
+The tool list is the deduplicated, sorted union of all blocklists across all prompts in the pack. A denylist rule names the registry it applies to, so the policy is emitted only when the deploy binds one.
 
 ### API operations
 

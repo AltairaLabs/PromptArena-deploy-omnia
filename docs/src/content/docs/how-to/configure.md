@@ -265,21 +265,37 @@ externalAuth:
     audience: "omnia-agents"
     claimMapping:
       subject: sub
-      role: groups
-  sharedToken:
-    secretRef: agent-shared-token
+  apiKeys:
+    defaultRole: viewer
     trustEndUserHeader: true
 ```
+
+:::caution[Removed upstream]
+Omnia removed `sharedToken` and the `role` claim/header mappings. They are no
+longer fields on the AgentRuntime, so **no deploy path can apply them** — the
+apiserver silently discards unknown fields and returns success.
+
+The adapter therefore migrates `sharedToken` onto client keys
+(`trustEndUserHeader` carries over) and warns at plan and apply time. Its
+`secretRef` has no equivalent: client keys are created in the dashboard and
+stored hashed, not declared here — so **the Secret is no longer read**, and you
+must create a client key for the caller or the agent will reject it.
+
+A `role` entry under `claimMapping` or `headerMapping` is ignored with a
+warning. Roles are now ordinary claims: an OIDC role claim passes through
+unmapped under its own name, and edge-trust reads a fixed default header into
+`identity.claims.role`.
+:::
 
 | Sub-field | Type | Description |
 |---|---|---|
 | `allowManagementPlane` | boolean | Accept dashboard-minted management-plane tokens (the debug view). Defaults to `true` at the CRD. |
-| `sharedToken` | object | Single shared bearer token. `secretRef` (required) names a workspace `Secret` holding the token under key `token`; `trustEndUserHeader` (boolean) optionally trusts an end-user identity header. |
-| `apiKeys` | object | Per-caller API keys. `defaultRole` (one of `viewer`/`editor`/`admin`) and `trustEndUserHeader` (boolean). The key list lives in Secrets, not here. |
-| `oidc` | object | Validate customer-issued JWTs. `issuer` and `audience` are both required; optional `claimMapping` overrides the `subject`/`role`/`endUser` claim names. |
-| `edgeTrust` | object | Trust claim-headers injected by an upstream edge. Optional `headerMapping` (`subject`/`role`/`endUser`/`email`) and `claimsFromHeaders` (claim → header map). No required fields. |
+| `sharedToken` | object | **Removed upstream.** Migrated onto client keys with a warning; its `secretRef` is no longer read. See the caution above. |
+| `apiKeys` | object | Per-caller client keys, emitted as the CRD's `clientKeys`. `defaultRole` and `trustEndUserHeader` (boolean). The key list lives in Secrets, not here. |
+| `oidc` | object | Validate customer-issued JWTs. `issuer` and `audience` are both required; optional `claimMapping` overrides the `subject`/`endUser` claim names (`role` is ignored). |
+| `edgeTrust` | object | Trust claim-headers injected by an upstream edge. Optional `headerMapping` (`subject`/`endUser`/`email`; `role` is ignored) and `claimsFromHeaders` (claim → header map). No required fields. |
 
-At least **one** validator is required to serve external traffic. Any `Secret` referenced by `sharedToken.secretRef` (and the API-key Secrets) must already exist in the workspace — the adapter does not pre-flight them at plan time. The omnia controller validates Secret existence and fetches the OIDC discovery document at reconcile time.
+At least **one** validator is required to serve external traffic. Client-key Secrets must already exist in the workspace — the adapter does not pre-flight them at plan time. The omnia controller validates Secret existence and fetches the OIDC discovery document at reconcile time.
 
 ### `memory` (optional)
 
