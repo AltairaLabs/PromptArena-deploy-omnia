@@ -1646,3 +1646,70 @@ func TestIntegration_SharedTokenMigratesToClientKeys(t *testing.T) {
 			progressMessages(events))
 	}
 }
+
+// TestIntegration_AutoscalingReachesAgentRuntime covers the field added to the
+// contract by omnia#1916. It was the last setting the adapter could not express,
+// and the one affected twice over — unexpressible AND destroyed by the wholesale
+// spec replacement. This asserts both halves are fixed: it lands on the
+// AgentRuntime, and it is still there after a subsequent deploy that says
+// nothing about it.
+func TestIntegration_AutoscalingReachesAgentRuntime(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{
+		runtime: map[string]any{
+			"cpu":    "100m",
+			"memory": "128Mi",
+			"autoscaling": map[string]any{
+				"enabled":                true,
+				"type":                   "hpa",
+				"min_replicas":           2,
+				"max_replicas":           6,
+				"target_cpu_utilization": 70,
+			},
+		},
+	})
+
+	state, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	agentName := stateResourceName(t, state, ResTypeAgentRuntime)
+	runtime, _ := specOf(t, client, ResTypeAgentRuntime, agentName)["runtime"].(map[string]any)
+	autoscaling, _ := runtime["autoscaling"].(map[string]any)
+	if autoscaling == nil {
+		t.Fatalf("spec.runtime.autoscaling absent — the setting was dropped (runtime = %s)",
+			jsonOf(t, runtime))
+	}
+	if enabled, _ := autoscaling["enabled"].(bool); !enabled {
+		t.Error("autoscaling.enabled = false, want true")
+	}
+	if got, _ := autoscaling["minReplicas"].(float64); got != 2 {
+		t.Errorf("autoscaling.minReplicas = %v, want 2", autoscaling["minReplicas"])
+	}
+	if got, _ := autoscaling["maxReplicas"].(float64); got != 6 {
+		t.Errorf("autoscaling.maxReplicas = %v, want 6", autoscaling["maxReplicas"])
+	}
+	if got, _ := autoscaling["targetCPUUtilizationPercentage"].(float64); got != 70 {
+		t.Errorf("autoscaling.targetCPUUtilizationPercentage = %v, want 70",
+			autoscaling["targetCPUUtilizationPercentage"])
+	}
+
+	// And it must survive a later deploy that does not mention it.
+	applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "2.0.0"),
+		DeployConfig: buildDeployConfig(env, deployConfigOpts{}),
+		Environment:  env.Workspace,
+		PriorState:   state,
+	})
+	after, _ := specOf(t, client, ResTypeAgentRuntime, agentName)["runtime"].(map[string]any)
+	if after["autoscaling"] == nil {
+		t.Errorf("autoscaling destroyed by a later deploy that did not mention it (runtime = %s)",
+			jsonOf(t, after))
+	}
+}

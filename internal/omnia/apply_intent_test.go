@@ -176,16 +176,28 @@ func TestApply_PreflightDivertsToPerResourcePath(t *testing.T) {
 	sim.intentEnabled = true
 	sim.agentRuntimeReadyOnGet = true
 
-	// runtime.autoscaling cannot be expressed in the v1 contract.
+	// The one remaining divert: the pack denies a tool but no registry is bound,
+	// so the server has nothing to build the policy rule against. (autoscaling
+	// used to divert too, until omnia#1916 added it to the contract.)
 	cfg := `{
 		"api_endpoint": "https://omnia.test.com",
 		"workspace": "test-ws",
 		"api_token": "test-token",
-		"providers": {"default": "claude-prod"},
-		"runtime": {"replicas": 2, "autoscaling": {"enabled": true, "min_replicas": 1, "max_replicas": 5}}
+		"providers": {"default": "claude-prod"}
+	}`
+	const blocklistNoToolsPack = `{
+		"id": "test-pack",
+		"version": "1.0.0",
+		"prompts": {
+			"main": {
+				"system": "hi",
+				"description": "main",
+				"tool_policy": {"blocklist": ["danger"]}
+			}
+		}
 	}`
 
-	state, events, err := applyWithSim(t, sim, testPackJSON, cfg)
+	state, events, err := applyWithSim(t, sim, blocklistNoToolsPack, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -197,7 +209,7 @@ func TestApply_PreflightDivertsToPerResourcePath(t *testing.T) {
 	if packs := stateNames(state, ResTypePromptPack); !containsName(packs, "test-pack") {
 		t.Errorf("state PromptPacks = %v, want the per-resource name", packs)
 	}
-	if countContaining(progressMessages(events), "runtime.autoscaling") == 0 {
+	if countContaining(progressMessages(events), "tool blocklist") == 0 {
 		t.Errorf("expected the blocker to be named, got %v", progressMessages(events))
 	}
 }

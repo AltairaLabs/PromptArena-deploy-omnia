@@ -480,10 +480,11 @@ func TestPreflightIntentV1(t *testing.T) {
 	}{
 		{name: "clean config", pack: plainPack, cfg: &Config{}, binding: boundRegistry},
 		{
-			name: "autoscaling",
+			// omnia#1916 added autoscaling to the contract, so it no longer
+			// diverts — it is sent like any other runtime setting.
+			name: "autoscaling does not divert",
 			pack: plainPack, binding: boundRegistry,
-			cfg:  &Config{Runtime: &RuntimeConfig{Autoscaling: &AutoscalingConfig{Enabled: true}}},
-			want: "runtime.autoscaling",
+			cfg: &Config{Runtime: &RuntimeConfig{Autoscaling: &AutoscalingConfig{Enabled: true}}},
 		},
 		{
 			// Omnia removed sharedToken, so the per-resource path cannot deliver it
@@ -594,5 +595,53 @@ func TestDeployProfile_SupportsIntentV1(t *testing.T) {
 		SupportedDeployIntentVersions: []string{"other", intentAPIVersionV1},
 	}).supportsIntentV1() {
 		t.Error("the advertised v1 contract must be recognized")
+	}
+}
+
+func TestIntentAutoscaling(t *testing.T) {
+	minR, maxR, cpu, mem, stab := 2, 8, 70, 80, 300
+	got := intentAutoscaling(&AutoscalingConfig{
+		Enabled:                       true,
+		Type:                          "hpa",
+		MinReplicas:                   &minR,
+		MaxReplicas:                   &maxR,
+		TargetCPUUtilization:          &cpu,
+		TargetMemoryUtilization:       &mem,
+		ScaleDownStabilizationSeconds: &stab,
+	})
+	if got == nil {
+		t.Fatal("want an autoscaling block")
+	}
+	if !got.Enabled || got.Type != "hpa" {
+		t.Errorf("autoscaling = %+v, want enabled hpa", got)
+	}
+	for name, pair := range map[string][2]interface{}{
+		"minReplicas": {got.MinReplicas, int32(2)},
+		"maxReplicas": {got.MaxReplicas, int32(8)},
+		"targetCPU":   {got.TargetCPUUtilizationPercentage, int32(70)},
+		"targetMem":   {got.TargetMemoryUtilizationPercentage, int32(80)},
+		"scaleDown":   {got.ScaleDownStabilizationSeconds, int32(300)},
+	} {
+		ptr, _ := pair[0].(*int32)
+		if ptr == nil || *ptr != pair[1].(int32) {
+			t.Errorf("%s = %v, want %v", name, ptr, pair[1])
+		}
+	}
+
+	if intentAutoscaling(nil) != nil {
+		t.Error("no autoscaling config must map to nil")
+	}
+}
+
+func TestIntentRuntime_AutoscalingAloneStillEmitsRuntime(t *testing.T) {
+	// Before omnia#1916 this config diverted to the per-resource path. It must
+	// now produce a runtime block even with no replicas or resource requests set,
+	// or the autoscaling settings would be dropped on the floor.
+	got := intentRuntime(&RuntimeConfig{Autoscaling: &AutoscalingConfig{Enabled: true}})
+	if got == nil || got.Autoscaling == nil {
+		t.Fatalf("runtime = %+v, want an autoscaling-only runtime block", got)
+	}
+	if got.Replicas != nil || got.CPU != "" || got.Memory != "" {
+		t.Errorf("runtime = %+v, want nothing invented beyond autoscaling", got)
 	}
 }

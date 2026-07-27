@@ -74,11 +74,25 @@ type providerBind struct {
 	Role string `json:"role,omitempty"`
 }
 
-// runtimeIntent carries replica count and resource requests.
+// runtimeIntent carries replica count, resource requests and autoscaling.
 type runtimeIntent struct {
-	Replicas *int32 `json:"replicas,omitempty"`
-	CPU      string `json:"cpu,omitempty"`
-	Memory   string `json:"memory,omitempty"`
+	Replicas    *int32             `json:"replicas,omitempty"`
+	CPU         string             `json:"cpu,omitempty"`
+	Memory      string             `json:"memory,omitempty"`
+	Autoscaling *autoscalingIntent `json:"autoscaling,omitempty"`
+}
+
+// autoscalingIntent maps to spec.runtime.autoscaling. The adapter's config
+// exposes the HPA knobs; KEDA scalers are configured out of band, so the
+// contract's keda block is deliberately not surfaced here.
+type autoscalingIntent struct {
+	Enabled                           bool   `json:"enabled,omitempty"`
+	Type                              string `json:"type,omitempty"` // hpa|keda
+	MinReplicas                       *int32 `json:"minReplicas,omitempty"`
+	MaxReplicas                       *int32 `json:"maxReplicas,omitempty"`
+	TargetCPUUtilizationPercentage    *int32 `json:"targetCPUUtilizationPercentage,omitempty"`
+	TargetMemoryUtilizationPercentage *int32 `json:"targetMemoryUtilizationPercentage,omitempty"`
+	ScaleDownStabilizationSeconds     *int32 `json:"scaleDownStabilizationSeconds,omitempty"`
 }
 
 // facadeIntent is one agent facade (the websocket runtime facade).
@@ -359,15 +373,48 @@ func intentRuntime(rc *RuntimeConfig) *runtimeIntent {
 	if rc == nil {
 		return nil
 	}
-	out := &runtimeIntent{CPU: rc.CPU, Memory: rc.Memory}
+	out := &runtimeIntent{
+		CPU:         rc.CPU,
+		Memory:      rc.Memory,
+		Autoscaling: intentAutoscaling(rc.Autoscaling),
+	}
 	if rc.Replicas > 0 {
 		v := int32(rc.Replicas) //nolint:gosec // replicas is a small operator-set count
 		out.Replicas = &v
 	}
-	if out.Replicas == nil && out.CPU == "" && out.Memory == "" {
+	if out.Replicas == nil && out.CPU == "" && out.Memory == "" && out.Autoscaling == nil {
 		return nil
 	}
 	return out
+}
+
+// intentAutoscaling maps the autoscaling block, added to the contract by
+// omnia#1916. Before that it could not be expressed, so the adapter diverted
+// such deploys to the per-resource path — which by then could not create a
+// PromptPack at all, making the divert a guaranteed failure.
+func intentAutoscaling(a *AutoscalingConfig) *autoscalingIntent {
+	if a == nil {
+		return nil
+	}
+	return &autoscalingIntent{
+		Enabled:                           a.Enabled,
+		Type:                              a.Type,
+		MinReplicas:                       optInt32(a.MinReplicas),
+		MaxReplicas:                       optInt32(a.MaxReplicas),
+		TargetCPUUtilizationPercentage:    optInt32(a.TargetCPUUtilization),
+		TargetMemoryUtilizationPercentage: optInt32(a.TargetMemoryUtilization),
+		ScaleDownStabilizationSeconds:     optInt32(a.ScaleDownStabilizationSeconds),
+	}
+}
+
+// optInt32 narrows an optional int config value to the int32 the contract uses.
+// All of these are small operator-set counts, percentages or second counts.
+func optInt32(v *int) *int32 {
+	if v == nil {
+		return nil
+	}
+	n := int32(*v) //nolint:gosec // replica counts, percentages and second counts
+	return &n
 }
 
 // intentFacades emits the single websocket runtime facade, projecting the
@@ -499,20 +546,8 @@ func intentEvals(e *EvalsConfig) *evalsIntent {
 // and sharedToken is migrated onto client keys.
 //
 // Each reason is user-facing: it names the config field and what would be lost.
-func preflightIntentV1(pack *prompt.Pack, cfg *Config, binding ToolBinding) []string {
-	var reasons []string
-	reasons = append(reasons, preflightRuntimeReasons(cfg.Runtime)...)
-	reasons = append(reasons, preflightToolReasons(pack, binding)...)
-	return reasons
-}
-
-// preflightRuntimeReasons reports runtime fields intent v1 cannot carry.
-func preflightRuntimeReasons(rc *RuntimeConfig) []string {
-	if rc == nil || rc.Autoscaling == nil {
-		return nil
-	}
-	return []string{"runtime.autoscaling — the deploy-intent contract carries replicas and " +
-		"resource requests only"}
+func preflightIntentV1(pack *prompt.Pack, _ *Config, binding ToolBinding) []string {
+	return preflightToolReasons(pack, binding)
 }
 
 // preflightToolReasons reports tool and policy shapes intent v1 cannot carry: a
