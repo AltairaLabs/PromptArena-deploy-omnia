@@ -43,14 +43,13 @@ const (
 // ConfigMap and sets spec.source itself, so the adapter only sends the pack
 // version in spec and the raw pack JSON in content.
 func buildPromptPackRequest(pack *prompt.Pack, cfg *Config) (json.RawMessage, error) {
-	// packName is Required (Omnia#1836): it is the pack's LOGICAL name, stable
-	// across versions, which the resolver and release channels group by. Without
-	// it the apiserver rejects the object outright, so the per-resource path
-	// cannot create a PromptPack at all. Matches the deploy-intent server, which
-	// sets PackName from the same value.
+	// No packName here. It became Required in Omnia#1836, which landed AFTER the
+	// deploy-intent API — so every server that requires it also serves the intent
+	// API and never reaches this builder. On the servers this path DOES target it
+	// is not a CRD field at all, and would simply be pruned. See the vocabulary
+	// note on buildExternalAuthSpec.
 	spec := map[string]interface{}{
-		"packName": sanitizeName(pack.ID),
-		"version":  pack.Version,
+		"version": pack.Version,
 	}
 	if skills := buildSkillsSpec(cfg.Skills); skills != nil {
 		spec["skills"] = skills
@@ -279,7 +278,18 @@ func buildAutoscalingSpec(a *AutoscalingConfig) map[string]interface{} {
 
 // buildExternalAuthSpec maps the adapter's externalAuth config to
 // spec.externalAuth (AgentExternalAuth), a faithful passthrough that omits any
-// unset/empty validator block. Each validator is independent. sharedToken's
+// unset/empty validator block.
+//
+// VOCABULARY: this builder — and every other in this file — targets the CRD
+// schema of servers that do NOT serve the deploy-intent API, because that is
+// the only situation in which the per-resource path runs. Those servers predate
+// Omnia#1775, so they have sharedToken/apiKeys and the role claim mappings, and
+// they do NOT have clientKeys. The deploy-intent path speaks the current
+// vocabulary instead (intent.go maps apiKeys AND sharedToken onto clientKeys).
+//
+// The two paths deliberately differ, and must: emitting current field names
+// here would be pruned by the older apiserver and the agent would deploy with
+// no external auth while the deploy reported success. Each validator is independent. sharedToken's
 // secretRef emits as a LocalObjectReference ({"name": ...}), not a bare
 // string. Returns nil when nothing is configured (the agent stays
 // management-plane-only).
@@ -291,13 +301,11 @@ func buildExternalAuthSpec(ea *ExternalAuthConfig) map[string]interface{} {
 	// removed spec.externalAuth.allowManagementPlane in favor of the per-facade
 	// managementPlane gate, projected by buildWebSocketFacade.
 	out := map[string]interface{}{}
-	// clientKeys is the CRD's current vocabulary. The adapter's apiKeys block maps
-	// onto it directly, and a removed sharedToken migrates onto it via the SAME
-	// decision the intent path uses, so both deploy paths agree. Emitting the old
-	// apiKeys/sharedToken names here would be pruned by the apiserver and the
-	// agent would come out with no auth at all.
-	if ck := buildClientKeysSpec(ea); ck != nil {
-		out["clientKeys"] = ck
+	if st := buildSharedTokenSpec(ea.SharedToken); st != nil {
+		out["sharedToken"] = st
+	}
+	if ak := buildAPIKeysSpec(ea.APIKeys); ak != nil {
+		out["apiKeys"] = ak
 	}
 	if oidc := buildOIDCSpec(ea.OIDC); oidc != nil {
 		out["oidc"] = oidc
@@ -311,21 +319,33 @@ func buildExternalAuthSpec(ea *ExternalAuthConfig) map[string]interface{} {
 	return out
 }
 
-// buildClientKeysSpec maps the deploy config onto spec.externalAuth.clientKeys,
-// reusing intentClientKeys so the per-resource and deploy-intent paths make the
-// same decision — including migrating a removed sharedToken block.
-//
-// An empty map is still emitted when the block is present: the CRD treats the
-// mere presence of clientKeys as "keys labeled for this agent are valid", so
-// {} is meaningful and must not collapse to nil.
-func buildClientKeysSpec(ea *ExternalAuthConfig) map[string]interface{} {
-	ck := intentClientKeys(ea)
-	if ck == nil {
+// buildSharedTokenSpec maps the sharedToken block, emitting secretRef as a
+// LocalObjectReference. Returns nil when unset.
+func buildSharedTokenSpec(st *SharedTokenAuthConfig) map[string]interface{} {
+	if st == nil {
+		return nil
+	}
+	out := map[string]interface{}{
+		keySecretRef: map[string]interface{}{keyName: st.SecretRef},
+	}
+	if st.TrustEndUserHeader {
+		out["trustEndUserHeader"] = true
+	}
+	return out
+}
+
+// buildAPIKeysSpec maps the apiKeys block, emitting only set fields. Returns
+// nil when unset (an empty struct still emits {} so the facade treats keys
+// labeled for this agent as valid).
+func buildAPIKeysSpec(ak *APIKeysAuthConfig) map[string]interface{} {
+	if ak == nil {
 		return nil
 	}
 	out := map[string]interface{}{}
-	addStr(out, "defaultRole", ck.DefaultRole)
-	if ck.TrustEndUserHeader {
+	if ak.DefaultRole != "" {
+		out["defaultRole"] = ak.DefaultRole
+	}
+	if ak.TrustEndUserHeader {
 		out["trustEndUserHeader"] = true
 	}
 	return out
@@ -353,10 +373,9 @@ func buildClaimMappingSpec(cm *OIDCClaimMappingConfig) map[string]interface{} {
 	if cm == nil {
 		return nil
 	}
-	// role is deliberately absent: Omnia removed it from the claim mapping, so
-	// emitting it is pruned by the apiserver. removedFieldWarnings reports it.
 	out := map[string]interface{}{}
 	addStr(out, "subject", cm.Subject)
+	addStr(out, "role", cm.Role)
 	addStr(out, "endUser", cm.EndUser)
 	if len(out) == 0 {
 		return nil
@@ -389,9 +408,9 @@ func buildHeaderMappingSpec(hm *EdgeTrustHeaderMappingConfig) map[string]interfa
 	if hm == nil {
 		return nil
 	}
-	// role is deliberately absent — see buildClaimMappingSpec.
 	out := map[string]interface{}{}
 	addStr(out, "subject", hm.Subject)
+	addStr(out, "role", hm.Role)
 	addStr(out, "endUser", hm.EndUser)
 	addStr(out, "email", hm.Email)
 	if len(out) == 0 {
@@ -518,8 +537,7 @@ func buildHandlerEntry(h *ToolHandler) map[string]interface{} {
 		}
 		entry["tool"] = tool
 	}
-	// selector is deliberately absent: Omnia removed Service-discovery selectors
-	// from tool handlers, so emitting it is pruned. removedToolWarnings reports it.
+	addIfPresent(entry, "selector", h.Selector)
 	addIfPresent(entry, keyHTTPConfig, h.HTTPConfig)
 	addIfPresent(entry, "openAPIConfig", h.OpenAPIConfig)
 	addIfPresent(entry, "grpcConfig", h.GRPCConfig)

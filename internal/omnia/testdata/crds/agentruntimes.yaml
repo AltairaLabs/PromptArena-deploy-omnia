@@ -11,9 +11,6 @@ spec:
     kind: AgentRuntime
     listKind: AgentRuntimeList
     plural: agentruntimes
-    shortNames:
-    - agent
-    - ar
     singular: agentruntime
   scope: Namespaced
   versions:
@@ -104,16 +101,6 @@ spec:
                             description: channels is the audio channel count the client
                               should capture/play (1=mono).
                             format: int32
-                            type: integer
-                          chunkDurationMs:
-                            description: |-
-                              chunkDurationMs is the audio chunk duration (milliseconds) the runtime
-                              batches to the realtime provider for spec.duplex sessions. Smaller values
-                              reduce interruption/response latency at the cost of more provider messages;
-                              larger values do the reverse. Defaults to 100ms when unset. Only meaningful
-                              for spec.duplex.audio (ignored for console file-upload audio).
-                            format: int32
-                            minimum: 1
                             type: integer
                           format:
                             description: format is the PCM sample format the client
@@ -289,50 +276,6 @@ spec:
                 description: duplex configures the realtime voice/duplex console for
                   this agent.
                 properties:
-                  audio:
-                    description: |-
-                      audio declares the realtime audio format the runtime requires for this
-                      agent's duplex sessions (recommendedSampleRate / channels / format). The
-                      runtime advertises it as a bounded counter-offer in RuntimeHello; the
-                      facade relays it to the client, which captures at that format, or the
-                      session fails at open when the client cannot satisfy it. Unset means the
-                      runtime accepts the client's proposed format.
-                    properties:
-                      channels:
-                        description: channels is the audio channel count the client
-                          should capture/play (1=mono).
-                        format: int32
-                        type: integer
-                      chunkDurationMs:
-                        description: |-
-                          chunkDurationMs is the audio chunk duration (milliseconds) the runtime
-                          batches to the realtime provider for spec.duplex sessions. Smaller values
-                          reduce interruption/response latency at the cost of more provider messages;
-                          larger values do the reverse. Defaults to 100ms when unset. Only meaningful
-                          for spec.duplex.audio (ignored for console file-upload audio).
-                        format: int32
-                        minimum: 1
-                        type: integer
-                      format:
-                        description: format is the PCM sample format the client should
-                          send, e.g. "pcm16".
-                        type: string
-                      maxDurationSeconds:
-                        description: maxDurationSeconds is the maximum audio duration.
-                        format: int32
-                        minimum: 1
-                        type: integer
-                      recommendedSampleRate:
-                        description: recommendedSampleRate is the optimal sample rate
-                          in Hz.
-                        format: int32
-                        minimum: 1
-                        type: integer
-                      supportsSegmentSelection:
-                        description: supportsSegmentSelection indicates if the provider
-                          supports selecting audio segments.
-                        type: boolean
-                    type: object
                   enabled:
                     description: enabled turns on the realtime voice console for this
                       agent.
@@ -763,33 +706,28 @@ spec:
                   one validator is filled in. Applied to each facade's external auth
                   chain.
                 properties:
-                  clientKeys:
+                  apiKeys:
                     description: |-
-                      clientKeys configures per-caller client keys for this agent. Each
-                      key is stored as a Kubernetes Secret in the agent's namespace with
-                      a sha256 hash of the raw value, claims, and expiry. Created via the
+                      apiKeys configures per-caller API keys for this agent. Each key is
+                      stored as a Kubernetes Secret in the agent's namespace with a
+                      sha256 hash of the raw value, scopes, and expiry. Created via the
                       dashboard UI; never stored in the CR. The presence of this field
                       (even an empty struct) tells the facade to treat keys labelled for
                       this agent as valid.
                     properties:
                       defaultRole:
                         default: viewer
-                        description: |-
-                          defaultRole is applied to client keys that don't specify their own
-                          claims. Roles are arbitrary claims, not a fixed set — any string is
-                          valid here.
+                        description: defaultRole is applied to API keys that don't
+                          specify one.
+                        enum:
+                        - viewer
+                        - editor
+                        - admin
                         type: string
                       trustEndUserHeader:
                         description: |-
-                          trustEndUserHeader lets the caller forward the end-user identity
-                          via the X-End-User-Id request header. Off by default — when off,
-                          Identity.EndUser is set equal to Identity.Subject (the client key's
-                          own identity), so per-user audit granularity is coarse.
-
-                          Turn on only when the calling app is trusted to faithfully forward
-                          user context. A malicious app holding a valid key can spoof
-                          arbitrary end-users, so ToolPolicy rules gating on identity.endUser
-                          must be paired with an app-level trust assessment.
+                          trustEndUserHeader — same semantics as SharedTokenAuth; see that
+                          field's doc comment for the security trade-off.
                         type: boolean
                     type: object
                   edgeTrust:
@@ -826,12 +764,9 @@ spec:
                           The defaults cover the chart's current authentication.enabled=true
                           layout (charts/omnia/templates/gateway/authentication.yaml):
                             subject: "x-user-id"
+                            role:    "x-user-roles"
                             endUser: "x-user-id"
                             email:   "x-user-email"
-
-                          The role header (default "x-user-roles") is always read into
-                          identity.claims.role; it is not configurable here. Additional
-                          headers can be surfaced as claims via claimsFromHeaders.
 
                           Operators running a different edge (custom EnvoyFilter, API
                           gateway, service mesh other than Istio) override these to name the
@@ -840,6 +775,8 @@ spec:
                           email:
                             type: string
                           endUser:
+                            type: string
+                          role:
                             type: string
                           subject:
                             type: string
@@ -859,8 +796,7 @@ spec:
                       claimMapping:
                         description: |-
                           claimMapping maps JWT claim names to the internal identity fields.
-                          Defaults: sub→Subject, sub→EndUser. The IdP's role/group claims
-                          pass through to identity.claims.<name>.
+                          Defaults: sub→Subject, omnia.role→Role, sub→EndUser.
                         properties:
                           endUser:
                             description: |-
@@ -873,6 +809,11 @@ spec:
 
                               If the named claim is missing from a given token, the validator
                               falls back to Subject.
+                            type: string
+                          role:
+                            description: |-
+                              role names the claim used to resolve the caller's role. Defaults
+                              to "omnia.role". The claim value must be one of viewer/editor/admin.
                             type: string
                           subject:
                             description: |-
@@ -889,6 +830,43 @@ spec:
                     required:
                     - audience
                     - issuer
+                    type: object
+                  sharedToken:
+                    description: |-
+                      sharedToken validates a single bearer token shared across all
+                      callers of this agent. Simplest partner integration; one token in
+                      a Kubernetes Secret, rotated by editing the Secret.
+                    properties:
+                      secretRef:
+                        description: |-
+                          secretRef references a Secret with key "token" holding the bearer
+                          value.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      trustEndUserHeader:
+                        description: |-
+                          trustEndUserHeader lets the caller forward the end-user identity
+                          via the X-End-User-Id request header. Off by default — when off,
+                          Identity.EndUser is set equal to Identity.Subject (the token
+                          itself), so per-user audit granularity is coarse.
+
+                          Turn on only when the calling app is trusted to faithfully forward
+                          user context. A malicious app holding a valid token can spoof
+                          arbitrary end-users, so ToolPolicy rules gating on identity.endUser
+                          must be paired with an app-level trust assessment.
+                        type: boolean
+                    required:
+                    - secretRef
                     type: object
                 type: object
               extraPodAnnotations:
@@ -1391,7 +1369,6 @@ spec:
                       - a2a
                       - rest
                       - mcp
-                      - custom
                       type: string
                   required:
                   - type
@@ -1403,10 +1380,8 @@ spec:
               framework:
                 description: |-
                   framework specifies which agent framework to use.
-                  Defaults to PromptKit, the only framework this repo builds and tests.
-                  Any other type (langchain, custom) requires an explicit image
-                  via spec.framework.image or an operator --framework-image entry, and
-                  must implement the omnia.runtime.v1 gRPC contract.
+                  Supports PromptKit, LangChain, AutoGen, or a custom image.
+                  If not specified, defaults to PromptKit.
                 properties:
                   image:
                     description: |-
@@ -1420,6 +1395,7 @@ spec:
                     enum:
                     - promptkit
                     - langchain
+                    - autogen
                     - custom
                     type: string
                   version:
@@ -1448,135 +1424,6 @@ spec:
                       basePath is the base directory for resolving mock:// URLs.
                       Defaults to /etc/omnia/media if not specified.
                     type: string
-                  storage:
-                    description: |-
-                      storage configures the media-storage backend the operator provisions
-                      into the facade (uploads) and runtime (attachment-reference resolution)
-                      containers. When unset, media storage is disabled.
-                    properties:
-                      azure:
-                        description: AzureMediaBackend configures Azure Blob Storage.
-                        properties:
-                          account:
-                            minLength: 1
-                            type: string
-                          container:
-                            minLength: 1
-                            type: string
-                          prefix:
-                            type: string
-                        required:
-                        - account
-                        - container
-                        type: object
-                      defaultTTL:
-                        description: defaultTTL is the retention TTL for stored media
-                          (Go duration).
-                        type: string
-                      downloadURLTTL:
-                        description: downloadURLTTL bounds presigned download URLs.
-                        type: string
-                      gcs:
-                        description: GCSMediaBackend configures Google Cloud Storage
-                          (workload identity / ADC).
-                        properties:
-                          bucket:
-                            minLength: 1
-                            type: string
-                          prefix:
-                            type: string
-                        required:
-                        - bucket
-                        type: object
-                      local:
-                        description: LocalMediaBackend stores media on a facade-served
-                          local path.
-                        properties:
-                          basePath:
-                            description: |-
-                              basePath is the on-disk directory the facade serves media from and the
-                              runtime resolves references against. When volumeClaim is set it is the
-                              mount path for that PVC.
-                            minLength: 1
-                            type: string
-                          volumeClaim:
-                            description: |-
-                              volumeClaim names an existing PersistentVolumeClaim to mount at basePath
-                              in both the facade and runtime containers. Use a ReadWriteMany PVC so
-                              uploads written by the facade are durable and readable by the runtime
-                              across pods. When empty, no volume is provisioned — the local backend
-                              then requires a writable basePath (the agent containers have a read-only
-                              root filesystem), so an explicit volumeClaim (or podOverrides volume) is
-                              needed for local storage to function.
-                            type: string
-                        required:
-                        - basePath
-                        type: object
-                      maxFileSizeBytes:
-                        description: maxFileSizeBytes caps a single stored object.
-                        format: int64
-                        minimum: 1
-                        type: integer
-                      s3:
-                        description: S3MediaBackend configures S3 / S3-compatible
-                          (MinIO) storage.
-                        properties:
-                          bucket:
-                            minLength: 1
-                            type: string
-                          endpoint:
-                            description: endpoint, when set (e.g. MinIO), forces path-style
-                              addressing.
-                            type: string
-                          prefix:
-                            type: string
-                          region:
-                            type: string
-                        required:
-                        - bucket
-                        type: object
-                      secretRef:
-                        description: |-
-                          secretRef supplies explicit credentials (S3 AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY,
-                          Azure account key). Omit for keyless workload-identity access. GCS uses
-                          workload identity only.
-                        properties:
-                          name:
-                            default: ""
-                            description: |-
-                              Name of the referent.
-                              This field is effectively required, but due to backwards compatibility is
-                              allowed to be empty. Instances of this type with an empty value here are
-                              almost certainly wrong.
-                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                            type: string
-                        type: object
-                        x-kubernetes-map-type: atomic
-                      type:
-                        default: none
-                        description: type selects the storage backend.
-                        enum:
-                        - none
-                        - local
-                        - s3
-                        - gcs
-                        - azure
-                        type: string
-                      uploadURLTTL:
-                        description: uploadURLTTL bounds presigned upload URLs.
-                        type: string
-                    required:
-                    - type
-                    type: object
-                    x-kubernetes-validations:
-                    - message: type s3 requires spec.media.storage.s3
-                      rule: self.type != 's3' || has(self.s3)
-                    - message: type gcs requires spec.media.storage.gcs
-                      rule: self.type != 'gcs' || has(self.gcs)
-                    - message: type azure requires spec.media.storage.azure
-                      rule: self.type != 'azure' || has(self.azure)
-                    - message: type local requires spec.media.storage.local
-                      rule: self.type != 'local' || has(self.local)
                 type: object
               memory:
                 description: memory configures cross-session memory for this agent.
@@ -2017,26 +1864,13 @@ spec:
                     description: name is the name of the PromptPack resource.
                     minLength: 1
                     type: string
-                  track:
-                    description: |-
-                      track follows a release channel instead of pinning a version:
-                      "stable" selects the highest non-prerelease version; "prerelease" selects
-                      the highest version overall. Mutually exclusive with version.
-                    enum:
-                    - stable
-                    - prerelease
-                    type: string
                   version:
-                    description: version pins an exact PromptPack version. Mutually
-                      exclusive with track.
+                    description: version specifies a specific version of the PromptPack
+                      to use.
                     type: string
                 required:
                 - name
                 type: object
-                x-kubernetes-validations:
-                - message: promptPackRef.version and promptPackRef.track are mutually
-                    exclusive
-                  rule: '!(has(self.version) && has(self.track))'
               providers:
                 description: |-
                   providers is a list of named provider references.
@@ -2140,26 +1974,13 @@ spec:
                             description: name is the name of the PromptPack resource.
                             minLength: 1
                             type: string
-                          track:
-                            description: |-
-                              track follows a release channel instead of pinning a version:
-                              "stable" selects the highest non-prerelease version; "prerelease" selects
-                              the highest version overall. Mutually exclusive with version.
-                            enum:
-                            - stable
-                            - prerelease
-                            type: string
                           version:
-                            description: version pins an exact PromptPack version.
-                              Mutually exclusive with track.
+                            description: version specifies a specific version of the
+                              PromptPack to use.
                             type: string
                         required:
                         - name
                         type: object
-                        x-kubernetes-validations:
-                        - message: promptPackRef.version and promptPackRef.track are
-                            mutually exclusive
-                          rule: '!(has(self.version) && has(self.track))'
                       providerRefs:
                         description: |-
                           providerRefs overrides the provider list for the candidate.
@@ -2245,12 +2066,6 @@ spec:
                             description: |-
                               namespace is the namespace of the ToolRegistry resource.
                               If not specified, the same namespace as the AgentRuntime is used.
-
-                              Cross-namespace references are NOT supported: it must either be omitted
-                              or equal the AgentRuntime's own namespace. The agent pod's Role is
-                              namespace-scoped, so a foreign namespace is unreadable from the pod and
-                              registry-scoped ToolPolicies would not match. An AgentRuntime declaring
-                              one is rejected with ToolRegistryCrossNamespace.
                             type: string
                         required:
                         - name
@@ -2453,22 +2268,6 @@ spec:
                         - replicaWeighted
                         - external
                         type: string
-                    type: object
-                  trigger:
-                    description: |-
-                      trigger opts this agent into version-triggered canary rollouts: when a
-                      newer PromptPack version appears on the named channel, the controller
-                      sets it as the rollout candidate and the steps above canary it.
-                    properties:
-                      promptPackChannel:
-                        description: promptPackChannel is the release channel to watch
-                          for newer versions.
-                        enum:
-                        - stable
-                        - prerelease
-                        type: string
-                    required:
-                    - promptPackChannel
                     type: object
                 required:
                 - steps
@@ -5784,12 +5583,6 @@ spec:
                     description: |-
                       namespace is the namespace of the ToolRegistry resource.
                       If not specified, the same namespace as the AgentRuntime is used.
-
-                      Cross-namespace references are NOT supported: it must either be omitted
-                      or equal the AgentRuntime's own namespace. The agent pod's Role is
-                      namespace-scoped, so a foreign namespace is unreadable from the pod and
-                      registry-scoped ToolPolicies would not match. An AgentRuntime declaring
-                      one is rejected with ToolRegistryCrossNamespace.
                     type: string
                 required:
                 - name
@@ -5810,24 +5603,16 @@ spec:
             - message: spec.outputFormat is only valid when spec.mode is 'function'
               rule: self.mode == 'function' || !has(self.outputFormat)
             - message: spec.facades must not contain duplicate facade types
-              rule: '!has(self.facades) || self.facades.all(f, self.facades.exists_one(g,
-                g.type == f.type))'
-            - message: mode 'agent' allows only 'websocket', 'a2a' and 'custom' facades
-              rule: '!has(self.facades) || self.mode != ''agent'' || self.facades.all(f,
-                f.type == ''websocket'' || f.type == ''a2a'' || f.type == ''custom'')'
+              rule: self.facades.all(f, self.facades.exists_one(g, g.type == f.type))
+            - message: mode 'agent' allows only 'websocket' and 'a2a' facades
+              rule: self.mode != 'agent' || self.facades.all(f, f.type == 'websocket'
+                || f.type == 'a2a')
             - message: mode 'function' allows only 'rest' and 'mcp' facades
-              rule: '!has(self.facades) || self.mode != ''function'' || self.facades.all(f,
-                f.type == ''rest'' || f.type == ''mcp'')'
+              rule: self.mode != 'function' || self.facades.all(f, f.type == 'rest'
+                || f.type == 'mcp')
             - message: mode 'function' requires exactly one 'rest' facade
-              rule: '!has(self.facades) || self.mode != ''function'' || self.facades.exists_one(f,
-                f.type == ''rest'')'
-            - message: facade type 'custom' requires spec.facades[].image
-              rule: '!has(self.facades) || self.facades.all(f, f.type != ''custom''
-                || (has(f.image) && size(f.image) > 0))'
-            - message: spec.rollout.trigger requires a version-pinned spec.promptPackRef
-                and is mutually exclusive with promptPackRef.track
-              rule: '!(has(self.rollout) && has(self.rollout.trigger)) || (has(self.promptPackRef)
-                && has(self.promptPackRef.version) && !has(self.promptPackRef.track))'
+              rule: self.mode != 'function' || self.facades.exists_one(f, f.type ==
+                'rest')
           status:
             description: status defines the observed state of AgentRuntime
             properties:
@@ -6121,15 +5906,6 @@ spec:
                       (mode replicaWeighted). Lets dashboards label the weight "approx".
                     type: boolean
                 type: object
-              runtimeCapabilities:
-                description: |-
-                  runtimeCapabilities are the contract features the running runtime
-                  advertises, self-reported at startup. An open set — the control plane
-                  displays whatever is reported. Empty means the runtime predates capability
-                  advertisement (legacy) or has not reported yet.
-                items:
-                  type: string
-                type: array
               serviceEndpoint:
                 description: |-
                   serviceEndpoint is the internal Kubernetes service endpoint for the agent facade.

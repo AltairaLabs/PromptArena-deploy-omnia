@@ -4,14 +4,14 @@ import "fmt"
 
 // Omnia removed several AgentRuntime and ToolRegistry fields the adapter's config
 // vocabulary still exposes (omnia#1775). This file is the single place that knows
-// which ones, what replaced them, and how the adapter now behaves.
+// which ones, what replaced them, and how the adapter behaves on the deploy-intent
+// path.
 //
-// The important property: these fields are NOT deliverable by any route. The
-// per-resource path proxies raw JSON to the apiserver, which prunes unknown
-// fields under a structural schema and returns 201 — so a deploy carrying them
-// reports success while silently discarding them. Diverting such a config to
-// that path (which the adapter used to do) protects nothing and misleads the
-// operator, so instead the adapter states plainly what it dropped and why.
+// SCOPE: these warnings apply ONLY to the deploy-intent path. The per-resource
+// path runs exclusively against servers that do not serve that API, which
+// predate #1775 and therefore still HAVE these fields — there they work fine and
+// builders.go emits them unchanged. Warning "this is ignored" on that path would
+// be actively wrong.
 
 // removedFieldWarnings reports every deploy-config setting that names a field
 // Omnia no longer has. Each names the field, the fact it cannot be applied, and

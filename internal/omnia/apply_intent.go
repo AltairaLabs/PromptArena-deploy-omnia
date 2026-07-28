@@ -56,8 +56,6 @@ var intentActionToStatus = map[string]string{
 // reported as a failure, never retried down the other path, so no resource is
 // ever written twice.
 func executeApply(ctx context.Context, ac *applyContext) ([]ResourceState, error) {
-	reportRemovedFields(ac)
-
 	if reasons := preflightIntentV1(ac.pack, ac.cfg, ac.binding); len(reasons) > 0 {
 		reportIntentSkipped(ac, reasons)
 		return executeApplyPhases(ctx, ac)
@@ -81,10 +79,10 @@ func reportIntentSkipped(ac *applyContext, reasons []string) {
 		intentPctSubmit)
 }
 
-// reportRemovedFields surfaces, at apply time, every config setting naming a
-// field Omnia has removed. These are undeliverable by either deploy path, so
-// without this the deploy would report success while the setting quietly did
-// nothing. Advisory only — it never blocks the deploy.
+// reportRemovedFields surfaces every config setting naming a field Omnia has
+// removed. Called only once the deploy-intent path is confirmed, because that
+// is the only path whose server lacks these fields — the per-resource path
+// targets older servers where they still work. Advisory only.
 func reportRemovedFields(ac *applyContext) {
 	for _, warning := range removedFieldWarnings(ac.cfg) {
 		_ = ac.reporter.Progress(warning, intentPctSubmit)
@@ -123,6 +121,10 @@ func applyViaIntent(ctx context.Context, ac *applyContext) (res []ResourceState,
 		_ = ac.reporter.Error(deployErr)
 		return nil, true, deployErr
 	}
+
+	// Only now is the deploy-intent path confirmed: these fields are removed on
+	// THIS server, whereas on a per-resource-path server they still work.
+	reportRemovedFields(ac)
 
 	resources, reportErr := reportIntentResults(ac, result)
 	if reportErr != nil {
