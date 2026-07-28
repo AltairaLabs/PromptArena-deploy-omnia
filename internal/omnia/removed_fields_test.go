@@ -155,3 +155,69 @@ func TestIntentExternalAuth_SharedTokenAloneStillEmitsBlock(t *testing.T) {
 		t.Fatalf("externalAuth = %+v, want a migrated clientKeys block", got)
 	}
 }
+
+// TestDeployPathsUseDifferentAuthVocabulary locks in a divergence that looks
+// like a bug and is not.
+//
+// The two deploy paths target different Omnia generations, so they MUST emit
+// different field names:
+//
+//   - the per-resource path runs only against servers that do NOT serve the
+//     deploy-intent API. Those predate Omnia#1775 and have sharedToken/apiKeys
+//     but NOT clientKeys.
+//   - the deploy-intent path runs against servers that do, which have
+//     clientKeys and not the other two.
+//
+// Making them agree breaks one generation silently: the apiserver prunes the
+// unknown field and returns success, so the agent deploys with no external auth
+// and nothing reports it. That regression shipped once already.
+func TestDeployPathsUseDifferentAuthVocabulary(t *testing.T) {
+	cfg := &ExternalAuthConfig{
+		APIKeys:     &APIKeysAuthConfig{DefaultRole: "editor"},
+		SharedToken: &SharedTokenAuthConfig{SecretRef: "legacy", TrustEndUserHeader: true},
+	}
+
+	// Per-resource path: the OLD vocabulary, verbatim.
+	passthrough := buildExternalAuthSpec(cfg)
+	if _, ok := passthrough["apiKeys"]; !ok {
+		t.Errorf("per-resource path must emit apiKeys for pre-#1775 servers, got %v", passthrough)
+	}
+	if _, ok := passthrough["sharedToken"]; !ok {
+		t.Errorf("per-resource path must emit sharedToken for pre-#1775 servers, got %v", passthrough)
+	}
+	if _, ok := passthrough["clientKeys"]; ok {
+		t.Error("per-resource path must NOT emit clientKeys: those servers lack the field " +
+			"and would prune it, deploying an agent with no auth")
+	}
+
+	// Deploy-intent path: the CURRENT vocabulary, with sharedToken migrated.
+	intent := intentExternalAuth(cfg)
+	if intent == nil || intent.ClientKeys == nil {
+		t.Fatalf("deploy-intent path must emit clientKeys, got %+v", intent)
+	}
+	if intent.ClientKeys.DefaultRole != "editor" {
+		t.Errorf("explicit apiKeys must win the migration, got %+v", intent.ClientKeys)
+	}
+}
+
+// TestRemovedFieldWarningsDescribeTheIntentPathOnly guards the other half: the
+// warnings say these fields are ignored, which is true on the deploy-intent
+// path's servers and FALSE on the per-resource path's. Callers must therefore
+// gate them — Plan on intentPath, Apply on a confirmed intent submission.
+func TestRemovedFieldWarningsDescribeTheIntentPathOnly(t *testing.T) {
+	warnings := removedFieldWarnings(&Config{ExternalAuth: &ExternalAuthConfig{
+		SharedToken: &SharedTokenAuthConfig{SecretRef: "legacy"},
+	}})
+	if len(warnings) == 0 {
+		t.Fatal("expected a sharedToken warning")
+	}
+	// The builder for the OTHER path still emits the field, which is what makes
+	// gating necessary. If this ever stops being true the warnings can be
+	// emitted unconditionally.
+	if spec := buildExternalAuthSpec(&ExternalAuthConfig{
+		SharedToken: &SharedTokenAuthConfig{SecretRef: "legacy"},
+	}); spec["sharedToken"] == nil {
+		t.Error("per-resource path no longer emits sharedToken — if that is intended, the " +
+			"warning gating in Plan/Apply can be removed")
+	}
+}

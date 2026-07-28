@@ -86,10 +86,12 @@ func (p *Provider) Plan(ctx context.Context, req *deploy.PlanRequest) (*deploy.P
 	warnings = append(warnings, providerWarnings(cfg.Providers)...)
 	warnings = append(warnings, toolWarnings...)
 	warnings = append(warnings, pathWarnings...)
-	// Config that names fields Omnia has removed: undeliverable by either deploy
-	// path, so say so at plan time rather than letting a green deploy imply the
-	// setting was applied.
-	warnings = append(warnings, removedFieldWarnings(cfg)...)
+	// Config naming fields Omnia removed — but ONLY when this deploy will take
+	// the deploy-intent path. The per-resource path targets older servers where
+	// these fields still exist and work, so warning there would be wrong.
+	if intentPath {
+		warnings = append(warnings, removedFieldWarnings(cfg)...)
+	}
 
 	return &deploy.PlanResponse{
 		Changes:  changes,

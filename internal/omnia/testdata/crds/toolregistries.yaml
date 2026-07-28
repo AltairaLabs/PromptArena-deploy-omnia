@@ -11,8 +11,6 @@ spec:
     kind: ToolRegistry
     listKind: ToolRegistryList
     plural: toolregistries
-    shortNames:
-    - tr
     singular: toolregistry
   scope: Namespaced
   versions:
@@ -281,10 +279,8 @@ spec:
                           additionalProperties:
                             type: string
                           description: |-
-                            headerParams maps an argument NAME to the HTTP header NAME it is sent as
-                            (arg -> header). The argument's value is sent as-is (no templating), and the
-                            argument is consumed (removed from the request body).
-                            Example: {"customer_id": "X-Customer-ID"}
+                            headerParams maps arg names to HTTP header names using template strings.
+                            Example: {"X-Customer-ID": "{{.customer_id}}"}
                           type: object
                         headers:
                           additionalProperties:
@@ -306,10 +302,8 @@ spec:
                             type: string
                           type: array
                         redact:
-                          description: |-
-                            redact lists top-level response field names whose values are replaced with
-                            "[REDACTED]" in the tool result returned to the LLM. Applies only when the
-                            response body is a JSON object; runs before responseMapping.
+                          description: redact lists response field names to exclude
+                            from logs and tracing.
                           items:
                             type: string
                           type: array
@@ -388,11 +382,9 @@ spec:
                           type: object
                         urlTemplate:
                           description: |-
-                            urlTemplate builds the request URL using single-brace {argName} placeholders
-                            (plain string substitution, NOT Go text/template). When set it REPLACES
-                            endpoint, so it must be a full URL (scheme + host). Arguments used in the
-                            template are consumed (removed from the request body/query).
-                            Example: "https://api.example.com/users/{user_id}/orders/{order_id}"
+                            urlTemplate is a Go text/template for constructing the URL with path parameters.
+                            Example: "/users/{{.user_id}}/orders/{{.order_id}}"
+                            When set, overrides endpoint for URL construction; endpoint is used as the base URL.
                           type: string
                       required:
                       - endpoint
@@ -598,6 +590,28 @@ spec:
                       required:
                       - specURL
                       type: object
+                    selector:
+                      description: |-
+                        selector discovers the handler endpoint from Kubernetes Services.
+                        Mutually exclusive with inline endpoint configuration.
+                      properties:
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          description: matchLabels specifies labels that must match
+                            on the Service.
+                          type: object
+                        namespace:
+                          description: |-
+                            namespace specifies the namespace to search for Services.
+                            If empty, searches in the same namespace as the ToolRegistry.
+                          type: string
+                        port:
+                          description: |-
+                            port specifies the port name or number on the Service.
+                            If empty, uses the first port.
+                          type: string
+                      type: object
                     timeout:
                       default: 30s
                       description: |-
@@ -653,28 +667,6 @@ spec:
                       && (has(self.openAPIConfig.authType) || has(self.openAPIConfig.authSecretRef)))))'
                 minItems: 1
                 type: array
-              probe:
-                description: |-
-                  probe optionally enables periodic reachability probing of tool endpoints.
-                  When disabled (the default), a tool's status reflects configuration
-                  validity only. When enabled, the controller TCP-dials each tool's endpoint
-                  and marks it Available or Unavailable, which drives the registry phase
-                  (Ready / Degraded / Failed).
-                properties:
-                  enabled:
-                    description: enabled turns on reachability probing. Off by default.
-                    type: boolean
-                  interval:
-                    default: 60s
-                    description: interval is how often endpoints are re-probed.
-                    type: string
-                  timeout:
-                    default: 5s
-                    description: timeout bounds each endpoint's TCP dial.
-                    type: string
-                required:
-                - enabled
-                type: object
             required:
             - handlers
             type: object
