@@ -17,10 +17,15 @@ const intentAPIVersionV1 = "deploy.omnia.altairalabs.ai/v1"
 // construction from here on — this type deliberately models intent, not CRDs, so
 // a CRD schema change is no longer an adapter-breaking change (Omnia#1863).
 //
-// It mirrors the server's DeployIntent (omnia internal/api/deploy/types.go). Only
-// the fields the adapter can populate from its config surface are modeled; the
-// server's rollout block is server/controller-driven and is deliberately not sent
-// (an existing trigger-mode agent's canary is preserved server-side).
+// It mirrors the server's DeployIntent (omnia internal/api/deploy/types.go).
+// Only the fields the adapter can populate from its config surface are modeled.
+//
+// The rollout block draws a deliberate line: the adapter sends rollout POLICY
+// (which channel to watch, the canary steps) because that is operator intent,
+// and never sends rollout STATE (the in-flight candidate, its weight, sticky
+// sessions, rollback) because that belongs to the rollout controller. The server
+// classifies the fields the same way, and preserves the state precisely because
+// a deploy omits it.
 type deployIntent struct {
 	APIVersion string            `json:"apiVersion"`
 	Pack       packIntent        `json:"pack"`
@@ -65,6 +70,28 @@ type agentIntent struct {
 	ExternalAuth *externalAuthIntent `json:"externalAuth,omitempty"`
 	Memory       *memoryIntent       `json:"memory,omitempty"`
 	Evals        *evalsIntent        `json:"evals,omitempty"`
+	Rollout      *rolloutIntent      `json:"rollout,omitempty"`
+}
+
+// rolloutIntent carries the rollout POLICY — which channel to watch and the
+// canary steps. It deliberately has no candidate/stickySession/rollback: that is
+// live state owned by the rollout controller, and the server preserves it
+// precisely because a deploy does not send it. Omitting the block entirely
+// leaves an existing rollout, in flight or not, untouched.
+type rolloutIntent struct {
+	Trigger *rolloutTriggerIntent `json:"trigger,omitempty"`
+	Steps   []rolloutStepIntent   `json:"steps,omitempty"`
+}
+
+// rolloutTriggerIntent opts the agent into version-triggered canaries.
+type rolloutTriggerIntent struct {
+	PromptPackChannel string `json:"promptPackChannel"`
+}
+
+// rolloutStepIntent is one canary step: shift traffic, or pause.
+type rolloutStepIntent struct {
+	SetWeight     *int32 `json:"setWeight,omitempty"`
+	PauseDuration string `json:"pauseDuration,omitempty"`
 }
 
 // providerBind is one provider binding: logical slot, Provider CRD name, role.
@@ -349,6 +376,7 @@ func intentAgents(pack *prompt.Pack, cfg *Config, binding ToolBinding) []agentIn
 			ExternalAuth: intentExternalAuth(cfg.ExternalAuth),
 			Memory:       intentMemory(cfg.Memory),
 			Evals:        intentEvals(cfg.Evals),
+			Rollout:      intentRollout(cfg.Rollout),
 		})
 	}
 	return agents
@@ -530,6 +558,28 @@ func intentEvals(e *EvalsConfig) *evalsIntent {
 	}
 	if e.Worker != nil {
 		out.Worker = e.Worker.Groups
+	}
+	return out
+}
+
+// intentRollout maps the deploy config's rollout policy. Returns nil when no
+// policy is configured, which is what keeps a controller-driven rollout intact:
+// the server preserves the live rollout wholesale when the intent omits it.
+func intentRollout(r *RolloutConfig) *rolloutIntent {
+	if r == nil || r.Channel == "" {
+		return nil
+	}
+	out := &rolloutIntent{
+		Trigger: &rolloutTriggerIntent{PromptPackChannel: r.Channel},
+		Steps:   make([]rolloutStepIntent, 0, len(r.Steps)),
+	}
+	for _, step := range r.Steps {
+		entry := rolloutStepIntent{PauseDuration: step.Pause}
+		if step.SetWeight != nil {
+			w := int32(*step.SetWeight) //nolint:gosec // validated to 0-100
+			entry.SetWeight = &w
+		}
+		out.Steps = append(out.Steps, entry)
 	}
 	return out
 }

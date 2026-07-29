@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -2011,6 +2012,171 @@ func TestIntegration_VersionBumpTriggersCanary(t *testing.T) {
 	}
 }
 
+// TestIntegration_RolloutPolicyConfiguresTriggerMode is the end-to-end proof for
+// #84: an operator can declare a rollout policy in the deploy config and get a
+// version-triggered agent, without touching the dashboard or kubectl.
+//
+// Every other rollout test in this file sets trigger mode with a RAW API write,
+// because until now the adapter could not express it. This one goes through the
+// adapter, then publishes a newer version and asserts the canary actually fires
+// — closing the loop on Omnia#1835's push trigger from the deploy side.
+func TestIntegration_RolloutPolicyConfiguresTriggerMode(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{
+		rollout: map[string]any{
+			"channel": "stable",
+			"steps": []any{
+				map[string]any{"setWeight": 25},
+				map[string]any{"pause": "30s"},
+			},
+		},
+	})
+	if !itServesIntentAPI(t, cfg) {
+		t.Skip("workspace does not serve the deploy-intent API")
+	}
+
+	state1, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	agentName := stateResourceName(t, state1, ResTypeAgentRuntime)
+	spec := specOf(t, client, ResTypeAgentRuntime, agentName)
+
+	// The policy must have landed on the agent from the config alone.
+	rollout, _ := spec["rollout"].(map[string]any)
+	if rollout == nil {
+		t.Fatalf("agent %q has no spec.rollout — the configured policy was not applied", agentName)
+	}
+	if got := nestedString(rollout, "trigger", "promptPackChannel"); got != "stable" {
+		t.Errorf("rollout.trigger.promptPackChannel = %q, want stable", got)
+	}
+	// Assert the STEPS THEMSELVES, not just how many — a count check would pass
+	// on any two steps, including ones the mapping mangled.
+	steps, _ := rollout["steps"].([]any)
+	if len(steps) != 2 {
+		t.Fatalf("rollout.steps = %v, want the 2 configured steps", rollout["steps"])
+	}
+	first, _ := steps[0].(map[string]any)
+	if w, _ := first["setWeight"].(float64); w != 25 {
+		t.Errorf("steps[0].setWeight = %v, want the configured 25", first["setWeight"])
+	}
+	second, _ := steps[1].(map[string]any)
+	if got := nestedString(second, "pause", "duration"); got != "30s" {
+		t.Errorf("steps[1].pause.duration = %q, want the configured 30s (step = %v)", got, second)
+	}
+	pinBefore := jsonOf(t, spec["promptPackRef"])
+
+	// ...and it must actually work: publish a newer version, expect a canary.
+	applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "2.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state1,
+	})
+
+	var candidateVersion string
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		live, _ := specOf(t, client, ResTypeAgentRuntime, agentName)["rollout"].(map[string]any)
+		candidateVersion = nestedString(live, "candidate", "promptPackRef", "version")
+		if candidateVersion != "" {
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+	if candidateVersion != "2.0.0" {
+		t.Errorf("rollout candidate version = %q, want 2.0.0 — an agent configured for "+
+			"version-triggered rollout did not canary the version just published",
+			candidateVersion)
+	}
+
+	// A canary, not a hard swap.
+	pinAfter := jsonOf(t, specOf(t, client, ResTypeAgentRuntime, agentName)["promptPackRef"])
+	if pinAfter != pinBefore {
+		t.Errorf("stable pin moved from %s to %s — traffic hard-swapped instead of canarying",
+			pinBefore, pinAfter)
+	}
+
+	// ...and the canary must actually RUN the steps that were configured. A
+	// candidate appearing only proves the trigger fired; without this the policy
+	// could be inert and the test would still pass.
+	active, weight, message := awaitRolloutProgress(t, cfg, agentName, 120*time.Second)
+	if !active {
+		t.Errorf("status.rollout.active never became true — a candidate was selected but the "+
+			"canary did not start, so the configured steps are not being executed "+
+			"(last weight = %v, message = %q)", weight, message)
+		return
+	}
+	// 25 is the first step THIS TEST configured. Reaching it proves the policy is
+	// executed, not merely stored.
+	if weight != 25 {
+		t.Errorf("status.rollout.currentWeight = %v, want 25 from the first configured step "+
+			"(message = %q)", weight, message)
+	}
+	t.Logf("canary running: weight=%v %q", weight, message)
+}
+
+// rawAgentStatus fetches an agent's status as raw JSON.
+//
+// It bypasses the adapter's typed client deliberately: ResourceResponse.Status
+// models only {phase, conditions}, so status.rollout is discarded at decode
+// time and no assertion made through that client could ever see it.
+func rawAgentStatus(t *testing.T, deployConfig, agentName string) map[string]any {
+	t.Helper()
+	cfg, err := parseConfig(deployConfig)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+
+	url := fmt.Sprintf("%s/api/workspaces/%s/agents/%s",
+		cfg.endpointRoot(), cfg.Workspace, agentName)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.resolveToken())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get agent %q: %v", agentName, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+
+	var obj struct {
+		Status map[string]any `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&obj); err != nil {
+		t.Fatalf("decode agent %q: %v", agentName, err)
+	}
+	return obj.Status
+}
+
+// awaitRolloutProgress polls until a rollout is active, returning whether it
+// started and the traffic weight it reached.
+func awaitRolloutProgress(
+	t *testing.T, deployConfig, agentName string, timeout time.Duration,
+) (active bool, weight float64, message string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		rollout, _ := rawAgentStatus(t, deployConfig, agentName)["rollout"].(map[string]any)
+		if rollout != nil {
+			weight, _ = rollout["currentWeight"].(float64)
+			message, _ = rollout["message"].(string)
+			if isActive, _ := rollout["active"].(bool); isActive {
+				return true, weight, message
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return false, weight, message
+}
 
 // TestIntegration_ConsoleLinkComesFromOmnia is the end-to-end proof for #79.
 //

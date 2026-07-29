@@ -531,6 +531,40 @@ const configSchema = `{
       },
       "additionalProperties": false
     },
+    "rollout": {
+      "type": "object",
+      "description": "Rollout policy: channel to watch and canary steps. Omit to leave any existing rollout untouched.",
+      "required": ["channel", "steps"],
+      "properties": {
+        "channel": {
+          "type": "string",
+          "enum": ["stable", "prerelease"],
+          "description": "Release channel to watch for newer pack versions"
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Canary sequence; each step either sets a traffic weight or pauses",
+          "items": {
+            "type": "object",
+            "properties": {
+              "setWeight": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Percentage of traffic sent to the candidate"
+              },
+              "pause": {
+                "type": "string",
+                "description": "Hold before advancing (e.g. 30s); empty waits for manual promotion"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "labels": {
       "type": "object",
       "additionalProperties": { "type": "string" },
@@ -572,6 +606,7 @@ type Config struct {
 	Runtime      *RuntimeConfig      `json:"runtime,omitempty"`
 	ExternalAuth *ExternalAuthConfig `json:"externalAuth,omitempty"`
 	Memory       *MemoryConfig       `json:"memory,omitempty"`
+	Rollout      *RolloutConfig      `json:"rollout,omitempty"`
 	Evals        *EvalsConfig        `json:"evals,omitempty"`
 	Labels       map[string]string   `json:"labels,omitempty"`
 	DryRun       bool                `json:"dry_run,omitempty"`
@@ -734,6 +769,103 @@ type EvalPathConfig struct {
 	Groups []string `json:"groups,omitempty"`
 }
 
+// RolloutConfig declares an agent's rollout POLICY: which release channel to
+// watch for new pack versions, and the canary steps to run when one appears.
+//
+// Policy only. The live rollout STATE — the in-flight candidate, its traffic
+// weight, sticky sessions, rollback settings — belongs to the rollout
+// controller, and a deploy never sends it. Omitting this block entirely leaves
+// any existing rollout, in-flight or not, exactly as it is.
+type RolloutConfig struct {
+	// Channel is the release channel to watch: "stable" (highest non-prerelease
+	// version) or "prerelease" (highest overall). Setting it opts the agent into
+	// version-triggered canaries: publishing a newer version on the channel makes
+	// the controller canary it rather than hard-swapping the running pods.
+	Channel string `json:"channel,omitempty"`
+
+	// Steps is the canary sequence. The CRD requires at least one step whenever a
+	// rollout is configured, so a channel with no steps is a config error rather
+	// than a default.
+	Steps []RolloutStep `json:"steps,omitempty"`
+}
+
+// RolloutStep is one step of a canary. Exactly one of the fields is set:
+// SetWeight shifts traffic to the candidate, Pause holds before advancing.
+type RolloutStep struct {
+	// SetWeight is the percentage of traffic sent to the candidate, 0-100.
+	SetWeight *int `json:"setWeight,omitempty"`
+	// Pause holds the rollout for a duration (e.g. "30s", "5m"). An empty pause
+	// waits indefinitely for a manual promotion.
+	Pause string `json:"pause,omitempty"`
+}
+
+// Rollout channel values recognized by validate. They mirror the CRD's
+// promptPackChannel enum.
+const (
+	rolloutChannelStable     = "stable"
+	rolloutChannelPrerelease = "prerelease"
+)
+
+// validateRollout checks the rollout policy against the constraints the CRD
+// enforces, so a bad policy is reported at plan time rather than surfacing as
+// an opaque apiserver rejection mid-apply.
+func validateRollout(r *RolloutConfig) []string {
+	if r == nil {
+		return nil
+	}
+	var errs []string
+
+	switch r.Channel {
+	case "":
+		errs = append(errs, fmt.Sprintf(
+			"rollout.channel is required when a rollout is configured — it names the "+
+				"release channel to watch (%q or %q)",
+			rolloutChannelStable, rolloutChannelPrerelease))
+	case rolloutChannelStable, rolloutChannelPrerelease:
+	default:
+		errs = append(errs, fmt.Sprintf(
+			"rollout.channel %q is invalid — use %q or %q",
+			r.Channel, rolloutChannelStable, rolloutChannelPrerelease))
+	}
+
+	// The CRD requires MinItems=1 on spec.rollout.steps, so a rollout with no
+	// steps produces an object the apiserver rejects outright.
+	if len(r.Steps) == 0 {
+		errs = append(errs, "rollout.steps must not be empty — a rollout needs at least one "+
+			`step (e.g. {"setWeight": 25})`)
+	}
+	for i, step := range r.Steps {
+		errs = append(errs, validateRolloutStep(i, step)...)
+	}
+	return errs
+}
+
+// validateRolloutStep checks one canary step: exactly one action, and a weight
+// within the CRD's 0-100 bound.
+func validateRolloutStep(i int, step RolloutStep) []string {
+	var errs []string
+	hasWeight := step.SetWeight != nil
+	hasPause := step.Pause != ""
+
+	if !hasWeight && !hasPause {
+		errs = append(errs, fmt.Sprintf(
+			"rollout.steps[%d] is empty — set either setWeight or pause", i))
+	}
+	if hasWeight && hasPause {
+		errs = append(errs, fmt.Sprintf(
+			"rollout.steps[%d] sets both setWeight and pause — a step does one or the other", i))
+	}
+	if hasWeight && (*step.SetWeight < 0 || *step.SetWeight > maxRolloutWeight) {
+		errs = append(errs, fmt.Sprintf(
+			"rollout.steps[%d].setWeight is %d — it is a percentage, so it must be 0-%d",
+			i, *step.SetWeight, maxRolloutWeight))
+	}
+	return errs
+}
+
+// maxRolloutWeight is the CRD's upper bound on a canary traffic percentage.
+const maxRolloutWeight = 100
+
 // parseConfig unmarshals JSON config into Config.
 func parseConfig(raw string) (*Config, error) {
 	var cfg Config
@@ -824,6 +956,8 @@ func (c *Config) validate() []string {
 	errs = append(errs, validateProviderBindings(c.Providers)...)
 
 	errs = append(errs, validateToolHandlers(c.Tools)...)
+
+	errs = append(errs, validateRollout(c.Rollout)...)
 
 	if len(c.Tools) > 0 && c.ToolRegistryRef != "" {
 		errs = append(errs, "tools and tool_registry_ref are mutually exclusive — "+
