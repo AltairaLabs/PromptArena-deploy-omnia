@@ -54,7 +54,9 @@ func (p *Provider) Status(
 		}
 		// Only agents have a console page worth opening.
 		if rs.Type == ResTypeAgentRuntime {
-			rs.Links = consoleLinks(cfg, rs.Name)
+			// Status has no deploy response to read a URL from, so it falls back
+			// to the constructed one. It is the same page either way.
+			rs.Links = legacyConsoleLinks(cfg, rs.Name)
 		}
 		resources = append(resources, rs)
 	}

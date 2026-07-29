@@ -196,7 +196,9 @@ func applyAgentRuntimeTarget(
 		if rerr := waitForReconcile(ctx, ac.client, ResTypeAgentRuntime, sanitizeName(agentName)); rerr != nil {
 			_ = ac.reporter.Error(rerr)
 			applyErr = combineErrors(applyErr, rerr)
-		} else if cbErr := reportAgentAccessURL(ac, agentName, pct); cbErr != nil {
+		} else if cbErr := reportAgentReady(
+			ac, agentName, buildLegacyConsoleURL(ac.cfg, agentName), pct,
+		); cbErr != nil {
 			return res, true, cbErr
 		}
 	}
@@ -321,13 +323,14 @@ func agentRuntimeSucceeded(res []ResourceState) bool {
 	return false
 }
 
-// reportAgentAccessURL emits a Progress event with the dashboard deep-link for
-// a freshly deployed AgentRuntime.
-// It shares agentConsoleURL with the structured Links on the resource result,
-// so a deploy never reports two different URLs for the same agent. When the
-// console base is unknown both are simply absent.
-func reportAgentAccessURL(ac *applyContext, agentName string, pct float64) error {
-	consoleURL := agentConsoleURL(ac.cfg, agentName)
+// reportAgentReady emits the "agent is up, here is where to open it" progress
+// message. consoleURL is whatever the caller resolved — the URL Omnia returned
+// on the deploy-intent path, or the constructed one on the per-resource path —
+// so the message always quotes the same URL as the structured link beside it.
+//
+// An empty URL emits nothing at all. There is no message worth showing that
+// says "ready, but I don't know where".
+func reportAgentReady(ac *applyContext, agentName, consoleURL string, pct float64) error {
 	if consoleURL == "" {
 		return nil
 	}
@@ -445,7 +448,7 @@ func applyResourcePhase(
 		Status: status, Detail: resp.Metadata.UID,
 	}
 	if resType == ResTypeAgentRuntime {
-		result.Links = consoleLinks(ac.cfg, name)
+		result.Links = legacyConsoleLinks(ac.cfg, name)
 	}
 	if cbErr := ac.reporter.Resource(result); cbErr != nil {
 		return nil, cbErr

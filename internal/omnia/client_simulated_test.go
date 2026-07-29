@@ -208,6 +208,10 @@ func (s *simulatedClient) simulateIntentApply(intent deployIntent) []DeployResou
 	for _, a := range intent.Agents {
 		results = append(results, DeployResourceResult{
 			Kind: "AgentRuntime", Name: a.Name, Action: intentActionCreated,
+			// Mirrors the dashboard proxy, which annotates each agent result with
+			// a console deep link on the way back (Omnia#1978). Agents only — a
+			// pack object has no console page.
+			URL: simulatedConsoleURL(a.Name),
 		})
 		s.seedResource(ResTypeAgentRuntime, a.Name)
 	}
@@ -469,4 +473,11 @@ func newSimulatedClientFactory(client *simulatedClient) omniaClientFactory {
 	return func(cfg *Config) (omniaClient, error) {
 		return client, nil
 	}
+}
+
+// simulatedConsoleURL is the console deep link the dashboard proxy would attach
+// to an agent result. Shaped like the real one so tests assert on a URL the
+// adapter genuinely receives rather than one it invents.
+func simulatedConsoleURL(agentName string) string {
+	return "https://omnia.test.com/console?workspace=test-ws&agent=" + agentName
 }

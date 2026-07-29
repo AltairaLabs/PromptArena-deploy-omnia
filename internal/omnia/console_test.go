@@ -48,8 +48,8 @@ func TestAgentConsoleURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := agentConsoleURL(tt.cfg, "my-agent"); got != tt.want {
-				t.Errorf("agentConsoleURL() = %q, want %q", got, tt.want)
+			if got := buildLegacyConsoleURL(tt.cfg, "my-agent"); got != tt.want {
+				t.Errorf("buildLegacyConsoleURL() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -58,7 +58,7 @@ func TestAgentConsoleURL(t *testing.T) {
 func TestAgentConsoleURL_SanitizesAndEscapes(t *testing.T) {
 	cfg := &Config{APIEndpoint: "https://omnia.example.com", Workspace: "my team"}
 
-	got := agentConsoleURL(cfg, "My_Agent")
+	got := buildLegacyConsoleURL(cfg, "My_Agent")
 	// The agent name goes through the same sanitizer used to name the resource,
 	// so the link points at the object that actually exists.
 	if !strings.Contains(got, "/agents/my-agent") {
@@ -76,7 +76,7 @@ func TestAgentConsoleURL_SanitizesAndEscapes(t *testing.T) {
 func TestConsoleLinks(t *testing.T) {
 	cfg := &Config{APIEndpoint: "https://omnia.example.com", Workspace: "ws"}
 
-	links := consoleLinks(cfg, "my-agent")
+	links := legacyConsoleLinks(cfg, "my-agent")
 	if len(links) != 1 {
 		t.Fatalf("links = %+v, want exactly one", links)
 	}
@@ -91,10 +91,10 @@ func TestConsoleLinks(t *testing.T) {
 func TestConsoleLinks_NilWhenUnknown(t *testing.T) {
 	// The protocol treats an absent Links field as "no links", and a client must
 	// not synthesize one — so nil is the correct, fully-supported answer.
-	if got := consoleLinks(&Config{Workspace: "ws"}, "my-agent"); got != nil {
+	if got := legacyConsoleLinks(&Config{Workspace: "ws"}, "my-agent"); got != nil {
 		t.Errorf("links = %+v, want nil when the console base is unknown", got)
 	}
-	if got := consoleLinks(nil, "my-agent"); got != nil {
+	if got := legacyConsoleLinks(nil, "my-agent"); got != nil {
 		t.Errorf("links = %+v, want nil for a nil config", got)
 	}
 }

@@ -137,7 +137,7 @@ func applyViaIntent(ctx context.Context, ac *applyContext) (res []ResourceState,
 		return resources, true, applyErr
 	}
 
-	return resources, true, verifyIntentAgents(ctx, ac, resources)
+	return resources, true, verifyIntentAgents(ctx, ac, resources, agentConsoleURLs(result))
 }
 
 // reportIntentUnavailable explains the fallback to the per-resource path.
@@ -176,7 +176,7 @@ func reportIntentResults(ac *applyContext, result *DeployResult) ([]ResourceStat
 			Status: status, Detail: r.Error,
 		}
 		if resType == ResTypeAgentRuntime {
-			result.Links = consoleLinks(ac.cfg, r.Name)
+			result.Links = consoleLinksFromURL(r.URL)
 		}
 		if cbErr := ac.reporter.Resource(result); cbErr != nil {
 			return resources, cbErr
@@ -285,7 +285,9 @@ func intentResultError(result *DeployResult) error {
 // correctness check the passthrough path performs per target: a created-but-
 // never-reconciled AgentRuntime fails the deploy loudly instead of reporting a
 // success the cluster never delivered.
-func verifyIntentAgents(ctx context.Context, ac *applyContext, resources []ResourceState) error {
+func verifyIntentAgents(
+	ctx context.Context, ac *applyContext, resources []ResourceState, consoleURLs map[string]string,
+) error {
 	var verifyErr error
 	for _, r := range resources {
 		if r.Type != ResTypeAgentRuntime || !intentAgentWritten(r.Status) {
@@ -296,7 +298,7 @@ func verifyIntentAgents(ctx context.Context, ac *applyContext, resources []Resou
 			verifyErr = combineErrors(verifyErr, rerr)
 			continue
 		}
-		if cbErr := reportAgentAccessURL(ac, r.Name, intentPctVerify); cbErr != nil {
+		if cbErr := reportAgentReady(ac, r.Name, consoleURLs[r.Name], intentPctVerify); cbErr != nil {
 			return cbErr
 		}
 	}
@@ -308,6 +310,21 @@ func verifyIntentAgents(ctx context.Context, ac *applyContext, resources []Resou
 func intentAgentWritten(status string) bool {
 	return status == ResStatusCreated || status == ResStatusUpdated
 }
+
+// agentConsoleURLs indexes the console URLs Omnia returned, by agent name, so
+// the readiness message and the structured link quote the same URL.
+func agentConsoleURLs(result *DeployResult) map[string]string {
+	urls := make(map[string]string, len(result.Results))
+	for _, r := range result.Results {
+		if r.Kind == kindAgentRuntime && r.URL != "" {
+			urls[r.Name] = r.URL
+		}
+	}
+	return urls
+}
+
+// kindAgentRuntime is the deploy-intent API's kind for an agent.
+const kindAgentRuntime = "AgentRuntime"
 
 // isIntentUnsupported reports whether an error from the deploy-intent endpoint
 // proves this server does not serve the contract, so falling back to the

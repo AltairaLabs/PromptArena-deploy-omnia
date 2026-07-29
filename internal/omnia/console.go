@@ -8,17 +8,37 @@ import (
 	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
 )
 
-// agentConsoleURL builds the dashboard URL for a deployed agent, or "" when the
-// console base is unknown.
+// Console links come from two places, and the split is deliberate.
 //
-// The workspace is always included: an operator with access to more than one
-// would otherwise land on a page that resolves against whichever workspace the
-// dashboard last had selected. Both the agent name and the workspace are query-
-// escaped, since neither is guaranteed URL-safe just because it is a valid
-// Kubernetes name.
+// On the deploy-intent path Omnia RETURNS the URL per resource (Omnia#1978) and
+// the adapter passes it through untouched. That is the correct arrangement: the
+// dashboard owns its routes and knows its own public address, so it can move
+// from /agents/{name} to the /console deep link — as it already has — without
+// any adapter change. Building the URL here would hardcode an Omnia route into
+// this repo and make changing it a coordinated release across two projects.
 //
-// Returning "" rather than a partial URL is deliberate — see consoleLinks.
-func agentConsoleURL(cfg *Config, agentName string) string {
+// The per-resource path gets no URL, because the servers it targets predate the
+// field. There the adapter still constructs one, which is safe for exactly those
+// servers: /agents/{name} is the route they have. That construction is confined
+// to buildLegacyConsoleURL and disappears with the per-resource path itself.
+
+// consoleLinksFromURL wraps a server-provided console URL as resource links.
+// Returns nil for an empty URL, which is Omnia's way of saying "not known" — a
+// link that 404s or lands in the wrong workspace is worse than no link, and the
+// protocol treats an absent Links field as simply no links.
+func consoleLinksFromURL(consoleURL string) []deploy.ResourceLink {
+	return adaptersdk.ConsoleLink(consoleURL)
+}
+
+// buildLegacyConsoleURL builds the agent page URL for servers that do not return
+// one — i.e. those with no deploy-intent API. It is the pre-existing behavior
+// of the post-deploy access message, kept so upgrading the adapter does not take
+// that link away from anyone still on a released Omnia.
+//
+// Returns "" when the base or the workspace is unknown. The workspace is always
+// included: without it the page resolves against whichever workspace the
+// dashboard last had selected, which is a wrong link rather than an absent one.
+func buildLegacyConsoleURL(cfg *Config, agentName string) string {
 	if cfg == nil {
 		return ""
 	}
@@ -30,13 +50,7 @@ func agentConsoleURL(cfg *Config, agentName string) string {
 		root, url.PathEscape(sanitizeName(agentName)), url.QueryEscape(cfg.Workspace))
 }
 
-// consoleLinks returns the operator-facing links for a deployed agent, or nil
-// when the console URL cannot be determined.
-//
-// nil is the correct answer for "we don't know". A link that 404s or lands on
-// the wrong workspace is worse than no link, and the protocol treats an absent
-// Links field as simply "no links" — clients render nothing and must not
-// synthesize a URL of their own.
-func consoleLinks(cfg *Config, agentName string) []deploy.ResourceLink {
-	return adaptersdk.ConsoleLink(agentConsoleURL(cfg, agentName))
+// legacyConsoleLinks is buildLegacyConsoleURL as resource links, or nil.
+func legacyConsoleLinks(cfg *Config, agentName string) []deploy.ResourceLink {
+	return adaptersdk.ConsoleLink(buildLegacyConsoleURL(cfg, agentName))
 }
