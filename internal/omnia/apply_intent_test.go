@@ -105,7 +105,7 @@ func TestApply_UsesDeployIntentWhenServed(t *testing.T) {
 	if countContaining(msgs, "deploy-intent API") == 0 {
 		t.Errorf("expected a progress message naming the deploy-intent path, got %v", msgs)
 	}
-	if countContaining(msgs, "https://omnia.test.com/agents/test-pack?workspace=test-ws") != 1 {
+	if countContaining(msgs, "https://omnia.test.com/console?workspace=test-ws&agent=test-pack") != 1 {
 		t.Errorf("expected the access URL after reconcile, got %v", msgs)
 	}
 }
@@ -751,5 +751,97 @@ func TestHTTPClient_GetDeployProfile_Errors(t *testing.T) {
 	})
 	if _, err := newTestHTTPClient(t, garbage).GetDeployProfile(context.Background()); err == nil {
 		t.Fatal("expected a decode error")
+	}
+}
+
+func TestReportIntentResults_AttachesConsoleLinkToAgents(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("ParsePack: %v", err)
+	}
+	cfg, err := parseConfig(testDeployConfig)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+
+	var events []*deploy.ApplyEvent
+	ac := &applyContext{pack: pack, cfg: cfg, reporter: newTestReporter(&events)}
+
+	// The URL comes from Omnia (#1978). Note it is the /console deep link, a
+	// route this adapter does not know and must never construct — which is the
+	// point: Omnia moved from /agents/{name} to this without an adapter change.
+	const serverURL = "https://omnia.test.com/console?workspace=test-ws&agent=my-agent"
+
+	if _, rerr := reportIntentResults(ac, &DeployResult{
+		Succeeded: true,
+		Results: []DeployResourceResult{
+			{Kind: "PromptPack", Name: "pp-abc", Action: intentActionCreated},
+			{Kind: "AgentRuntime", Name: "my-agent", Action: intentActionCreated, URL: serverURL},
+		},
+	}); rerr != nil {
+		t.Fatalf("unexpected error: %v", rerr)
+	}
+
+	byType := map[string]*deploy.ResourceResult{}
+	for _, e := range events {
+		if e.Resource != nil {
+			byType[e.Resource.Type] = e.Resource
+		}
+	}
+
+	agent := byType[ResTypeAgentRuntime]
+	if agent == nil || len(agent.Links) != 1 {
+		t.Fatalf("agent result = %+v, want one console link", agent)
+	}
+	if agent.Links[0].URL != serverURL {
+		t.Errorf("console link = %q, want the URL Omnia returned verbatim", agent.Links[0].URL)
+	}
+
+	// Only agents have a console page — a pack object must carry no link.
+	if p := byType[ResTypePromptPack]; p == nil || p.Links != nil {
+		t.Errorf("promptpack result = %+v, want no links", p)
+	}
+}
+
+func TestReportIntentResults_NoLinkWhenServerReturnsNoURL(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("ParsePack: %v", err)
+	}
+	cfg, err := parseConfig(testDeployConfig)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+
+	var events []*deploy.ApplyEvent
+	ac := &applyContext{pack: pack, cfg: cfg, reporter: newTestReporter(&events)}
+
+	// Omnia omits the URL when it does not know one. The adapter must report no
+	// link rather than fall back to constructing an Omnia route — that fallback
+	// is exactly what pins our repo to their URL shape.
+	if _, rerr := reportIntentResults(ac, &DeployResult{
+		Succeeded: true,
+		Results: []DeployResourceResult{
+			{Kind: "AgentRuntime", Name: "my-agent", Action: intentActionCreated},
+		},
+	}); rerr != nil {
+		t.Fatalf("unexpected error: %v", rerr)
+	}
+
+	for _, e := range events {
+		if e.Resource != nil && e.Resource.Type == ResTypeAgentRuntime && e.Resource.Links != nil {
+			t.Errorf("agent links = %+v, want none when Omnia returned no URL", e.Resource.Links)
+		}
+	}
+}
+
+func TestAgentConsoleURLs_IndexesOnlyAgentsWithURLs(t *testing.T) {
+	got := agentConsoleURLs(&DeployResult{Results: []DeployResourceResult{
+		{Kind: "AgentRuntime", Name: "a", URL: "https://x/console?agent=a"},
+		{Kind: "AgentRuntime", Name: "b"},                               // no URL known
+		{Kind: "PromptPack", Name: "pp-1", URL: "https://x/should-not"}, // not an agent
+	}})
+	if len(got) != 1 || got["a"] != "https://x/console?agent=a" {
+		t.Errorf("console URLs = %v, want only agent a", got)
 	}
 }

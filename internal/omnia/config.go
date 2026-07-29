@@ -253,6 +253,11 @@ const configSchema = `{
       "format": "uri",
       "description": "Omnia Management API base URL"
     },
+    "console_endpoint": {
+      "type": "string",
+      "format": "uri",
+      "description": "Dashboard base URL for console links; defaults to api_endpoint"
+    },
     "workspace": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
@@ -578,11 +583,18 @@ const envAPIToken = "OMNIA_API_TOKEN" //nolint:gosec // environment variable nam
 
 // Config holds Omnia-specific configuration.
 type Config struct {
-	APIEndpoint string        `json:"api_endpoint"`
-	Workspace   string        `json:"workspace"`
-	APIToken    string        `json:"api_token,omitempty"`
-	Providers   Providers     `json:"providers"`
-	Tools       []ToolHandler `json:"tools,omitempty"`
+	APIEndpoint string `json:"api_endpoint"`
+
+	// ConsoleEndpoint is the dashboard base URL used to build operator-facing
+	// console links. Optional: it defaults to APIEndpoint, which is correct for
+	// the normal Omnia topology where one service serves both /api/... and the
+	// /agents/... UI. It exists for deployments that route them separately,
+	// where deriving the console host from the API host would be wrong.
+	ConsoleEndpoint string        `json:"console_endpoint,omitempty"`
+	Workspace       string        `json:"workspace"`
+	APIToken        string        `json:"api_token,omitempty"`
+	Providers       Providers     `json:"providers"`
+	Tools           []ToolHandler `json:"tools,omitempty"`
 
 	// ToolRegistryRef binds the agent to an EXISTING workspace ToolRegistry CRD
 	// by name, instead of synthesizing a new one from the tools block. It is
@@ -903,6 +915,21 @@ func (c *Config) resolveToken() string {
 // endpointRoot returns the API endpoint with any trailing slash trimmed.
 func (c *Config) endpointRoot() string {
 	return strings.TrimRight(c.APIEndpoint, "/")
+}
+
+// consoleRoot returns the base URL for operator-facing console links, or ""
+// when none can be determined.
+//
+// It prefers an explicit console_endpoint and falls back to api_endpoint. That
+// fallback is safe for Omnia specifically: the dashboard is a single service
+// that serves both the management API the adapter calls and the /agents/... UI
+// an operator opens, so the two hosts are the same by construction. A
+// deployment that routes them separately sets console_endpoint.
+func (c *Config) consoleRoot() string {
+	if c.ConsoleEndpoint != "" {
+		return strings.TrimRight(c.ConsoleEndpoint, "/")
+	}
+	return c.endpointRoot()
 }
 
 // baseURL returns the full base URL for the workspace API.

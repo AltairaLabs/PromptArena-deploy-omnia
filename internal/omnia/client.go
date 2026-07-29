@@ -68,6 +68,16 @@ type DeployResourceResult struct {
 	Name   string `json:"name"`
 	Action string `json:"action"` // created|updated|unchanged|failed
 	Error  string `json:"error,omitempty"`
+	// URL is the operator-facing console link Omnia returns for this resource
+	// (Omnia#1978). The adapter passes it straight through and never builds one:
+	// the dashboard owns its own routes and its public address, so constructing
+	// a URL here would hardcode an Omnia route into this repo and make changing
+	// it a coordinated release across two projects.
+	//
+	// Absent means "not known" — Omnia omits it for a kind with no console page,
+	// a resource that failed to apply, or an unknown public address. The
+	// adapter then reports no link rather than inventing one.
+	URL string `json:"url,omitempty"`
 }
 
 // Deploy-intent action values reported per resource by the server.
