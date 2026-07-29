@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -2055,8 +2056,19 @@ func TestIntegration_RolloutPolicyConfiguresTriggerMode(t *testing.T) {
 	if got := nestedString(rollout, "trigger", "promptPackChannel"); got != "stable" {
 		t.Errorf("rollout.trigger.promptPackChannel = %q, want stable", got)
 	}
-	if steps, _ := rollout["steps"].([]any); len(steps) != 2 {
-		t.Errorf("rollout.steps = %v, want the 2 configured steps", rollout["steps"])
+	// Assert the STEPS THEMSELVES, not just how many — a count check would pass
+	// on any two steps, including ones the mapping mangled.
+	steps, _ := rollout["steps"].([]any)
+	if len(steps) != 2 {
+		t.Fatalf("rollout.steps = %v, want the 2 configured steps", rollout["steps"])
+	}
+	first, _ := steps[0].(map[string]any)
+	if w, _ := first["setWeight"].(float64); w != 25 {
+		t.Errorf("steps[0].setWeight = %v, want the configured 25", first["setWeight"])
+	}
+	second, _ := steps[1].(map[string]any)
+	if got := nestedString(second, "pause", "duration"); got != "30s" {
+		t.Errorf("steps[1].pause.duration = %q, want the configured 30s (step = %v)", got, second)
 	}
 	pinBefore := jsonOf(t, spec["promptPackRef"])
 
@@ -2090,4 +2102,78 @@ func TestIntegration_RolloutPolicyConfiguresTriggerMode(t *testing.T) {
 		t.Errorf("stable pin moved from %s to %s — traffic hard-swapped instead of canarying",
 			pinBefore, pinAfter)
 	}
+
+	// ...and the canary must actually RUN the steps that were configured. A
+	// candidate appearing only proves the trigger fired; without this the policy
+	// could be inert and the test would still pass.
+	active, weight, message := awaitRolloutProgress(t, cfg, agentName, 120*time.Second)
+	if !active {
+		t.Errorf("status.rollout.active never became true — a candidate was selected but the "+
+			"canary did not start, so the configured steps are not being executed "+
+			"(last weight = %v, message = %q)", weight, message)
+		return
+	}
+	// 25 is the first step THIS TEST configured. Reaching it proves the policy is
+	// executed, not merely stored.
+	if weight != 25 {
+		t.Errorf("status.rollout.currentWeight = %v, want 25 from the first configured step "+
+			"(message = %q)", weight, message)
+	}
+	t.Logf("canary running: weight=%v %q", weight, message)
+}
+
+// rawAgentStatus fetches an agent's status as raw JSON.
+//
+// It bypasses the adapter's typed client deliberately: ResourceResponse.Status
+// models only {phase, conditions}, so status.rollout is discarded at decode
+// time and no assertion made through that client could ever see it.
+func rawAgentStatus(t *testing.T, deployConfig, agentName string) map[string]any {
+	t.Helper()
+	cfg, err := parseConfig(deployConfig)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+
+	url := fmt.Sprintf("%s/api/workspaces/%s/agents/%s",
+		cfg.endpointRoot(), cfg.Workspace, agentName)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.resolveToken())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get agent %q: %v", agentName, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+
+	var obj struct {
+		Status map[string]any `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&obj); err != nil {
+		t.Fatalf("decode agent %q: %v", agentName, err)
+	}
+	return obj.Status
+}
+
+// awaitRolloutProgress polls until a rollout is active, returning whether it
+// started and the traffic weight it reached.
+func awaitRolloutProgress(
+	t *testing.T, deployConfig, agentName string, timeout time.Duration,
+) (active bool, weight float64, message string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		rollout, _ := rawAgentStatus(t, deployConfig, agentName)["rollout"].(map[string]any)
+		if rollout != nil {
+			weight, _ = rollout["currentWeight"].(float64)
+			message, _ = rollout["message"].(string)
+			if isActive, _ := rollout["active"].(bool); isActive {
+				return true, weight, message
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return false, weight, message
 }
