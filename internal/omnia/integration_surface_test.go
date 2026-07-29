@@ -2010,3 +2010,61 @@ func TestIntegration_VersionBumpTriggersCanary(t *testing.T) {
 			"instead of canarying to it", pinBefore, pinAfter)
 	}
 }
+
+
+// TestIntegration_ConsoleLinkComesFromOmnia is the end-to-end proof for #79.
+//
+// The adapter does not build this URL — Omnia returns it per resource
+// (Omnia#1978) and the adapter passes it through. The assertion deliberately
+// checks the shape Omnia chose rather than one this repo knows: it points at
+// /console, a deep link the dashboard added AFTER the adapter work started
+// (Omnia#1991). That it arrives without an adapter change is the whole point.
+func TestIntegration_ConsoleLinkComesFromOmnia(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{})
+	if !itServesIntentAPI(t, cfg) {
+		t.Skip("workspace does not serve the deploy-intent API")
+	}
+
+	_, events := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPack(packID),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	var agentLinks []deploy.ResourceLink
+	for _, e := range events {
+		if e.Resource != nil && e.Resource.Type == ResTypeAgentRuntime {
+			agentLinks = e.Resource.Links
+		}
+	}
+	if len(agentLinks) != 1 {
+		t.Fatalf("agent links = %+v, want exactly one console link from Omnia", agentLinks)
+	}
+
+	link := agentLinks[0]
+	if link.Label != "Console" || link.Rel != "console" {
+		t.Errorf("link = %+v, want the conventional Console label and rel", link)
+	}
+	// Absolute, and scoped to the workspace so it resolves for an operator with
+	// access to more than one.
+	if !strings.HasPrefix(link.URL, "http") {
+		t.Errorf("link URL %q is not absolute", link.URL)
+	}
+	if !strings.Contains(link.URL, env.Workspace) {
+		t.Errorf("link URL %q does not name the workspace", link.URL)
+	}
+	if !strings.Contains(link.URL, sanitizeName(packID)) {
+		t.Errorf("link URL %q does not name the agent", link.URL)
+	}
+	t.Logf("Omnia returned: %s", link.URL)
+
+	// The readiness message must quote the SAME URL — one deploy, one answer.
+	if countContaining(progressMessages(events), link.URL) == 0 {
+		t.Errorf("the ready message does not quote the link URL %q; messages = %v",
+			link.URL, progressMessages(events))
+	}
+}
