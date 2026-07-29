@@ -170,11 +170,15 @@ func reportIntentResults(ac *applyContext, result *DeployResult) ([]ResourceStat
 		}
 		resources = append(resources, ResourceState{Type: resType, Name: r.Name, Status: status})
 
-		if cbErr := ac.reporter.Resource(&deploy.ResourceResult{
+		result := &deploy.ResourceResult{
 			Type: resType, Name: r.Name,
 			Action: intentResourceAction(r.Action),
 			Status: status, Detail: r.Error,
-		}); cbErr != nil {
+		}
+		if resType == ResTypeAgentRuntime {
+			result.Links = consoleLinks(ac.cfg, r.Name)
+		}
+		if cbErr := ac.reporter.Resource(result); cbErr != nil {
 			return resources, cbErr
 		}
 

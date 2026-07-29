@@ -47,11 +47,16 @@ func (p *Provider) Status(
 		if health != StatusHealthy {
 			hasUnhealthy = true
 		}
-		resources = append(resources, deploy.ResourceStatus{
+		rs := deploy.ResourceStatus{
 			Type:   state.Resources[i].Type,
 			Name:   state.Resources[i].Name,
 			Status: health,
-		})
+		}
+		// Only agents have a console page worth opening.
+		if rs.Type == ResTypeAgentRuntime {
+			rs.Links = consoleLinks(cfg, rs.Name)
+		}
+		resources = append(resources, rs)
 	}
 
 	aggregateStatus := "deployed"

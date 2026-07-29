@@ -753,3 +753,47 @@ func TestHTTPClient_GetDeployProfile_Errors(t *testing.T) {
 		t.Fatal("expected a decode error")
 	}
 }
+
+func TestReportIntentResults_AttachesConsoleLinkToAgents(t *testing.T) {
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("ParsePack: %v", err)
+	}
+	cfg, err := parseConfig(testDeployConfig)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+
+	var events []*deploy.ApplyEvent
+	ac := &applyContext{pack: pack, cfg: cfg, reporter: newTestReporter(&events)}
+
+	if _, rerr := reportIntentResults(ac, &DeployResult{
+		Succeeded: true,
+		Results: []DeployResourceResult{
+			{Kind: "PromptPack", Name: "pp-abc", Action: intentActionCreated},
+			{Kind: "AgentRuntime", Name: "my-agent", Action: intentActionCreated},
+		},
+	}); rerr != nil {
+		t.Fatalf("unexpected error: %v", rerr)
+	}
+
+	byType := map[string]*deploy.ResourceResult{}
+	for _, e := range events {
+		if e.Resource != nil {
+			byType[e.Resource.Type] = e.Resource
+		}
+	}
+
+	agent := byType[ResTypeAgentRuntime]
+	if agent == nil || len(agent.Links) != 1 {
+		t.Fatalf("agent result = %+v, want one console link", agent)
+	}
+	if agent.Links[0].URL != "https://omnia.test.com/agents/my-agent?workspace=test-ws" {
+		t.Errorf("console link = %q", agent.Links[0].URL)
+	}
+
+	// Only agents have a console page — a pack object must carry no link.
+	if p := byType[ResTypePromptPack]; p == nil || p.Links != nil {
+		t.Errorf("promptpack result = %+v, want no links", p)
+	}
+}
