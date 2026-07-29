@@ -2010,3 +2010,84 @@ func TestIntegration_VersionBumpTriggersCanary(t *testing.T) {
 			"instead of canarying to it", pinBefore, pinAfter)
 	}
 }
+
+// TestIntegration_RolloutPolicyConfiguresTriggerMode is the end-to-end proof for
+// #84: an operator can declare a rollout policy in the deploy config and get a
+// version-triggered agent, without touching the dashboard or kubectl.
+//
+// Every other rollout test in this file sets trigger mode with a RAW API write,
+// because until now the adapter could not express it. This one goes through the
+// adapter, then publishes a newer version and asserts the canary actually fires
+// — closing the loop on Omnia#1835's push trigger from the deploy side.
+func TestIntegration_RolloutPolicyConfiguresTriggerMode(t *testing.T) {
+	env := itEnv(t)
+	p := NewProvider()
+
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{
+		rollout: map[string]any{
+			"channel": "stable",
+			"steps": []any{
+				map[string]any{"setWeight": 25},
+				map[string]any{"pause": "30s"},
+			},
+		},
+	})
+	if !itServesIntentAPI(t, cfg) {
+		t.Skip("workspace does not serve the deploy-intent API")
+	}
+
+	state1, _ := applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "1.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+	})
+
+	client := itClient(t, cfg)
+	agentName := stateResourceName(t, state1, ResTypeAgentRuntime)
+	spec := specOf(t, client, ResTypeAgentRuntime, agentName)
+
+	// The policy must have landed on the agent from the config alone.
+	rollout, _ := spec["rollout"].(map[string]any)
+	if rollout == nil {
+		t.Fatalf("agent %q has no spec.rollout — the configured policy was not applied", agentName)
+	}
+	if got := nestedString(rollout, "trigger", "promptPackChannel"); got != "stable" {
+		t.Errorf("rollout.trigger.promptPackChannel = %q, want stable", got)
+	}
+	if steps, _ := rollout["steps"].([]any); len(steps) != 2 {
+		t.Errorf("rollout.steps = %v, want the 2 configured steps", rollout["steps"])
+	}
+	pinBefore := jsonOf(t, spec["promptPackRef"])
+
+	// ...and it must actually work: publish a newer version, expect a canary.
+	applyTracked(t, p, env, cfg, &deploy.PlanRequest{
+		PackJSON:     buildPackVersion(packID, "2.0.0"),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		PriorState:   state1,
+	})
+
+	var candidateVersion string
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		live, _ := specOf(t, client, ResTypeAgentRuntime, agentName)["rollout"].(map[string]any)
+		candidateVersion = nestedString(live, "candidate", "promptPackRef", "version")
+		if candidateVersion != "" {
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+	if candidateVersion != "2.0.0" {
+		t.Errorf("rollout candidate version = %q, want 2.0.0 — an agent configured for "+
+			"version-triggered rollout did not canary the version just published",
+			candidateVersion)
+	}
+
+	// A canary, not a hard swap.
+	pinAfter := jsonOf(t, specOf(t, client, ResTypeAgentRuntime, agentName)["promptPackRef"])
+	if pinAfter != pinBefore {
+		t.Errorf("stable pin moved from %s to %s — traffic hard-swapped instead of canarying",
+			pinBefore, pinAfter)
+	}
+}

@@ -139,6 +139,7 @@ type deployConfigOpts struct {
 	externalAuth map[string]any
 	memory       map[string]any
 	evals        map[string]any
+	rollout      map[string]any
 
 	// extraProviders are appended after the default llm binding, for exercising
 	// multi-role provider lists. Each must name a Provider in the workspace.
@@ -222,6 +223,7 @@ func buildDeployConfig(env itConfig, opts deployConfigOpts) string {
 		"externalAuth": opts.externalAuth,
 		"memory":       opts.memory,
 		"evals":        opts.evals,
+		"rollout":      opts.rollout,
 	} {
 		if len(block) > 0 {
 			doc[key] = block
