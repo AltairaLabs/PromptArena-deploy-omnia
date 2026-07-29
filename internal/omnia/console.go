@@ -36,7 +36,7 @@ func agentConsoleURL(cfg *Config, agentName string) string {
 // nil is the correct answer for "we don't know". A link that 404s or lands on
 // the wrong workspace is worse than no link, and the protocol treats an absent
 // Links field as simply "no links" — clients render nothing and must not
-// synthesise a URL of their own.
+// synthesize a URL of their own.
 func consoleLinks(cfg *Config, agentName string) []deploy.ResourceLink {
 	return adaptersdk.ConsoleLink(agentConsoleURL(cfg, agentName))
 }

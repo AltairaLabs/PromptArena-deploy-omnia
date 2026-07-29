@@ -256,7 +256,7 @@ const configSchema = `{
     "console_endpoint": {
       "type": "string",
       "format": "uri",
-      "description": "Base URL of the Omnia dashboard, for operator-facing console links. Defaults to api_endpoint, which is correct when the dashboard serves both the API and the UI (the normal Omnia topology). Set this only when they are routed separately."
+      "description": "Dashboard base URL for console links; defaults to api_endpoint"
     },
     "workspace": {
       "type": "string",
@@ -556,11 +556,11 @@ type Config struct {
 	// the normal Omnia topology where one service serves both /api/... and the
 	// /agents/... UI. It exists for deployments that route them separately,
 	// where deriving the console host from the API host would be wrong.
-	ConsoleEndpoint string `json:"console_endpoint,omitempty"`
-	Workspace   string        `json:"workspace"`
-	APIToken    string        `json:"api_token,omitempty"`
-	Providers   Providers     `json:"providers"`
-	Tools       []ToolHandler `json:"tools,omitempty"`
+	ConsoleEndpoint string        `json:"console_endpoint,omitempty"`
+	Workspace       string        `json:"workspace"`
+	APIToken        string        `json:"api_token,omitempty"`
+	Providers       Providers     `json:"providers"`
+	Tools           []ToolHandler `json:"tools,omitempty"`
 
 	// ToolRegistryRef binds the agent to an EXISTING workspace ToolRegistry CRD
 	// by name, instead of synthesizing a new one from the tools block. It is
