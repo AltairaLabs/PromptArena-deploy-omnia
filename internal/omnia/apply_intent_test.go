@@ -24,7 +24,7 @@ func applyWithSim(
 	t *testing.T, sim *simulatedClient, packJSON, configJSON string,
 ) (AdapterState, []*deploy.ApplyEvent, error) {
 	t.Helper()
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
 	var events []*deploy.ApplyEvent
@@ -271,9 +271,7 @@ func TestApply_CarriesSupersededPackObjectsIntoState(t *testing.T) {
 }
 
 func TestApply_IntentReconcileFailureFailsDeploy(t *testing.T) {
-	origAttempts := reconcileMaxAttempts
-	reconcileMaxAttempts = 1
-	defer func() { reconcileMaxAttempts = origAttempts }()
+	fastReconcile(t, 1)
 
 	sim := newSimulatedClient()
 	sim.intentEnabled = true
@@ -769,7 +767,7 @@ func TestApply_IntentPathProvisionsToolCredentials(t *testing.T) {
 	sim.agentRuntimeReadyOnGet = true
 	sim.workspaces = map[string]*WorkspaceInfo{"test-ws": {Namespace: "ns"}}
 
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 	var events []*deploy.ApplyEvent
 	// No "tools" in the config: the registry is auto-created from the arena

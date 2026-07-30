@@ -47,6 +47,10 @@ func TestProvisionToolCredentials_DegradesOnCreateFailure(t *testing.T) {
 
 func TestProvisionToolCredentials_MissingEnvValue(t *testing.T) {
 	// GITHUB_TOKEN unset → cannot provision → warning, provisioned=false.
+	// Set explicitly to empty: GITHUB_TOKEN is often exported in the ambient
+	// environment (it is what the live tool-auth e2e runs on), and without this
+	// the test silently inverts into asserting the success path.
+	t.Setenv("GITHUB_TOKEN", "")
 	pack, cfg := ghAuthPack()
 	sim := newSimulatedClient()
 	sim.workspaces = map[string]*WorkspaceInfo{"ws": {Namespace: "ns"}}

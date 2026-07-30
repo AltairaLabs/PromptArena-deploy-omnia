@@ -164,7 +164,7 @@ func TestPlan_AdoptError_FallsBackToPriorState(t *testing.T) {
 }
 
 func TestApply_AdoptError_FallsBackToPriorState(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	// Make adopt fail on the first resType so apply falls back to req.PriorState.
@@ -222,7 +222,7 @@ func TestApply_CreateAlreadyExists_FallsBackToUpdate(t *testing.T) {
 	orig := updateConflictBackoff
 	updateConflictBackoff = 0
 	defer func() { updateConflictBackoff = orig }()
-	reconcilePollInterval = 0
+	fastReconcile(t)
 
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true

@@ -281,7 +281,7 @@ func hasChange(changes []deploy.ResourceChange, resType string, action deploy.Ac
 // --- Apply create-mode body -----------------------------------------------
 
 func TestApply_CreateMode_BodyHasConfigAndPlaceholder(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient() // empty store → registry created fresh
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -315,7 +315,7 @@ func TestApply_CreateMode_BodyHasConfigAndPlaceholder(t *testing.T) {
 }
 
 func TestApply_CreateMode_ExistingRegistryNotUpdated(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -406,7 +406,7 @@ func placeholderMethodFor(t *testing.T, spec json.RawMessage, toolName string) s
 }
 
 func TestApply_CreateMode_HandlerWiresSourceURLAndMethod(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient() // empty store → registry created fresh
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -435,7 +435,7 @@ func TestApply_CreateMode_HandlerWiresSourceURLAndMethod(t *testing.T) {
 }
 
 func TestApply_CreateMode_PlaceholderDefaultsPOSTWithoutArenaConfig(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -463,7 +463,7 @@ func TestApply_CreateMode_AlreadyExistsIsNoOp(t *testing.T) {
 	// NOT in priorMap), but the CreateResource call races and returns a 409
 	// AlreadyExists. CREATE-ONLY: this must become a no-op (unchanged), NOT an
 	// update — unlike the generic applyResourcePhase belt-and-braces fallback.
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -504,7 +504,7 @@ func TestApply_CreateMode_AlreadyExistsIsNoOp(t *testing.T) {
 
 func TestApply_CreateMode_CreateErrorFailsPhase(t *testing.T) {
 	// A non-AlreadyExists create error must fail the registry phase (not no-op).
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	// The AgentRuntime succeeds despite the ToolRegistry failure below, so it goes
 	// through reconcile — make it reconcile immediately so the only resource
