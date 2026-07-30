@@ -271,3 +271,41 @@ const policyPackJSONForPruning = `{
 		}
 	}
 }`
+
+// TestCRDPruning_ToolRegistry_SynthesizedHeaderHandler covers the handler shape
+// the OTHER registry path produces: one synthesized from a pack tool whose arena
+// source declares headers_from_env. The existing ToolRegistry pruning case uses
+// explicit cfg.Tools handlers, which carry no env headers, so it cannot see this.
+//
+// This is the case that matters for the per-resource path: it targets servers
+// without the deploy-intent API, which predate headersFromSecret entirely.
+// Emitting that field there is pruned and the header vanishes — strictly worse
+// than the static header it replaced.
+func TestCRDPruning_ToolRegistry_SynthesizedHeaderHandler(t *testing.T) {
+	t.Setenv("ACT_AS_USER", "user-42")
+
+	pack, err := adaptersdk.ParsePack([]byte(testPackJSON))
+	if err != nil {
+		t.Fatalf("parse pack: %v", err)
+	}
+	cfg := &Config{
+		APIEndpoint: "https://omnia.test.com",
+		Workspace:   "test-ws",
+		APIToken:    "test-token",
+		sourceTools: map[string]*httpToolSource{
+			"search": {
+				Mode: "live", Method: "POST", URL: "https://api.example.com/search",
+				HeadersFromEnv: []string{
+					"Authorization=SEARCH_TOKEN",
+					"X-Act-As-User=ACT_AS_USER",
+				},
+			},
+		},
+	}
+
+	body, err := buildToolRegistryRequest(pack, cfg)
+	if err != nil {
+		t.Fatalf("build ToolRegistry: %v", err)
+	}
+	assertNothingPruned(t, "toolregistries.yaml", "ToolRegistry", body)
+}

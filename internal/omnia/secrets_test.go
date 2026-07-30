@@ -56,6 +56,38 @@ func TestProvisionToolCredentials_MissingEnvValue(t *testing.T) {
 	}
 }
 
+// TestProvisionToolCredentials_PartialEnvStillWritesWhatResolved guards a
+// regression the headersFromSecret work made possible: header env vars joined
+// the credential set, so an unset OPTIONAL header var must not take the deploy's
+// auth token down with it. The keys are independent — write what resolved, warn
+// about the rest.
+func TestProvisionToolCredentials_PartialEnvStillWritesWhatResolved(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ghs_live") // auth resolves
+	// ACT_AS deliberately unset → only the header key is missing.
+	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}
+	cfg := &Config{Workspace: "ws", sourceTools: map[string]*httpToolSource{
+		"a": {URL: "https://x", HeadersFromEnv: []string{
+			"Authorization=GITHUB_TOKEN", "X-Act-As-User=ACT_AS_UNSET_XYZ"}}}}
+
+	sim := newSimulatedClient()
+	sim.workspaces = map[string]*WorkspaceInfo{"ws": {Namespace: "ns"}}
+	ok, warnings := provisionToolCredentials(context.Background(), sim, pack, cfg)
+
+	if ok {
+		t.Error("provisioned must be false while a key is still missing")
+	}
+	if !hasSubstr(warnings, "ACT_AS_UNSET_XYZ") {
+		t.Errorf("the missing key must be named, got %v", warnings)
+	}
+	secret := sim.createdSecrets["ns/"+credentialSecretName("p")]
+	if secret["GITHUB_TOKEN"] != "ghs_live" {
+		t.Errorf("the resolvable auth credential must still be written, got %v", sim.createdSecrets)
+	}
+	if _, ok := secret["ACT_AS_UNSET_XYZ"]; ok {
+		t.Errorf("an unset var must not be written as an empty key, got %v", secret)
+	}
+}
+
 func TestProvisionToolCredentials_NamespaceUnresolvable(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghs_live")
 	pack, cfg := ghAuthPack()

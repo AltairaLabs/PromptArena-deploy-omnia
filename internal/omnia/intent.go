@@ -287,7 +287,9 @@ func intentSkillsConfig(sc *SkillsConfig) *skillsConfigIntent {
 func intentTools(pack *prompt.Pack, cfg *Config, binding ToolBinding) *toolsIntent {
 	switch binding.Mode {
 	case toolModeCreate:
-		handlers, _ := buildCreateRegistryHandlers(pack, cfg)
+		// true: the deploy-intent API postdates headersFromSecret, so the value
+		// never has to enter the CRD.
+		handlers, _ := buildCreateRegistryHandlers(pack, cfg, true)
 		if len(handlers) == 0 {
 			return nil
 		}

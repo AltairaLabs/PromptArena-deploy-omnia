@@ -111,6 +111,15 @@ func applyViaIntent(ctx context.Context, ac *applyContext) (res []ResourceState,
 		return nil, true, cbErr
 	}
 
+	// Provision the tool-credentials Secret BEFORE the POST: the handlers this
+	// intent carries reference it by name for both the bearer auth stanza and
+	// every headersFromSecret entry, and the server reconciles the ToolRegistry
+	// as part of the call. Best-effort and advisory, exactly as on the
+	// per-resource path — a failure warns and never blocks the deploy.
+	if ac.binding.Mode == toolModeCreate {
+		reportCredentialProvisioning(ctx, ac)
+	}
+
 	result, perr := ac.client.PostDeployment(ctx, body)
 	if perr != nil {
 		if isIntentUnsupported(perr) {

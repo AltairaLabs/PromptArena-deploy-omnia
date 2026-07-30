@@ -28,6 +28,30 @@ The adapter validates that a token is available before any API operation. If nei
 - Rotate tokens regularly and use short-lived tokens in CI/CD pipelines.
 - Use workspace-scoped tokens with the minimum permissions required (create, update, delete resources within the target workspace).
 
+## Tool credentials
+
+A pack tool's `headers_from_env` entries take the form `HeaderName=ENV_VAR`. Every one of them is treated as a credential — nothing in a pack distinguishes a signing token from an act-as-user identifier, so the adapter does not guess.
+
+At deploy time the adapter reads each named environment variable and provisions a single per-pack Kubernetes Secret, `<pack-id>-tool-credentials`, in the workspace's namespace. The synthesized ToolRegistry then *references* that Secret rather than carrying any value:
+
+- `Authorization` becomes the handler's bearer auth stanza, pointing at the Secret key.
+- Every other header becomes an `httpConfig.headersFromSecret` entry, mapping the header name to the same Secret and the environment variable's name as the key.
+
+The resolved values never enter the ToolRegistry spec, which anyone with `get toolregistry` in the namespace can read.
+
+### When a value is unavailable
+
+Provisioning is best-effort and never blocks a deploy. Keys are independent: whatever resolves is written and anything missing is reported, so one unset optional header cannot cost the deploy its auth token. Two cases produce a warning rather than an error:
+
+- **An environment variable is unset.** That key is not written, so the header (or auth) using it will not be sent. Set the variable at deploy time, or add the key to the Secret yourself.
+- **The Secret could not be created** (for example the API token lacks permission). The warning names the Secret, namespace, and keys so you can pre-create it.
+
+Because the reference is written either way, a pre-created Secret with the right keys is always a valid substitute for adapter provisioning.
+
+### Older Omnia servers
+
+`headersFromSecret` is a recent Omnia field. Deploys that fall back to the per-resource path — which only happens against servers with no deploy-intent API, all of which predate the field — resolve non-`Authorization` headers to literal values in the ToolRegistry instead. On those servers emitting the reference would be discarded silently and the header would not be sent at all. The bearer auth stanza is Secret-backed on both paths.
+
 ## Workspace isolation
 
 Every API call is scoped to a single workspace. The adapter constructs URLs in the form:

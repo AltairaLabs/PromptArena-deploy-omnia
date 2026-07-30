@@ -8,36 +8,45 @@ import (
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
-// provisionToolCredentials best-effort-creates the Secret the pack's tool auth
-// stanzas reference, reading each Authorization env var's value from the adapter's
+// provisionToolCredentials best-effort-creates the Secret the pack's tool
+// handlers reference — the auth stanza's bearer token and every
+// headersFromSecret entry — reading each env var's value from the adapter's
 // environment. It NEVER errors: any failure (no namespace, missing env value,
-// CreateSecret rejected) degrades to a clear warning naming the Secret, namespace,
-// and keys the operator must supply, and returns provisioned=false. When the pack
-// needs no credentials it is a no-op success.
+// CreateSecret rejected) degrades to a clear warning naming the Secret,
+// namespace, and keys the operator must supply. When the pack needs no
+// credentials it is a no-op success.
+//
+// Unset env vars do NOT suppress the whole Secret. The keys are independent —
+// one absent header credential must not cost the deploy its auth token — so
+// whatever resolved is written and the rest is warned about. provisioned is true
+// only when every key made it.
 func provisionToolCredentials(
 	ctx context.Context, client omniaClient, pack *prompt.Pack, cfg *Config,
 ) (provisioned bool, warnings []string) {
 	secretName, envVars := collectToolCredentials(pack, cfg)
 	if len(envVars) == 0 {
-		return true, nil // no Authorization credential to provision
+		return true, nil // no credential to provision
 	}
 
 	data, missing := readCredentialEnv(envVars)
 	if len(missing) > 0 {
-		return false, []string{missingEnvWarning(secretName, missing)}
+		warnings = append(warnings, missingEnvWarning(secretName, missing))
+	}
+	if len(data) == 0 {
+		return false, warnings // nothing resolved — there is no Secret to write
 	}
 
 	ns, err := resolveNamespace(ctx, client, cfg.Workspace)
 	if err != nil {
-		return false, []string{referenceOnlyWarning(secretName, "", envVars,
-			fmt.Sprintf("could not resolve the workspace namespace: %v", err))}
+		return false, append(warnings, referenceOnlyWarning(secretName, "", envVars,
+			fmt.Sprintf("could not resolve the workspace namespace: %v", err)))
 	}
 
 	if err := client.CreateSecret(ctx, ns, secretName, data); err != nil {
-		return false, []string{referenceOnlyWarning(secretName, ns, envVars,
-			fmt.Sprintf("secret creation was rejected: %v", err))}
+		return false, append(warnings, referenceOnlyWarning(secretName, ns, envVars,
+			fmt.Sprintf("secret creation was rejected: %v", err)))
 	}
-	return true, nil
+	return len(missing) == 0, warnings
 }
 
 // reportCredentialProvisioning runs the best-effort provisioning step and streams
@@ -80,8 +89,9 @@ func resolveNamespace(ctx context.Context, client omniaClient, workspace string)
 }
 
 func missingEnvWarning(secretName string, missing []string) string {
-	return fmt.Sprintf("tool credentials not provisioned: env var(s) %v are unset in the deploy "+
-		"environment — pre-create Secret %q with those keys (raw token values) in the workspace namespace",
+	return fmt.Sprintf("tool credential key(s) %v not provisioned: those env var(s) are unset in "+
+		"the deploy environment — add them to Secret %q (raw values) in the workspace namespace, "+
+		"or the auth/header(s) using them will not be sent",
 		missing, secretName)
 }
 

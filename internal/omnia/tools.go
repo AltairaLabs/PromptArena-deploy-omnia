@@ -22,8 +22,10 @@ const (
 	keyQueryParams     = "queryParams"
 	keyTimeout         = "timeout"
 	keyHeaders         = "headers"
-	methodGET          = "GET"
-	authTypeBearer     = "bearer"
+	//nolint:gosec // G101 false positive: a CRD field name, not a credential
+	keyHeadersFromSecret = "headersFromSecret"
+	methodGET            = "GET"
+	authTypeBearer       = "bearer"
 )
 
 // extractSourceTools returns the full HTTP wiring for each arena tool, keyed by
@@ -140,7 +142,7 @@ func resolveCreateMode(
 	if cerr != nil {
 		// Can't reach the workspace to check existence — degrade to the
 		// create-time placeholder warnings (apply won't update an existing one).
-		_, warnings := buildCreateRegistryHandlers(pack, cfg)
+		_, warnings := buildCreateRegistryHandlers(pack, cfg, true)
 		return binding, warnings, nil
 	}
 	exists, eerr := registryExists(ctx, client, pack)
@@ -149,7 +151,7 @@ func resolveCreateMode(
 		// not update it, so emit the operator-owned advisory.
 		return binding, []string{fmt.Sprintf(registryUnchangedWarningFmt, binding.RegistryName)}, nil
 	}
-	_, warnings := buildCreateRegistryHandlers(pack, cfg)
+	_, warnings := buildCreateRegistryHandlers(pack, cfg, true)
 	return binding, warnings, nil
 }
 
@@ -176,7 +178,7 @@ const registryUnchangedWarningFmt = "tool registry %q already exists — left un
 // is explicit about each and a live deploy doesn't silently ship a mock
 // placeholder that fails at runtime.
 func buildCreateRegistryHandlers(
-	pack *prompt.Pack, cfg *Config,
+	pack *prompt.Pack, cfg *Config, secretHeaders bool,
 ) (handlers []map[string]interface{}, warnings []string) {
 	configured := make(map[string]bool, len(cfg.Tools))
 	handlers = make([]map[string]interface{}, 0, len(cfg.Tools))
@@ -195,7 +197,7 @@ func buildCreateRegistryHandlers(
 			continue // a configured handler is authoritative; skip synthesis
 		}
 		src := cfg.sourceTools[name]
-		handlers = append(handlers, synthesizeHandler(pack.Tools[name], name, src, secretName))
+		handlers = append(handlers, synthesizeHandler(pack.Tools[name], name, src, secretName, secretHeaders))
 		switch {
 		case src != nil && src.URL != "":
 			sourceWired = append(sourceWired, name)
@@ -246,6 +248,7 @@ func createRegistryWarnings(sourceWired, placeholders, mockTools []string) []str
 // schema is carried through.
 func synthesizeHandler(
 	packTool *prompt.PackTool, toolName string, src *httpToolSource, secretName string,
+	secretHeaders bool,
 ) map[string]interface{} {
 	tool := map[string]interface{}{keyName: toolName}
 	if packTool != nil {
@@ -256,7 +259,7 @@ func synthesizeHandler(
 		keyName:       sanitizeName(toolName),
 		keyType:       handlerTypeHTTP,
 		"tool":        tool,
-		keyHTTPConfig: buildSynthHTTPConfig(toolName, src, packTool),
+		keyHTTPConfig: buildSynthHTTPConfig(toolName, src, packTool, secretName, secretHeaders),
 	}
 	if src != nil && src.TimeoutMs > 0 {
 		entry[keyTimeout] = fmt.Sprintf("%dms", src.TimeoutMs)
@@ -283,8 +286,8 @@ func buildAuthStanza(src *httpToolSource, secretName string) map[string]interfac
 	return map[string]interface{}{
 		keyType: authTypeBearer,
 		keySecretRef: map[string]interface{}{
-			keyName: secretName,
-			"key":   authEnv,
+			keyName:           secretName,
+			keySecretKeyField: authEnv,
 		},
 	}
 }
@@ -294,7 +297,8 @@ func buildAuthStanza(src *httpToolSource, secretName string) map[string]interfac
 // reshape, redact list, and request mappings the source declares, plus inferred
 // GET query params.
 func buildSynthHTTPConfig(
-	toolName string, src *httpToolSource, packTool *prompt.PackTool,
+	toolName string, src *httpToolSource, packTool *prompt.PackTool, secretName string,
+	secretHeaders bool,
 ) map[string]interface{} {
 	endpoint := placeholderEndpoint + toolName
 	httpMethod := defaultHTTPMethod
@@ -306,7 +310,7 @@ func buildSynthHTTPConfig(
 		if src.Method != "" {
 			httpMethod = src.Method
 		}
-		addSourceHTTPMappings(cfg, src)
+		addSourceHTTPMappings(cfg, src, secretName, secretHeaders)
 	}
 	cfg[keyEndpoint] = endpoint
 	cfg[keyMethod] = httpMethod
@@ -318,7 +322,9 @@ func buildSynthHTTPConfig(
 
 // addSourceHTTPMappings copies the response/redact/request mappings a source
 // declares into an httpConfig map (only non-empty ones).
-func addSourceHTTPMappings(cfg map[string]interface{}, src *httpToolSource) {
+func addSourceHTTPMappings(
+	cfg map[string]interface{}, src *httpToolSource, secretName string, secretHeaders bool,
+) {
 	if src.ResponseBodyMapping != "" {
 		cfg[keyResponseMapping] = src.ResponseBodyMapping
 	}
@@ -334,11 +340,10 @@ func addSourceHTTPMappings(cfg map[string]interface{}, src *httpToolSource) {
 	if len(src.StaticQuery) > 0 {
 		cfg["staticQuery"] = src.StaticQuery
 	}
-	// Non-Authorization headers_from_env become static headers with their env
-	// value resolved at deploy time (Authorization is handled by the auth stanza).
-	if headers, _ := buildStaticHeaders(src); len(headers) > 0 {
-		cfg[keyHeaders] = headers
-	}
+	// Non-Authorization headers_from_env. Authorization is handled by the auth
+	// stanza; these go one of two ways depending on which server will receive
+	// them — see addHeaderConfig.
+	addHeaderConfig(cfg, src, secretName, secretHeaders)
 }
 
 // resolveQueryParams returns the arg names an httpConfig should send as query

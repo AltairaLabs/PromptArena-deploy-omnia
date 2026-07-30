@@ -77,7 +77,7 @@ func TestBuildCreateRegistryHandlers_ConfigOnly(t *testing.T) {
 		HTTPConfig: map[string]interface{}{"endpoint": "https://api.example.com"},
 	}}}
 
-	handlers, warnings := buildCreateRegistryHandlers(pack, cfg)
+	handlers, warnings := buildCreateRegistryHandlers(pack, cfg, true)
 	if len(handlers) != 1 {
 		t.Fatalf("want exactly the config handler, got %d", len(handlers))
 	}
@@ -93,7 +93,7 @@ func TestBuildCreateRegistryHandlers_PlaceholderForUnconfigured(t *testing.T) {
 	pack := packWithTool("lookup_order", map[string]interface{}{"type": "object"})
 	cfg := &Config{} // no configured tools at all
 
-	handlers, warnings := buildCreateRegistryHandlers(pack, cfg)
+	handlers, warnings := buildCreateRegistryHandlers(pack, cfg, true)
 	if len(handlers) != 1 {
 		t.Fatalf("want one placeholder handler, got %d", len(handlers))
 	}
@@ -127,7 +127,7 @@ func TestBuildCreateRegistryHandlers_SystemToolExcluded(t *testing.T) {
 	pack := &prompt.Pack{ID: "test-pack", Tools: map[string]*prompt.PackTool{
 		"image__generate": {Name: "image__generate"},
 	}}
-	handlers, warnings := buildCreateRegistryHandlers(pack, &Config{})
+	handlers, warnings := buildCreateRegistryHandlers(pack, &Config{}, true)
 	if len(handlers) != 0 {
 		t.Errorf("system tool must not be synthesized, got %d handlers", len(handlers))
 	}

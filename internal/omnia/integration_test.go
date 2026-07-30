@@ -1018,6 +1018,159 @@ func buildGitHubToolPack(packID string) string {
 	return string(b)
 }
 
+// secretHeaderName is the non-Authorization header the headersFromSecret e2e
+// wires from an env var. GitHub ignores unknown request headers, so the same
+// rate_limit call still succeeds and the assertion is about the CRD, not the API.
+const secretHeaderName = "X-Adapter-Probe"
+
+// buildGitHubArenaConfigWithHeader is buildGitHubArenaConfig plus a second,
+// non-Authorization headers_from_env entry — the case Omnia#1831 added
+// headersFromSecret for.
+func buildGitHubArenaConfigWithHeader(envVar string) string {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(buildGitHubArenaConfig()), &doc); err != nil {
+		panic(fmt.Sprintf("buildGitHubArenaConfigWithHeader: %v", err))
+	}
+	http := doc["tool_specs"].(map[string]any)[ghToolName].(map[string]any)["http"].(map[string]any)
+	http["headers_from_env"] = []string{"Authorization=GITHUB_TOKEN", secretHeaderName + "=" + envVar}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		panic(fmt.Sprintf("buildGitHubArenaConfigWithHeader: marshal failed: %v", err))
+	}
+	return string(b)
+}
+
+// TestIntegration_SecretHeadersNeverEnterTheCRD proves the Omnia#1831 wiring
+// against a live server: a non-Authorization header sourced from an env var
+// lands in the ToolRegistry as a headersFromSecret reference to the pack's
+// credentials Secret, and its VALUE appears nowhere in the spec.
+//
+// It needs a server carrying headersFromSecret. Against an older one the field
+// is pruned and secretHeaderRef fails saying so — the correct signal, since the
+// adapter only emits it on the deploy-intent path, whose servers have it.
+//
+// The subject is the ToolRegistry, so the agent's own readiness is not asserted:
+// whether an AgentRuntime reaches Ready depends on the target workspace's
+// providers and runtime images, neither of which this wiring touches.
+func TestIntegration_SecretHeadersNeverEnterTheCRD(t *testing.T) {
+	env := itEnv(t)
+	const probeEnv = "OMNIA_IT_HEADER_PROBE"
+	const probeValue = "probe-value-must-not-appear-in-the-crd"
+	t.Setenv(probeEnv, probeValue)
+
+	p := NewProvider()
+	packID := uniquePackID(t)
+	cfg := buildDeployConfig(env, deployConfigOpts{}) // no tools:/ref → auto-create
+
+	var events []*deploy.ApplyEvent
+	state, applyErr := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON:     buildGitHubToolPack(packID),
+		DeployConfig: cfg,
+		Environment:  env.Workspace,
+		ArenaConfig:  buildGitHubArenaConfigWithHeader(probeEnv),
+	}, func(e *deploy.ApplyEvent) error { events = append(events, e); return nil })
+	cleanupDeploy(t, p, env, cfg, state)
+	if applyErr != nil {
+		t.Logf("apply reported: %v (not fatal — the registry assertions follow)", applyErr)
+	}
+
+	registry := sanitizeName(packID + "-tools")
+	spec := rawResourceSpec(t, cfg, "toolregistries", registry)
+
+	// The value must be nowhere in the spec — that leak is what #1831 closes.
+	rendered, _ := json.Marshal(spec)
+	if strings.Contains(string(rendered), probeValue) {
+		t.Errorf("ToolRegistry spec leaks the header value: %s", rendered)
+	}
+
+	ref := secretHeaderRef(t, spec, sanitizeName(ghToolName), secretHeaderName)
+	if ref["name"] != credentialSecretName(packID) || ref["key"] != probeEnv {
+		t.Errorf("headersFromSecret[%s] = %v, want a ref to Secret %q key %q",
+			secretHeaderName, ref, credentialSecretName(packID), probeEnv)
+	}
+
+	// The reference is only useful if the key is provisioned too. That write is
+	// best-effort — a workspace token may lack Secret permissions — so when it
+	// fails the adapter MUST say so: a silent miss means the header never
+	// resolves at call time and the deploy still reports success.
+	for _, e := range events {
+		if strings.Contains(e.Message, "credentials:") {
+			t.Logf("credential provisioning degraded with an explanation, as designed: %s", e.Message)
+		}
+	}
+}
+
+// rawResourceSpec GETs a workspace resource and returns its spec as raw JSON,
+// bypassing the adapter's typed client (which models only the fields it writes).
+func rawResourceSpec(t *testing.T, deployConfig, resPath, name string) map[string]any {
+	t.Helper()
+	cfg, err := parseConfig(deployConfig)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	url := fmt.Sprintf("%s/api/workspaces/%s/%s/%s", cfg.endpointRoot(), cfg.Workspace, resPath, name)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.resolveToken())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get %s/%s: %v", resPath, name, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	var obj struct {
+		Spec map[string]any `json:"spec"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&obj); err != nil {
+		t.Fatalf("decode %s/%s: %v", resPath, name, err)
+	}
+	return obj.Spec
+}
+
+// secretHeaderRef digs the named handler's httpConfig.headersFromSecret entry out
+// of a ToolRegistry spec, failing with the actual shape when it is absent (which
+// is what a pruned field looks like from here).
+func secretHeaderRef(t *testing.T, spec map[string]any, handler, header string) map[string]any {
+	t.Helper()
+	handlers, _ := spec["handlers"].([]any)
+	for _, h := range handlers {
+		hm, _ := h.(map[string]any)
+		if hm["name"] != handler {
+			continue
+		}
+		hc, _ := hm["httpConfig"].(map[string]any)
+		hfs, ok := hc["headersFromSecret"].(map[string]any)
+		if !ok {
+			t.Fatalf("handler %q has no httpConfig.headersFromSecret — the server pruned it "+
+				"(does it carry Omnia#1831?); httpConfig = %v", handler, hc)
+		}
+		ref, _ := hfs[header].(map[string]any)
+		if ref == nil {
+			t.Fatalf("headersFromSecret has no %q entry: %v", header, hfs)
+		}
+		return ref
+	}
+	t.Fatalf("no handler %q in spec.handlers: %v", handler, handlers)
+	return nil
+}
+
+// awaitToolTest polls the dashboard tool-test endpoint until the handler executes
+// or the deadline passes.
+func awaitToolTest(
+	t *testing.T, env itConfig, registry, handler string, timeout time.Duration,
+) toolTestResponse {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		resp := testTool(t, env, registry, handler)
+		if resp.Success || time.Now().After(deadline) {
+			return resp
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
 // buildGitHubArenaConfig returns an ArenaConfig JSON whose tool_specs carry the
 // github_rate_limit live HTTP block: a GET to api.github.com/rate_limit with the
 // Authorization header sourced from GITHUB_TOKEN and a response body_mapping that
@@ -1114,15 +1267,7 @@ func TestIntegration_GitHubToolAuth(t *testing.T) {
 
 	// Poll the tool-test until the registry is reconciled enough to execute the
 	// handler (or timeout), then assert the authenticated rate limit.
-	var resp toolTestResponse
-	deadline := time.Now().Add(120 * time.Second)
-	for {
-		resp = testTool(t, env, registry, handler)
-		if resp.Success || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(5 * time.Second)
-	}
+	resp := awaitToolTest(t, env, registry, handler, 120*time.Second)
 	if !resp.Success {
 		t.Fatalf("tool-test never succeeded: error=%q warning=%q", resp.Error, resp.Warning)
 	}
