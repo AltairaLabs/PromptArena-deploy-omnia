@@ -43,6 +43,13 @@ func parseAuthEnv(headersFromEnv []string) (authEnvVar string, headerEnv map[str
 
 // credentialSecretName is the deterministic Secret name a pack's tool
 // credentials are provisioned/referenced under (one Secret per pack).
+//
+// It is authoritative only on the per-resource path, which writes the Secret
+// itself. On the deploy-intent path the SERVER names and owns the Secret and
+// rewrites every handler reference whose key the intent carried (Omnia#2008) —
+// the name emitted here is a placeholder the CRD requires (both name and key
+// are required on a secretRef) and is replaced before the registry is
+// persisted. Nothing downstream should treat it as the real name.
 func credentialSecretName(packID string) string {
 	return sanitizeName(packID + credentialsSuffix)
 }
