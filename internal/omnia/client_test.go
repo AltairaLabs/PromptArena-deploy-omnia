@@ -435,6 +435,28 @@ func TestHTTPClient_GetWorkspace(t *testing.T) {
 	}
 }
 
+// TestHTTPClient_GetWorkspace_ProjectionShape covers the response the dashboard
+// ACTUALLY returns for an ordinary GET: {workspace: {...}, access: {...}}. The
+// raw-CRD shape above is only served to an owner asking ?view=full, so decoding
+// that alone yielded an empty namespace on every real call — and an empty
+// namespace makes tool-credential provisioning degrade with a warning blaming
+// permissions, which sends the operator looking in the wrong place.
+func TestHTTPClient_GetWorkspace_ProjectionShape(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"workspace":{"name":"my-ws","namespace":` +
+			`{"create":true,"name":"omnia-my-ws"}},"access":{"role":"owner"}}`))
+	})
+	hc := newTestHTTPClient(t, handler)
+	wi, err := hc.GetWorkspace(context.Background(), "my-ws")
+	if err != nil {
+		t.Fatalf("GetWorkspace: %v", err)
+	}
+	if wi.Namespace != "omnia-my-ws" {
+		t.Errorf("namespace = %q, want omnia-my-ws", wi.Namespace)
+	}
+}
+
 func TestHTTPClient_GetWorkspace_Error(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

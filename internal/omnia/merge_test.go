@@ -77,7 +77,7 @@ func TestBuildCreateRegistryHandlers_ConfigOnly(t *testing.T) {
 		HTTPConfig: map[string]interface{}{"endpoint": "https://api.example.com"},
 	}}}
 
-	handlers, warnings := buildCreateRegistryHandlers(pack, cfg)
+	handlers, warnings := buildCreateRegistryHandlers(pack, cfg, true)
 	if len(handlers) != 1 {
 		t.Fatalf("want exactly the config handler, got %d", len(handlers))
 	}
@@ -93,7 +93,7 @@ func TestBuildCreateRegistryHandlers_PlaceholderForUnconfigured(t *testing.T) {
 	pack := packWithTool("lookup_order", map[string]interface{}{"type": "object"})
 	cfg := &Config{} // no configured tools at all
 
-	handlers, warnings := buildCreateRegistryHandlers(pack, cfg)
+	handlers, warnings := buildCreateRegistryHandlers(pack, cfg, true)
 	if len(handlers) != 1 {
 		t.Fatalf("want one placeholder handler, got %d", len(handlers))
 	}
@@ -127,7 +127,7 @@ func TestBuildCreateRegistryHandlers_SystemToolExcluded(t *testing.T) {
 	pack := &prompt.Pack{ID: "test-pack", Tools: map[string]*prompt.PackTool{
 		"image__generate": {Name: "image__generate"},
 	}}
-	handlers, warnings := buildCreateRegistryHandlers(pack, &Config{})
+	handlers, warnings := buildCreateRegistryHandlers(pack, &Config{}, true)
 	if len(handlers) != 0 {
 		t.Errorf("system tool must not be synthesized, got %d handlers", len(handlers))
 	}
@@ -281,7 +281,7 @@ func hasChange(changes []deploy.ResourceChange, resType string, action deploy.Ac
 // --- Apply create-mode body -----------------------------------------------
 
 func TestApply_CreateMode_BodyHasConfigAndPlaceholder(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient() // empty store → registry created fresh
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -315,7 +315,7 @@ func TestApply_CreateMode_BodyHasConfigAndPlaceholder(t *testing.T) {
 }
 
 func TestApply_CreateMode_ExistingRegistryNotUpdated(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -406,7 +406,7 @@ func placeholderMethodFor(t *testing.T, spec json.RawMessage, toolName string) s
 }
 
 func TestApply_CreateMode_HandlerWiresSourceURLAndMethod(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient() // empty store → registry created fresh
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -435,7 +435,7 @@ func TestApply_CreateMode_HandlerWiresSourceURLAndMethod(t *testing.T) {
 }
 
 func TestApply_CreateMode_PlaceholderDefaultsPOSTWithoutArenaConfig(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -463,7 +463,7 @@ func TestApply_CreateMode_AlreadyExistsIsNoOp(t *testing.T) {
 	// NOT in priorMap), but the CreateResource call races and returns a 409
 	// AlreadyExists. CREATE-ONLY: this must become a no-op (unchanged), NOT an
 	// update — unlike the generic applyResourcePhase belt-and-braces fallback.
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	sim.validProviders["claude-prod"] = true
@@ -504,7 +504,7 @@ func TestApply_CreateMode_AlreadyExistsIsNoOp(t *testing.T) {
 
 func TestApply_CreateMode_CreateErrorFailsPhase(t *testing.T) {
 	// A non-AlreadyExists create error must fail the registry phase (not no-op).
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	// The AgentRuntime succeeds despite the ToolRegistry failure below, so it goes
 	// through reconcile — make it reconcile immediately so the only resource

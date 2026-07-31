@@ -24,7 +24,7 @@ func applyWithSim(
 	t *testing.T, sim *simulatedClient, packJSON, configJSON string,
 ) (AdapterState, []*deploy.ApplyEvent, error) {
 	t.Helper()
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
 	var events []*deploy.ApplyEvent
@@ -271,9 +271,7 @@ func TestApply_CarriesSupersededPackObjectsIntoState(t *testing.T) {
 }
 
 func TestApply_IntentReconcileFailureFailsDeploy(t *testing.T) {
-	origAttempts := reconcileMaxAttempts
-	reconcileMaxAttempts = 1
-	defer func() { reconcileMaxAttempts = origAttempts }()
+	fastReconcile(t, 1)
 
 	sim := newSimulatedClient()
 	sim.intentEnabled = true
@@ -751,6 +749,60 @@ func TestHTTPClient_GetDeployProfile_Errors(t *testing.T) {
 	})
 	if _, err := newTestHTTPClient(t, garbage).GetDeployProfile(context.Background()); err == nil {
 		t.Fatal("expected a decode error")
+	}
+}
+
+// TestApply_IntentPathProvisionsToolCredentials guards a dependency that is easy
+// to lose: the handlers a DeployIntent carries reference <pack-id>-tool-credentials
+// by name — for the bearer auth stanza AND for every headersFromSecret entry —
+// and the server reconciles the ToolRegistry as part of the POST. If the adapter
+// does not create that Secret first, every env-sourced header resolves to nothing
+// and the tool 401s at call time with the deploy reported as a success.
+func TestApply_IntentPathProvisionsToolCredentials(t *testing.T) {
+	t.Setenv("SEARCH_TOKEN", "tok-live")
+	t.Setenv("ACT_AS", "user-42")
+
+	sim := newSimulatedClient()
+	sim.intentEnabled = true
+	sim.agentRuntimeReadyOnGet = true
+	sim.workspaces = map[string]*WorkspaceInfo{"test-ws": {Namespace: "ns"}}
+
+	fastReconcile(t)
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+	var events []*deploy.ApplyEvent
+	// No "tools" in the config: the registry is auto-created from the arena
+	// source, which is the only path that carries headers_from_env.
+	if _, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON: testPackJSON,
+		DeployConfig: `{"api_endpoint":"https://omnia.test.com","workspace":"test-ws",` +
+			`"api_token":"test-token","providers":{"default":"claude-prod"}}`,
+		ArenaConfig: `{"tool_specs":{"search":{"name":"search","mode":"live","http":{` +
+			`"url":"https://api.example.com/search","method":"POST",` +
+			`"headers_from_env":["Authorization=SEARCH_TOKEN","X-Act-As-User=ACT_AS"]}}}}`,
+	}, capturingCallback(&events)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(sim.postedIntents) != 1 {
+		t.Fatalf("want the intent path, got %d submissions", len(sim.postedIntents))
+	}
+	secret := sim.createdSecrets["ns/"+credentialSecretName("test-pack")]
+	if secret["SEARCH_TOKEN"] != "tok-live" {
+		t.Errorf("auth credential missing from the Secret: %v", sim.createdSecrets)
+	}
+	// The non-Authorization header env var must be there too — headersFromSecret
+	// points at this key and nothing else provisions it.
+	if secret["ACT_AS"] != "user-42" {
+		t.Errorf("header credential missing from the Secret: %v", sim.createdSecrets)
+	}
+
+	// And the intent must actually carry the secret reference rather than the value.
+	intent := string(sim.postedIntents[0])
+	if !strings.Contains(intent, "headersFromSecret") {
+		t.Errorf("intent carries no headersFromSecret: %s", intent)
+	}
+	if strings.Contains(intent, "user-42") {
+		t.Errorf("intent leaks the resolved header value: %s", intent)
 	}
 }
 

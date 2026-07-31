@@ -6,9 +6,28 @@ import (
 	"testing"
 )
 
-func TestWaitForReconcile_ReadyAfterPending(t *testing.T) {
+// fastReconcile zeroes the reconcile poll interval — and optionally caps the
+// attempt count — for the duration of one test, restoring both afterwards.
+//
+// Restoring is the point. These are package vars and the integration tests live
+// in the same package, so a bare assignment leaks into every later test in the
+// binary. Running the package once with -tags=integration left every integration
+// test failing "did not reach Ready within 2 polls" against a perfectly healthy
+// cluster, which reads exactly like a broken adapter.
+func fastReconcile(t *testing.T, maxAttempts ...int) {
+	t.Helper()
+	origInterval, origAttempts := reconcilePollInterval, reconcileMaxAttempts
+	t.Cleanup(func() {
+		reconcilePollInterval, reconcileMaxAttempts = origInterval, origAttempts
+	})
 	reconcilePollInterval = 0
-	reconcileMaxAttempts = 30
+	if len(maxAttempts) > 0 {
+		reconcileMaxAttempts = maxAttempts[0]
+	}
+}
+
+func TestWaitForReconcile_ReadyAfterPending(t *testing.T) {
+	fastReconcile(t, 30)
 	sim := newSimulatedClient()
 	name := "agent-x"
 	sim.resources[simKey(ResTypeAgentRuntime, name)] = &ResourceResponse{
@@ -26,8 +45,7 @@ func TestWaitForReconcile_ReadyAfterPending(t *testing.T) {
 }
 
 func TestWaitForReconcile_TerminalFailure(t *testing.T) {
-	reconcilePollInterval = 0
-	reconcileMaxAttempts = 30
+	fastReconcile(t, 30)
 	sim := newSimulatedClient()
 	name := "agent-bad"
 	sim.resources[simKey(ResTypeAgentRuntime, name)] = &ResourceResponse{
@@ -55,8 +73,7 @@ func TestWaitForReconcile_TerminalFailure(t *testing.T) {
 }
 
 func TestWaitForReconcile_TimesOut(t *testing.T) {
-	reconcilePollInterval = 0
-	reconcileMaxAttempts = 3
+	fastReconcile(t, 3)
 	sim := newSimulatedClient()
 	name := "agent-silent"
 	// Never gets a Ready condition and stays on an empty phase — the "created but
@@ -75,8 +92,7 @@ func TestWaitForReconcile_TimesOut(t *testing.T) {
 }
 
 func TestWaitForReconcile_GetResourceError(t *testing.T) {
-	reconcilePollInterval = 0
-	reconcileMaxAttempts = 30
+	fastReconcile(t, 30)
 	sim := newSimulatedClient()
 	name := "agent-unreadable"
 	sim.resources[simKey(ResTypeAgentRuntime, name)] = &ResourceResponse{

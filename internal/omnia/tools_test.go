@@ -514,7 +514,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	packTool := &prompt.PackTool{Name: "list_user_exercises", Description: "list"}
 
 	// Source carries a real URL + method → both wired straight through.
-	h := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "GET", URL: "https://x/list"}, "")
+	h := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "GET", URL: "https://x/list"}, "", true)
 	hc := h[keyHTTPConfig].(map[string]interface{})
 	if hc[keyMethod] != "GET" {
 		t.Errorf("method with source GET = %v, want GET", hc[keyMethod])
@@ -524,7 +524,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	}
 
 	// Empty source → placeholder URL + POST default.
-	def := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{}, "")
+	def := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{}, "", true)
 	dc := def[keyHTTPConfig].(map[string]interface{})
 	if dc[keyMethod] != defaultHTTPMethod {
 		t.Errorf("empty source method must fall back to %q, got %v", defaultHTTPMethod, dc[keyMethod])
@@ -534,7 +534,7 @@ func TestSynthesizeHandler_UsesSourceURLAndMethod(t *testing.T) {
 	}
 
 	// URL empty but method set → placeholder URL with that method.
-	mo := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "DELETE"}, "")
+	mo := synthesizeHandler(packTool, "list_user_exercises", &httpToolSource{Method: "DELETE"}, "", true)
 	mc := mo[keyHTTPConfig].(map[string]interface{})
 	if mc[keyMethod] != "DELETE" {
 		t.Errorf("method-only source must keep its method, got %v", mc[keyMethod])
@@ -555,7 +555,7 @@ func TestBuildCreateRegistryHandlers_SourceWiredAndPlaceholder(t *testing.T) {
 			"list_user_exercises": {Method: "GET", URL: "https://x/list"},
 		},
 	}
-	handlers, warnings := buildCreateRegistryHandlers(pack, cfg)
+	handlers, warnings := buildCreateRegistryHandlers(pack, cfg, true)
 
 	byTool := map[string]map[string]interface{}{}
 	for _, h := range handlers {
@@ -589,7 +589,7 @@ func TestBuildCreateRegistryHandlers_AllConfiguredNoAdvisories(t *testing.T) {
 		Tool:       &HandlerTool{Name: "search", Description: "Search", InputSchema: map[string]interface{}{"type": "object"}},
 		HTTPConfig: map[string]interface{}{keyEndpoint: "https://api.example.com/search"},
 	}}}
-	_, warnings := buildCreateRegistryHandlers(pack, cfg)
+	_, warnings := buildCreateRegistryHandlers(pack, cfg, true)
 	if len(warnings) != 0 {
 		t.Errorf("all-configured must emit no advisories, got %v", warnings)
 	}
@@ -618,7 +618,7 @@ func TestSynthesizeHandler_RichHTTPConfig(t *testing.T) {
 		Redact:              []string{"user_id"},
 		ResponseBodyMapping: "{id: id, name: name}",
 	}
-	h := synthesizeHandler(nil, "create_workout", src, "")
+	h := synthesizeHandler(nil, "create_workout", src, "", true)
 	cfg, _ := h[keyHTTPConfig].(map[string]interface{})
 	if cfg["responseMapping"] != "{id: id, name: name}" {
 		t.Errorf("responseMapping = %v", cfg["responseMapping"])
@@ -644,7 +644,7 @@ func TestSynthesizeHandler_GETQueryParamsInferred(t *testing.T) {
 		},
 	}
 	src := &httpToolSource{Mode: "live", Method: "GET", URL: "https://api.splitpantz.com/api/v1/exercises"}
-	h := synthesizeHandler(packTool, "list_user_exercises", src, "")
+	h := synthesizeHandler(packTool, "list_user_exercises", src, "", true)
 	cfg := h[keyHTTPConfig].(map[string]interface{})
 	qp, _ := cfg[keyQueryParams].([]string)
 	if len(qp) != 1 || qp[0] != "search" {
@@ -656,7 +656,7 @@ func TestSynthesizeHandler_POSTNoQueryParams(t *testing.T) {
 	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
 		"properties": map[string]interface{}{"name": map[string]interface{}{"type": "string"}}}}
 	src := &httpToolSource{Method: "POST", URL: "https://x/y"}
-	h := synthesizeHandler(packTool, "create_x", src, "")
+	h := synthesizeHandler(packTool, "create_x", src, "", true)
 	if _, ok := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams]; ok {
 		t.Errorf("POST must not infer queryParams")
 	}
@@ -666,7 +666,7 @@ func TestSynthesizeHandler_GETExplicitQueryParamsWin(t *testing.T) {
 	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
 		"properties": map[string]interface{}{"a": map[string]interface{}{}, "b": map[string]interface{}{}}}}
 	src := &httpToolSource{Method: "GET", URL: "https://x", QueryParams: []string{"a"}}
-	h := synthesizeHandler(packTool, "t", src, "")
+	h := synthesizeHandler(packTool, "t", src, "", true)
 	qp := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams].([]string)
 	if len(qp) != 1 || qp[0] != "a" {
 		t.Errorf("explicit queryParams must win, got %v", qp)
@@ -681,7 +681,7 @@ func TestSynthesizeHandler_RequestMappings(t *testing.T) {
 		HeaderParams:       map[string]string{"X-Tenant": "tenant_id"},
 		StaticQuery:        map[string]string{"v": "2"},
 	}
-	cfg := synthesizeHandler(nil, "create_x", src, "")[keyHTTPConfig].(map[string]interface{})
+	cfg := synthesizeHandler(nil, "create_x", src, "", true)[keyHTTPConfig].(map[string]interface{})
 	if cfg["bodyMapping"] != "{payload: input}" {
 		t.Errorf("bodyMapping = %v", cfg["bodyMapping"])
 	}
@@ -698,7 +698,7 @@ func TestSynthesizeHandler_RequestMappings(t *testing.T) {
 func TestSynthesizeHandler_EmitsBearerAuthStanza(t *testing.T) {
 	src := &httpToolSource{Mode: "live", Method: "GET", URL: "https://api.github.com/rate_limit",
 		HeadersFromEnv: []string{"Authorization=GITHUB_TOKEN"}}
-	h := synthesizeHandler(nil, "github_rate_limit", src, "p-tool-credentials")
+	h := synthesizeHandler(nil, "github_rate_limit", src, "p-tool-credentials", true)
 	auth, ok := h["auth"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("no auth stanza: %v", h)
@@ -711,28 +711,69 @@ func TestSynthesizeHandler_EmitsBearerAuthStanza(t *testing.T) {
 		t.Errorf("secretRef = %v", ref)
 	}
 	// A tool with no Authorization header emits no auth stanza.
-	h2 := synthesizeHandler(nil, "no_auth", &httpToolSource{URL: "https://x"}, "p-tool-credentials")
+	h2 := synthesizeHandler(nil, "no_auth", &httpToolSource{URL: "https://x"}, "p-tool-credentials", true)
 	if _, has := h2["auth"]; has {
 		t.Errorf("no-auth tool must not emit an auth stanza: %v", h2)
 	}
 }
 
-func TestSynthesizeHandler_EmitsStaticHeaderFromEnv(t *testing.T) {
+func TestSynthesizeHandler_EmitsSecretHeaderFromEnv(t *testing.T) {
 	t.Setenv("WORKOUT_ACT_AS_USER", "user-42")
 	src := &httpToolSource{Mode: "live", Method: "POST", URL: "https://x/y",
 		HeadersFromEnv: []string{"Authorization=SPLITZ_AUTH", "X-Act-As-User=WORKOUT_ACT_AS_USER"}}
-	h := synthesizeHandler(nil, "create_workout", src, "p-tool-credentials")
+	h := synthesizeHandler(nil, "create_workout", src, "p-tool-credentials", true)
 	hc := h[keyHTTPConfig].(map[string]interface{})
-	headers, _ := hc["headers"].(map[string]string)
-	if headers["X-Act-As-User"] != "user-42" {
-		t.Errorf("static header not emitted from env: %v", hc["headers"])
+
+	headers, _ := hc[keyHeadersFromSecret].(map[string]map[string]string)
+	ref := headers["X-Act-As-User"]
+	if ref["name"] != "p-tool-credentials" || ref["key"] != "WORKOUT_ACT_AS_USER" {
+		t.Errorf("X-Act-As-User = %v, want a secretRef to key WORKOUT_ACT_AS_USER", ref)
 	}
-	// Authorization stays the auth stanza, never a static header.
+
+	// The resolved value must not reach the CRD — that was the leak.
+	rendered := fmt.Sprintf("%v", hc)
+	if strings.Contains(rendered, "user-42") {
+		t.Errorf("httpConfig leaks the resolved header value: %s", rendered)
+	}
+	if _, ok := hc[keyHeaders]; ok {
+		t.Errorf("env-sourced headers must not be emitted as static headers: %v", hc[keyHeaders])
+	}
+
+	// Authorization stays the auth stanza, never a secret header.
 	if _, ok := headers["Authorization"]; ok {
-		t.Errorf("Authorization must not be static: %v", headers)
+		t.Errorf("Authorization must not be in headersFromSecret: %v", headers)
 	}
 	if _, ok := h["auth"]; !ok {
 		t.Error("Authorization must still produce an auth stanza")
+	}
+}
+
+// TestDeployPathsUseDifferentHeaderVocabulary locks in the second deliberate
+// divergence between the two deploy paths, for the same reason as
+// TestDeployPathsUseDifferentAuthVocabulary: headersFromSecret arrived with
+// Omnia#1831, AFTER the deploy-intent API. The per-resource path's servers prune
+// it, so a header emitted that way vanishes entirely — worse than the plaintext
+// value it replaced. Those keep static headers until the path is removed.
+func TestDeployPathsUseDifferentHeaderVocabulary(t *testing.T) {
+	t.Setenv("ACT_AS", "user-42")
+	src := &httpToolSource{Mode: "live", Method: "POST", URL: "https://x/y",
+		HeadersFromEnv: []string{"X-Act-As-User=ACT_AS"}}
+
+	intentCfg := synthesizeHandler(nil, "t", src, "p-tool-credentials", true)[keyHTTPConfig].(map[string]interface{})
+	if _, ok := intentCfg[keyHeadersFromSecret]; !ok {
+		t.Errorf("deploy-intent path must emit headersFromSecret, got %v", intentCfg)
+	}
+	if _, ok := intentCfg[keyHeaders]; ok {
+		t.Errorf("deploy-intent path must not fall back to static headers, got %v", intentCfg[keyHeaders])
+	}
+
+	legacyCfg := synthesizeHandler(nil, "t", src, "p-tool-credentials", false)[keyHTTPConfig].(map[string]interface{})
+	if got, _ := legacyCfg[keyHeaders].(map[string]string); got["X-Act-As-User"] != "user-42" {
+		t.Errorf("per-resource path must emit a resolved static header, got %v", legacyCfg[keyHeaders])
+	}
+	if _, ok := legacyCfg[keyHeadersFromSecret]; ok {
+		t.Error("per-resource path must NOT emit headersFromSecret: those servers lack the " +
+			"field and would prune it, dropping the header entirely")
 	}
 }
 
@@ -746,7 +787,7 @@ func TestBuildCreateRegistryHandlers_MockToolWarning(t *testing.T) {
 	cfg := &Config{sourceTools: map[string]*httpToolSource{
 		"search_shared_workouts": {Mode: "mock"}, // no URL, mock mode
 	}}
-	_, warnings := buildCreateRegistryHandlers(pack, cfg)
+	_, warnings := buildCreateRegistryHandlers(pack, cfg, true)
 	// NOTE: not using a hasWarningContaining helper here — an identical one
 	// already exists in integration_test.go, but it's gated behind the
 	// "integration" build tag; redefining it in this (untagged) file would

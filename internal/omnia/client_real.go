@@ -305,7 +305,18 @@ func (c *httpClient) GetWorkspace(ctx context.Context, name string) (*WorkspaceI
 	if resp.StatusCode >= http.StatusBadRequest {
 		return nil, c.readError(resp)
 	}
+	// Two shapes, both real. GET /api/workspaces/{name} normally returns a
+	// projection — {workspace: {namespace: {...}}, access: {...}} — and only
+	// returns the raw CRD (with spec.namespace) for an owner asking ?view=full.
+	// Decoding only the CRD shape silently yielded an empty namespace on every
+	// ordinary call, which made tool-credential provisioning degrade 100% of the
+	// time with a message blaming permissions.
 	var ws struct {
+		Workspace struct {
+			Namespace struct {
+				Name string `json:"name"`
+			} `json:"namespace"`
+		} `json:"workspace"`
 		Spec struct {
 			Namespace struct {
 				Name string `json:"name"`
@@ -315,7 +326,11 @@ func (c *httpClient) GetWorkspace(ctx context.Context, name string) (*WorkspaceI
 	if err := json.NewDecoder(resp.Body).Decode(&ws); err != nil {
 		return nil, fmt.Errorf("decode workspace: %w", err)
 	}
-	return &WorkspaceInfo{Namespace: ws.Spec.Namespace.Name}, nil
+	ns := ws.Workspace.Namespace.Name
+	if ns == "" {
+		ns = ws.Spec.Namespace.Name
+	}
+	return &WorkspaceInfo{Namespace: ns}, nil
 }
 
 //nolint:revive // interface implementation

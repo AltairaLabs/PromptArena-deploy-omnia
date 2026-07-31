@@ -108,7 +108,7 @@ const multiAgentPackJSON = `{
 }`
 
 func TestApply_EmitsAccessURL(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
@@ -130,7 +130,7 @@ func TestApply_EmitsAccessURL(t *testing.T) {
 }
 
 func TestApply_AccessURL_MultiAgent(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
@@ -209,7 +209,7 @@ func TestApply_NoAccessURL_OnFailure(t *testing.T) {
 }
 
 func TestApply_SingleAgent(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
@@ -256,7 +256,7 @@ func TestApply_SingleAgent(t *testing.T) {
 }
 
 func TestApply_MultiPromptFanOut_SharedPackNRuntimes(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
@@ -301,7 +301,7 @@ func TestApply_MultiPromptFanOut_SharedPackNRuntimes(t *testing.T) {
 }
 
 func TestApply_BindMode_BindsRegistryWithoutCreating(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	// Registry exists but doesn't provide the pack's "search" tool. Apply no
@@ -386,7 +386,7 @@ func TestApply_DryRun(t *testing.T) {
 }
 
 func TestApply_WithPriorState(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	// Pre-populate the simulated client with existing LABELED resources so adopt
@@ -424,8 +424,7 @@ func TestApply_WithPriorState(t *testing.T) {
 }
 
 func TestApply_FailsWhenAgentRuntimeNeverReconciles(t *testing.T) {
-	reconcilePollInterval = 0
-	reconcileMaxAttempts = 2
+	fastReconcile(t, 2)
 
 	sim := newSimulatedClient()
 	// agentRuntimeReadyOnGet is intentionally left false: the created AgentRuntime
@@ -445,7 +444,7 @@ func TestApply_FailsWhenAgentRuntimeNeverReconciles(t *testing.T) {
 }
 
 func TestApply_ResourceFailure(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	// The AgentRuntime itself succeeds despite the ToolRegistry failure below, so
 	// it goes through reconcile — make it reconcile immediately so the only
@@ -492,7 +491,7 @@ func TestApply_ResourceFailure(t *testing.T) {
 // workspace), the create degrades to a warning and the deploy still succeeds —
 // unlike a generic failure, which is fatal (TestApply_ResourceFailure).
 func TestApply_ToolRegistryPermissionDeniedDegrades(t *testing.T) {
-	reconcilePollInterval = 0
+	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
 	sim.failOn[resourceKey(ResTypeToolRegistry, "test-pack-tools")] = &HTTPError{

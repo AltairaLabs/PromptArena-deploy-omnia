@@ -505,7 +505,9 @@ func buildEvalPathSpec(p *EvalPathConfig) map[string]interface{} {
 func buildToolRegistryRequest(
 	pack *prompt.Pack, cfg *Config,
 ) (json.RawMessage, error) {
-	handlers, _ := buildCreateRegistryHandlers(pack, cfg)
+	// false: this path targets servers predating headersFromSecret (Omnia#1831),
+	// which would prune it and drop the header entirely. See addHeaderConfig.
+	handlers, _ := buildCreateRegistryHandlers(pack, cfg, false)
 
 	req := map[string]interface{}{
 		keyMetadata: map[string]interface{}{
