@@ -111,14 +111,14 @@ func applyViaIntent(ctx context.Context, ac *applyContext) (res []ResourceState,
 		return nil, true, cbErr
 	}
 
-	// Provision the tool-credentials Secret BEFORE the POST: the handlers this
-	// intent carries reference it by name for both the bearer auth stanza and
-	// every headersFromSecret entry, and the server reconciles the ToolRegistry
-	// as part of the call. Best-effort and advisory, exactly as on the
-	// per-resource path — a failure warns and never blocks the deploy.
-	if ac.binding.Mode == toolModeCreate {
-		reportCredentialProvisioning(ctx, ac)
-	}
+	// No Secret write here. The intent carries the credential VALUES and the
+	// server writes the Secret it owns, with an owner reference on the
+	// ToolRegistry that references it (Omnia#2008). The adapter used to do this
+	// itself with an out-of-band POST /api/secrets, which left one unowned,
+	// unreaped Secret of live tokens behind per deploy — and forced it to
+	// resolve the workspace namespace for a placement decision that was never
+	// its call. The per-resource path still writes it directly; it has no
+	// deploy-intent API to hand the values to.
 
 	result, perr := ac.client.PostDeployment(ctx, body)
 	if perr != nil {

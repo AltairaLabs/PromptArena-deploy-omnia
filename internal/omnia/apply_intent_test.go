@@ -752,13 +752,15 @@ func TestHTTPClient_GetDeployProfile_Errors(t *testing.T) {
 	}
 }
 
-// TestApply_IntentPathProvisionsToolCredentials guards a dependency that is easy
-// to lose: the handlers a DeployIntent carries reference <pack-id>-tool-credentials
-// by name — for the bearer auth stanza AND for every headersFromSecret entry —
-// and the server reconciles the ToolRegistry as part of the POST. If the adapter
-// does not create that Secret first, every env-sourced header resolves to nothing
-// and the tool 401s at call time with the deploy reported as a success.
-func TestApply_IntentPathProvisionsToolCredentials(t *testing.T) {
+// TestApply_IntentCarriesCredentialsAndWritesNoSecret pins the ownership split
+// the deploy-intent API exists to enforce (Omnia#2008).
+//
+// The adapter resolves the credential VALUES — only it can, they come from env
+// vars in the deploy environment — and hands them to the server inside the
+// intent. It must NOT write the Secret itself: an adapter-written Secret has no
+// owner reference and no managed labels, so nothing reaps it and every deploy
+// leaks one holding live tokens.
+func TestApply_IntentCarriesCredentialsAndWritesNoSecret(t *testing.T) {
 	t.Setenv("SEARCH_TOKEN", "tok-live")
 	t.Setenv("ACT_AS", "user-42")
 
@@ -786,23 +788,93 @@ func TestApply_IntentPathProvisionsToolCredentials(t *testing.T) {
 	if len(sim.postedIntents) != 1 {
 		t.Fatalf("want the intent path, got %d submissions", len(sim.postedIntents))
 	}
-	secret := sim.createdSecrets["ns/"+credentialSecretName("test-pack")]
-	if secret["SEARCH_TOKEN"] != "tok-live" {
-		t.Errorf("auth credential missing from the Secret: %v", sim.createdSecrets)
-	}
-	// The non-Authorization header env var must be there too — headersFromSecret
-	// points at this key and nothing else provisions it.
-	if secret["ACT_AS"] != "user-42" {
-		t.Errorf("header credential missing from the Secret: %v", sim.createdSecrets)
+	if len(sim.createdSecrets) != 0 {
+		t.Errorf("the intent path must write no Secret — the server owns it; got %v",
+			sim.createdSecrets)
 	}
 
-	// And the intent must actually carry the secret reference rather than the value.
-	intent := string(sim.postedIntents[0])
-	if !strings.Contains(intent, "headersFromSecret") {
-		t.Errorf("intent carries no headersFromSecret: %s", intent)
+	var intent struct {
+		Credentials *struct {
+			Data map[string]string `json:"data"`
+		} `json:"credentials"`
+		Tools *struct {
+			Handlers []map[string]interface{} `json:"handlers"`
+		} `json:"tools"`
 	}
-	if strings.Contains(intent, "user-42") {
-		t.Errorf("intent leaks the resolved header value: %s", intent)
+	if err := json.Unmarshal(sim.postedIntents[0], &intent); err != nil {
+		t.Fatalf("decode intent: %v", err)
+	}
+	if intent.Credentials == nil {
+		t.Fatal("intent carries no credentials block")
+	}
+	// Both the bearer token and the header value travel, keyed by env var name.
+	if intent.Credentials.Data["SEARCH_TOKEN"] != "tok-live" {
+		t.Errorf("auth credential missing: %v", intent.Credentials.Data)
+	}
+	if intent.Credentials.Data["ACT_AS"] != "user-42" {
+		t.Errorf("header credential missing: %v", intent.Credentials.Data)
+	}
+
+	// The values travel in the credentials block ONLY. A handler carries the
+	// reference; a value there would end up in the ToolRegistry spec, which is
+	// the leak headersFromSecret exists to close.
+	handlers, _ := json.Marshal(intent.Tools)
+	for _, v := range []string{"tok-live", "user-42"} {
+		if strings.Contains(string(handlers), v) {
+			t.Errorf("handler block leaks a resolved credential %q: %s", v, handlers)
+		}
+	}
+	if !strings.Contains(string(handlers), keyHeadersFromSecret) {
+		t.Errorf("handler carries no headersFromSecret reference: %s", handlers)
+	}
+}
+
+// TestIntentCredentials_OmittedInBindMode guards a combination the server
+// rejects outright: with tools.ref the registry is operator-owned and its Secret
+// references are never rewritten, so credentials would write a Secret nothing
+// points at.
+func TestIntentCredentials_OmittedInBindMode(t *testing.T) {
+	t.Setenv("SEARCH_TOKEN", "tok-live")
+	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}
+	cfg := &Config{sourceTools: map[string]*httpToolSource{
+		"a": {URL: "https://x", HeadersFromEnv: []string{"Authorization=SEARCH_TOKEN"}}}}
+
+	if got := intentCredentials(pack, cfg, &toolsIntent{Ref: "shared-registry"}); got != nil {
+		t.Errorf("bind mode must send no credentials, got %+v", got)
+	}
+	if got := intentCredentials(pack, cfg, nil); got != nil {
+		t.Errorf("no tools must send no credentials, got %+v", got)
+	}
+}
+
+// TestIntentCredentials_UnsetEnvContributesNoKey pins that an unset var is
+// omitted rather than written as an empty value: an empty Secret key resolves to
+// nothing at call time, which is indistinguishable from a header that was never
+// configured. When nothing resolves the whole block is dropped — the server
+// rejects an empty data map.
+func TestIntentCredentials_UnsetEnvContributesNoKey(t *testing.T) {
+	t.Setenv("SET_TOKEN", "v")
+	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}
+	cfg := &Config{sourceTools: map[string]*httpToolSource{
+		"a": {URL: "https://x", HeadersFromEnv: []string{
+			"Authorization=SET_TOKEN", "X-Probe=UNSET_VAR_XYZ"}}}}
+	tools := &toolsIntent{Handlers: []handlerIntent{{Name: "a"}}}
+
+	got := intentCredentials(pack, cfg, tools)
+	if got == nil {
+		t.Fatal("expected the resolvable key to still be carried")
+	}
+	if _, ok := got.Data["UNSET_VAR_XYZ"]; ok {
+		t.Errorf("an unset var must not become an empty Secret key: %v", got.Data)
+	}
+	if got.Data["SET_TOKEN"] != "v" {
+		t.Errorf("resolvable key missing: %v", got.Data)
+	}
+
+	// Nothing resolvable at all → no block, rather than an empty one.
+	cfg.sourceTools["a"].HeadersFromEnv = []string{"X-Probe=UNSET_VAR_XYZ"}
+	if got := intentCredentials(pack, cfg, tools); got != nil {
+		t.Errorf("all-unset must omit the block entirely, got %+v", got)
 	}
 }
 

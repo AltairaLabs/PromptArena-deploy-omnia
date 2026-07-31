@@ -32,21 +32,27 @@ The adapter validates that a token is available before any API operation. If nei
 
 A pack tool's `headers_from_env` entries take the form `HeaderName=ENV_VAR`. Every one of them is treated as a credential — nothing in a pack distinguishes a signing token from an act-as-user identifier, so the adapter does not guess.
 
-At deploy time the adapter reads each named environment variable and provisions a single per-pack Kubernetes Secret, `<pack-id>-tool-credentials`, in the workspace's namespace. The synthesized ToolRegistry then *references* that Secret rather than carrying any value:
+At deploy time the adapter reads each named environment variable. The synthesized ToolRegistry then *references* a Secret rather than carrying any value:
 
-- `Authorization` becomes the handler's bearer auth stanza, pointing at the Secret key.
+- `Authorization` becomes the handler's bearer auth stanza, pointing at a Secret key.
 - Every other header becomes an `httpConfig.headersFromSecret` entry, mapping the header name to the same Secret and the environment variable's name as the key.
 
 The resolved values never enter the ToolRegistry spec, which anyone with `get toolregistry` in the namespace can read.
 
+### Who writes the Secret
+
+The values can only come from the adapter — they live in environment variables in the deploy environment, which the server cannot read. Where they *land* is the server's business, and the two deploy paths differ accordingly.
+
+On the **deploy-intent path** the adapter sends the values inside the deploy request and the server writes the Secret, names it, and owns it with a reference to the ToolRegistry that consumes it. It is collected with the rest of the deploy. The adapter never learns the Secret's name or namespace.
+
+On the **per-resource path** there is no deploy request to carry them, so the adapter writes `<pack-id>-tool-credentials` into the workspace namespace itself. That Secret is not owned by any deploy object and is not removed by `destroy` — delete it by hand when you retire a pack.
+
 ### When a value is unavailable
 
-Provisioning is best-effort and never blocks a deploy. Keys are independent: whatever resolves is written and anything missing is reported, so one unset optional header cannot cost the deploy its auth token. Two cases produce a warning rather than an error:
+Nothing here blocks a deploy. Keys are independent, so one unset optional header cannot cost the deploy its auth token — whatever resolves is sent and anything missing is reported:
 
-- **An environment variable is unset.** That key is not written, so the header (or auth) using it will not be sent. Set the variable at deploy time, or add the key to the Secret yourself.
-- **The Secret could not be created** (for example the API token lacks permission). The warning names the Secret, namespace, and keys so you can pre-create it.
-
-Because the reference is written either way, a pre-created Secret with the right keys is always a valid substitute for adapter provisioning.
+- **An environment variable is unset.** That key is omitted, so the header (or auth) using it will not be sent. An empty key would be worse than an absent one: at call time it is indistinguishable from a header that was never configured. Set the variable at deploy time, or add the key to the Secret yourself.
+- **The Secret could not be written** (per-resource path only — for example the API token lacks permission). The warning names the Secret, namespace, and keys so you can pre-create it. The reference is written either way, so a pre-created Secret with the right keys is always a valid substitute.
 
 ### Older Omnia servers
 

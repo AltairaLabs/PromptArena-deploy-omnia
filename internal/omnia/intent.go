@@ -3,6 +3,7 @@ package omnia
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
@@ -27,12 +28,34 @@ const intentAPIVersionV1 = "deploy.omnia.altairalabs.ai/v1"
 // classifies the fields the same way, and preserves the state precisely because
 // a deploy omits it.
 type deployIntent struct {
-	APIVersion string            `json:"apiVersion"`
-	Pack       packIntent        `json:"pack"`
-	Tools      *toolsIntent      `json:"tools,omitempty"`
-	Policy     *policyIntent     `json:"policy,omitempty"`
-	Agents     []agentIntent     `json:"agents"`
-	Labels     map[string]string `json:"labels,omitempty"`
+	APIVersion  string             `json:"apiVersion"`
+	Pack        packIntent         `json:"pack"`
+	Tools       *toolsIntent       `json:"tools,omitempty"`
+	Policy      *policyIntent      `json:"policy,omitempty"`
+	Agents      []agentIntent      `json:"agents"`
+	Labels      map[string]string  `json:"labels,omitempty"`
+	Credentials *credentialsIntent `json:"credentials,omitempty"`
+}
+
+// credentialsIntent carries the tool-credential VALUES this deploy environment
+// resolved, so the server can write the Secret the synthesized handlers
+// reference and OWN it (Omnia#2008).
+//
+// This is the one thing on the deploy path that cannot be expressed as a name.
+// The values come from environment variables in the deploy environment — a pack
+// declares headers_from_env: [Authorization=GITHUB_TOKEN], and GITHUB_TOKEN
+// lives in the CI job — which the server cannot read. Before the contract
+// carried them the adapter wrote the Secret itself with an out-of-band POST
+// /api/secrets, leaving it unowned and unreaped: one Secret of live tokens
+// leaked per deploy.
+//
+// Contrast externalAuth.clientKeys, where the Secret is genuinely
+// operator-owned and pre-existing — a name reference is right there, and the
+// server deliberately leaves a reference whose key this does not carry alone.
+type credentialsIntent struct {
+	// Data maps a Secret key to its raw value, keyed by the env var name the
+	// pack references. The server preserves the keys verbatim.
+	Data map[string]string `json:"data"`
 }
 
 // packIntent describes the PromptPack + its content ConfigMap. Content is the
@@ -240,7 +263,38 @@ func buildDeployIntent(pack *prompt.Pack, cfg *Config, binding ToolBinding) (jso
 		Agents: intentAgents(pack, cfg, binding),
 		Labels: intentLabels(pack, cfg),
 	}
+	intent.Credentials = intentCredentials(pack, cfg, intent.Tools)
 	return json.Marshal(intent)
+}
+
+// intentCredentials resolves the pack's tool-credential env vars into the
+// values the server writes to its Secret.
+//
+// Only ever set alongside synthesized handlers. In bind mode the registry is
+// operator-owned and the server never rewrites its Secret references, so
+// credentials there would write a Secret nothing points at — the server rejects
+// that combination outright rather than silently no-op'ing, so the adapter must
+// not send it.
+//
+// An unset env var contributes no key: writing an empty value would produce a
+// Secret key that resolves to nothing, which is indistinguishable at call time
+// from a header that was never configured. headerEnvWarnings already tells the
+// operator which ones are missing.
+func intentCredentials(pack *prompt.Pack, cfg *Config, tools *toolsIntent) *credentialsIntent {
+	if tools == nil || len(tools.Handlers) == 0 {
+		return nil
+	}
+	_, envVars := collectToolCredentials(pack, cfg)
+	data := make(map[string]string, len(envVars))
+	for _, env := range envVars {
+		if v := os.Getenv(env); v != "" {
+			data[env] = v
+		}
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return &credentialsIntent{Data: data}
 }
 
 // intentLabels builds the deploy-wide label map the server overlays on every
