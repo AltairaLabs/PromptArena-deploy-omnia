@@ -397,7 +397,7 @@ func TestIntegration_RolloutSurvivesVersionBump(t *testing.T) {
 
 	// The new version must still have been published as its own pack object, so
 	// the trigger controller has something to canary TO.
-	if newPack := stateResourceName(t, state2, ResTypePromptPack); newPack == "" {
+	if stateResourceName(t, state2, ResTypePromptPack) == "" {
 		t.Error("v2 deploy recorded no PromptPack object")
 	}
 }

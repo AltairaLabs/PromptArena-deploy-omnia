@@ -118,26 +118,40 @@ func prunedPaths(before, after map[string]interface{}, prefix string) []string {
 			dropped = append(dropped, path)
 			continue
 		}
-		bMap, bOK := bv.(map[string]interface{})
-		aMap, aOK := av.(map[string]interface{})
+		dropped = append(dropped, prunedValue(bv, av, path)...)
+	}
+	return dropped
+}
+
+// prunedValue compares one before/after pair, descending into nested objects
+// and element-wise into arrays. Anything that is neither, and that did not
+// survive the round trip intact, is reported as pruned at path.
+func prunedValue(bv, av interface{}, path string) []string {
+	if bMap, ok := bv.(map[string]interface{}); ok {
+		if aMap, ok := av.(map[string]interface{}); ok {
+			return prunedPaths(bMap, aMap, path)
+		}
+	}
+	if bArr, ok := bv.([]interface{}); ok {
+		if aArr, ok := av.([]interface{}); ok && len(bArr) == len(aArr) {
+			return prunedArray(bArr, aArr, path)
+		}
+	}
+	if !reflect.DeepEqual(bv, av) {
+		return []string{path}
+	}
+	return nil
+}
+
+// prunedArray descends into the object elements of two same-length arrays.
+// Non-object elements carry no field names, so there is nothing to report.
+func prunedArray(before, after []interface{}, path string) []string {
+	var dropped []string
+	for i := range before {
+		bItem, bOK := before[i].(map[string]interface{})
+		aItem, aOK := after[i].(map[string]interface{})
 		if bOK && aOK {
-			dropped = append(dropped, prunedPaths(bMap, aMap, path)...)
-			continue
-		}
-		bArr, bArrOK := bv.([]interface{})
-		aArr, aArrOK := av.([]interface{})
-		if bArrOK && aArrOK && len(bArr) == len(aArr) {
-			for i := range bArr {
-				bItem, bItemOK := bArr[i].(map[string]interface{})
-				aItem, aItemOK := aArr[i].(map[string]interface{})
-				if bItemOK && aItemOK {
-					dropped = append(dropped, prunedPaths(bItem, aItem, path)...)
-				}
-			}
-			continue
-		}
-		if !reflect.DeepEqual(bv, av) {
-			dropped = append(dropped, path)
+			dropped = append(dropped, prunedPaths(bItem, aItem, path)...)
 		}
 	}
 	return dropped

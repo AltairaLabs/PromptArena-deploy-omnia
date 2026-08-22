@@ -249,6 +249,57 @@ func TestBuildDeployIntent_PolicyFromPackBlocklist(t *testing.T) {
 	}
 }
 
+// The assertions live outside the table so each one stands on its own and the
+// test body stays a plain loop.
+
+func assertNoExternalAuthIntent(t *testing.T, got *externalAuthIntent) {
+	t.Helper()
+	if got != nil {
+		t.Errorf("want nil externalAuth, got %+v", got)
+	}
+}
+
+func assertClientKeysFromAPIKeys(t *testing.T, got *externalAuthIntent) {
+	t.Helper()
+	if got == nil || got.ClientKeys == nil {
+		t.Fatalf("want clientKeys, got %+v", got)
+	}
+	if got.ClientKeys.DefaultRole != "viewer" || !got.ClientKeys.TrustEndUserHeader {
+		t.Errorf("clientKeys = %+v", got.ClientKeys)
+	}
+}
+
+func assertOIDCClaimMapping(t *testing.T, got *externalAuthIntent) {
+	t.Helper()
+	if got == nil || got.OIDC == nil || got.OIDC.ClaimMapping == nil {
+		t.Fatalf("want oidc claim mapping, got %+v", got)
+	}
+	if got.OIDC.ClaimMapping.Subject != "sub" || got.OIDC.ClaimMapping.EndUser != "eu" {
+		t.Errorf("claimMapping = %+v", got.OIDC.ClaimMapping)
+	}
+}
+
+func assertEmptyClaimMappingOmitted(t *testing.T, got *externalAuthIntent) {
+	t.Helper()
+	if got.OIDC.ClaimMapping != nil {
+		t.Errorf("empty claim mapping must be omitted, got %+v", got.OIDC.ClaimMapping)
+	}
+}
+
+func assertEdgeTrustHeaders(t *testing.T, got *externalAuthIntent) {
+	t.Helper()
+	if got.EdgeTrust == nil || got.EdgeTrust.HeaderMapping == nil {
+		t.Fatalf("want edgeTrust header mapping, got %+v", got)
+	}
+	if got.EdgeTrust.HeaderMapping.Subject != "x-sub" ||
+		got.EdgeTrust.HeaderMapping.Email != "x-mail" {
+		t.Errorf("headerMapping = %+v", got.EdgeTrust.HeaderMapping)
+	}
+	if got.EdgeTrust.ClaimsFromHeaders["tenant"] != "x-tenant" {
+		t.Errorf("claimsFromHeaders = %+v", got.EdgeTrust.ClaimsFromHeaders)
+	}
+}
+
 func TestIntentExternalAuth(t *testing.T) {
 	trueVal := true
 	tests := []struct {
@@ -256,24 +307,17 @@ func TestIntentExternalAuth(t *testing.T) {
 		in     *ExternalAuthConfig
 		assert func(t *testing.T, got *externalAuthIntent)
 	}{
-		{name: "nil config", in: nil, assert: func(t *testing.T, got *externalAuthIntent) {
-			if got != nil {
-				t.Errorf("want nil, got %+v", got)
-			}
-		}},
+		{
+			name:   "nil config",
+			in:     nil,
+			assert: assertNoExternalAuthIntent,
+		},
 		{
 			name: "apiKeys maps onto clientKeys",
 			in: &ExternalAuthConfig{
 				APIKeys: &APIKeysAuthConfig{DefaultRole: "viewer", TrustEndUserHeader: true},
 			},
-			assert: func(t *testing.T, got *externalAuthIntent) {
-				if got == nil || got.ClientKeys == nil {
-					t.Fatalf("want clientKeys, got %+v", got)
-				}
-				if got.ClientKeys.DefaultRole != "viewer" || !got.ClientKeys.TrustEndUserHeader {
-					t.Errorf("clientKeys = %+v", got.ClientKeys)
-				}
-			},
+			assert: assertClientKeysFromAPIKeys,
 		},
 		{
 			name: "oidc with claim mapping",
@@ -282,25 +326,14 @@ func TestIntentExternalAuth(t *testing.T) {
 				Audience:     "aud",
 				ClaimMapping: &OIDCClaimMappingConfig{Subject: "sub", EndUser: "eu"},
 			}},
-			assert: func(t *testing.T, got *externalAuthIntent) {
-				if got == nil || got.OIDC == nil || got.OIDC.ClaimMapping == nil {
-					t.Fatalf("want oidc claim mapping, got %+v", got)
-				}
-				if got.OIDC.ClaimMapping.Subject != "sub" || got.OIDC.ClaimMapping.EndUser != "eu" {
-					t.Errorf("claimMapping = %+v", got.OIDC.ClaimMapping)
-				}
-			},
+			assert: assertOIDCClaimMapping,
 		},
 		{
 			name: "oidc without claim mapping content",
 			in: &ExternalAuthConfig{OIDC: &OIDCAuthConfig{
 				Issuer: "i", Audience: "a", ClaimMapping: &OIDCClaimMappingConfig{},
 			}},
-			assert: func(t *testing.T, got *externalAuthIntent) {
-				if got.OIDC.ClaimMapping != nil {
-					t.Errorf("empty claim mapping must be omitted, got %+v", got.OIDC.ClaimMapping)
-				}
-			},
+			assert: assertEmptyClaimMappingOmitted,
 		},
 		{
 			name: "edgeTrust headers",
@@ -308,36 +341,17 @@ func TestIntentExternalAuth(t *testing.T) {
 				HeaderMapping:     &EdgeTrustHeaderMappingConfig{Subject: "x-sub", Email: "x-mail"},
 				ClaimsFromHeaders: map[string]string{"tenant": "x-tenant"},
 			}},
-			assert: func(t *testing.T, got *externalAuthIntent) {
-				if got.EdgeTrust == nil || got.EdgeTrust.HeaderMapping == nil {
-					t.Fatalf("want edgeTrust header mapping, got %+v", got)
-				}
-				if got.EdgeTrust.HeaderMapping.Subject != "x-sub" ||
-					got.EdgeTrust.HeaderMapping.Email != "x-mail" {
-					t.Errorf("headerMapping = %+v", got.EdgeTrust.HeaderMapping)
-				}
-				if got.EdgeTrust.ClaimsFromHeaders["tenant"] != "x-tenant" {
-					t.Errorf("claimsFromHeaders = %+v", got.EdgeTrust.ClaimsFromHeaders)
-				}
-			},
+			assert: assertEdgeTrustHeaders,
 		},
 		{
-			name: "empty edgeTrust omitted",
-			in:   &ExternalAuthConfig{EdgeTrust: &EdgeTrustAuthConfig{}},
-			assert: func(t *testing.T, got *externalAuthIntent) {
-				if got != nil {
-					t.Errorf("an externalAuth with nothing expressible must be nil, got %+v", got)
-				}
-			},
+			name:   "empty edgeTrust omitted",
+			in:     &ExternalAuthConfig{EdgeTrust: &EdgeTrustAuthConfig{}},
+			assert: assertNoExternalAuthIntent,
 		},
 		{
-			name: "allowManagementPlane alone is a facade concern",
-			in:   &ExternalAuthConfig{AllowManagementPlane: &trueVal},
-			assert: func(t *testing.T, got *externalAuthIntent) {
-				if got != nil {
-					t.Errorf("want nil externalAuth, got %+v", got)
-				}
-			},
+			name:   "allowManagementPlane alone is a facade concern",
+			in:     &ExternalAuthConfig{AllowManagementPlane: &trueVal},
+			assert: assertNoExternalAuthIntent,
 		},
 	}
 	for _, tt := range tests {
@@ -563,13 +577,13 @@ func TestPromptPackObjectName_MatchesServerScheme(t *testing.T) {
 	if !strings.HasPrefix(got, "pp-") || len(got) != len("pp-")+packObjectHashLen {
 		t.Fatalf("object name %q has the wrong shape", got)
 	}
-	if same := promptPackObjectName("test-pack", "1.0.0"); same != got {
+	if promptPackObjectName("test-pack", "1.0.0") != got {
 		t.Error("object naming must be deterministic")
 	}
-	if other := promptPackObjectName("test-pack", "1.0.1"); other == got {
+	if promptPackObjectName("test-pack", "1.0.1") == got {
 		t.Error("a new pack version must yield a distinct object name")
 	}
-	if other := promptPackObjectName("other-pack", "1.0.0"); other == got {
+	if promptPackObjectName("other-pack", "1.0.0") == got {
 		t.Error("a different pack must yield a distinct object name")
 	}
 }

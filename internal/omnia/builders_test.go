@@ -411,17 +411,11 @@ func TestBuildToolRegistryRequest(t *testing.T) {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 
-	spec, ok := result["spec"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected spec to be an object")
-	}
+	spec := objectAt(t, result, "spec")
 	if _, present := spec["tools"]; present {
 		t.Error("spec must not contain a 'tools' key; handlers replaced it")
 	}
-	handlers, ok := spec["handlers"].([]interface{})
-	if !ok {
-		t.Fatal("expected spec.handlers to be an array")
-	}
+	handlers := arrayAt(t, spec, "handlers")
 	if len(handlers) != 2 {
 		t.Fatalf("expected 2 handlers, got %d", len(handlers))
 	}
@@ -431,10 +425,7 @@ func TestBuildToolRegistryRequest(t *testing.T) {
 	if h0["name"] != "search" || h0["type"] != handlerTypeHTTP {
 		t.Errorf("handler[0] = %v, want name=search type=http", h0)
 	}
-	tool, ok := h0["tool"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected handler[0].tool to be an object")
-	}
+	tool := objectAt(t, h0, "tool")
 	if tool["name"] != "search" || tool["description"] != "Search tool" {
 		t.Errorf("handler[0].tool = %v", tool)
 	}
@@ -857,10 +848,7 @@ func TestBuildAgentRuntimeRequest_ExternalAuth(t *testing.T) {
 		t.Errorf("facades[0].managementPlane = %v, want false", mp)
 	}
 
-	ea, ok := spec["externalAuth"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected spec.externalAuth to be an object")
-	}
+	ea := objectAt(t, spec, "externalAuth")
 	if _, present := ea["allowManagementPlane"]; present {
 		t.Error("externalAuth.allowManagementPlane was removed in Omnia#1576; must not be emitted")
 	}
@@ -870,14 +858,8 @@ func TestBuildAgentRuntimeRequest_ExternalAuth(t *testing.T) {
 	// clientKeys name here would be pruned by those apiservers and the agent
 	// would deploy with no auth. The deploy-intent path does the migration
 	// instead — see TestIntentClientKeys_MigratesSharedToken.
-	st, ok := ea["sharedToken"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected sharedToken to be an object, got externalAuth = %v", ea)
-	}
-	secretRef, ok := st["secretRef"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected sharedToken.secretRef to be an object, got %T", st["secretRef"])
-	}
+	st := objectAt(t, ea, "sharedToken")
+	secretRef := objectAt(t, st, "secretRef")
 	if secretRef["name"] != "partner-token" {
 		t.Errorf("sharedToken.secretRef.name = %v, want partner-token", secretRef["name"])
 	}
@@ -890,17 +872,11 @@ func TestBuildAgentRuntimeRequest_ExternalAuth(t *testing.T) {
 	}
 
 	// oidc carries issuer/audience and the claimMapping.
-	oidc, ok := ea["oidc"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected oidc to be an object")
-	}
+	oidc := objectAt(t, ea, "oidc")
 	if oidc["issuer"] != "https://issuer.example.com" || oidc["audience"] != "omnia-agents" {
 		t.Errorf("oidc = %v", oidc)
 	}
-	cm, ok := oidc["claimMapping"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected oidc.claimMapping to be an object")
-	}
+	cm := objectAt(t, oidc, "claimMapping")
 	if cm["subject"] != "sub" || cm["endUser"] != "actor" {
 		t.Errorf("oidc.claimMapping = %v", cm)
 	}
@@ -1180,4 +1156,25 @@ func TestBuildEvalsSpec_Subblocks(t *testing.T) {
 	if len(groups) != 1 || groups[0] != "fast-running" {
 		t.Errorf("inline.groups = %v, want [fast-running]", groups)
 	}
+}
+
+// objectAt returns parent[key] as a JSON object, failing the test with the
+// actual shape rather than panicking on the assertion.
+func objectAt(t *testing.T, parent map[string]interface{}, key string) map[string]interface{} {
+	t.Helper()
+	obj, ok := parent[key].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected %s to be an object, got %v", key, parent[key])
+	}
+	return obj
+}
+
+// arrayAt returns parent[key] as a JSON array, on the same terms.
+func arrayAt(t *testing.T, parent map[string]interface{}, key string) []interface{} {
+	t.Helper()
+	arr, ok := parent[key].([]interface{})
+	if !ok {
+		t.Fatalf("expected %s to be an array, got %v", key, parent[key])
+	}
+	return arr
 }
