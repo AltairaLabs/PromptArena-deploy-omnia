@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AltairaLabs/PromptKit/runtime/deploy"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
+	"github.com/AltairaLabs/promptarena/deploy"
 )
 
 // handlerToolName extracts handler.tool.name from a handler map (test helper for

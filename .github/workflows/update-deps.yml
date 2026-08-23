@@ -1,8 +1,12 @@
-name: Update PromptKit Dependency
+name: Update upstream dependencies
 
+# Two upstreams now, not one. The deploy contract (runtime/deploy and
+# adaptersdk) moved out of PromptKit into promptarena, so a release there
+# reaches this adapter only if we listen for it — which nothing did, leaving the
+# module that defines the adapter's own interface with no update path at all.
 on:
   repository_dispatch:
-    types: [promptkit-release]
+    types: [promptkit-release, promptarena-release]
 
 permissions:
   contents: write
@@ -29,16 +33,25 @@ jobs:
     - name: Update go.mod
       env:
         VERSION: ${{ github.event.client_payload.version }}
+        # Read from the environment rather than interpolated into the script:
+        # a dispatch payload is attacker-controlled input to a shell otherwise.
+        EVENT: ${{ github.event.action }}
       run: |
-        echo "Updating PromptKit runtime to $VERSION..."
+        if [ "$EVENT" = "promptarena-release" ]; then
+          echo "Updating promptarena to $VERSION..."
+          go mod edit -require="github.com/AltairaLabs/promptarena@$VERSION"
+          go mod edit -dropreplace=github.com/AltairaLabs/promptarena
+        else
+          echo "Updating PromptKit runtime to $VERSION..."
 
-        # Update required versions for PromptKit modules
-        go mod edit -require="github.com/AltairaLabs/PromptKit/runtime@$VERSION"
-        go mod edit -require="github.com/AltairaLabs/PromptKit/pkg@$VERSION"
+          # Update required versions for PromptKit modules
+          go mod edit -require="github.com/AltairaLabs/PromptKit/runtime@$VERSION"
+          go mod edit -require="github.com/AltairaLabs/PromptKit/pkg@$VERSION"
 
-        # Drop all replace directives — the published modules are now available
-        go mod edit -dropreplace=github.com/AltairaLabs/PromptKit/runtime
-        go mod edit -dropreplace=github.com/AltairaLabs/PromptKit/pkg
+          # Drop all replace directives — the published modules are now available
+          go mod edit -dropreplace=github.com/AltairaLabs/PromptKit/runtime
+          go mod edit -dropreplace=github.com/AltairaLabs/PromptKit/pkg
+        fi
 
         # Tidy to resolve dependencies
         go mod tidy
@@ -86,15 +99,21 @@ jobs:
     - name: Create pull request
       env:
         VERSION: ${{ github.event.client_payload.version }}
+        EVENT: ${{ github.event.action }}
         GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       run: |
-        BRANCH="deps/promptkit-$VERSION"
+        if [ "$EVENT" = "promptarena-release" ]; then
+          UPSTREAM="promptarena"
+        else
+          UPSTREAM="PromptKit"
+        fi
+        BRANCH="deps/$UPSTREAM-$VERSION"
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
 
         git checkout -b "$BRANCH"
         git add -A
-        git commit -m "deps: update PromptKit runtime to $VERSION
+        git commit -m "deps: update $UPSTREAM to $VERSION
 
         Drop replace directives — published module is now available on
         the Go proxy. Remove sibling PromptKit checkout from CI workflows."
@@ -104,15 +123,14 @@ jobs:
         # Unquoted delimiter, so $VERSION interpolates. With <<'PREOF' the body
         # rendered the literal string "$VERSION" in every PR this ever opened.
         gh pr create \
-          --title "deps: update PromptKit runtime to $VERSION" \
+          --title "deps: update $UPSTREAM to $VERSION" \
           --body "$(cat <<PREOF
         ## Summary
 
-        - Update \`github.com/AltairaLabs/PromptKit/runtime\` to $VERSION
+        - Update \`$UPSTREAM\` to $VERSION
         - Drop \`replace\` directives from \`go.mod\` (published module available)
-        - Remove sibling PromptKit checkout from CI workflows
 
-        Triggered automatically by PromptKit release $VERSION.
+        Triggered automatically by the $UPSTREAM release of $VERSION.
 
         ## Verification
 

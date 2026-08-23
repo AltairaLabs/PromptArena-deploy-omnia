@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AltairaLabs/PromptKit/runtime/deploy"
+	"github.com/AltairaLabs/promptarena/deploy"
 )
 
 func collectDestroyEvents(t *testing.T) (deploy.DestroyCallback, *[]*deploy.DestroyEvent) {

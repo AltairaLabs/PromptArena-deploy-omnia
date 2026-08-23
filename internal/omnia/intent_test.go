@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
+	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
 )
 
 // buildIntentForTest parses the pack + config, resolves the binding from config

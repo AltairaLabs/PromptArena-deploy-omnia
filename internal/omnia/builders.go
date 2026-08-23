@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
+	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
 )
 
 // promptPackContentKey is the ConfigMap data key the dashboard's promptpacks
