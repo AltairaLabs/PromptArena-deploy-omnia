@@ -155,25 +155,14 @@ func TestValidateConfig_WorkspaceSlug(t *testing.T) {
 
 	t.Run("un-normalizable name rejected", func(t *testing.T) {
 		t.Setenv("OMNIA_API_TOKEN", "tok")
-		errs := mk("demo workspace").validate()
-		found := false
-		for _, e := range errs {
-			if strings.Contains(e, "not a valid name") {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("expected workspace slug error, got %v", errs)
-		}
+		assertValidation(t, mk("demo workspace").validate(), "not a valid name")
 	})
 
 	t.Run("lowercase slug accepted", func(t *testing.T) {
 		t.Setenv("OMNIA_API_TOKEN", "tok")
 		for _, ws := range []string{"default", "demo", "my-ws-1"} {
-			for _, e := range mk(ws).validate() {
-				if strings.Contains(e, "workspace") {
-					t.Errorf("workspace %q: unexpected error %v", ws, e)
-				}
+			if errs := mk(ws).validate(); hasErrorContaining(errs, "workspace") {
+				t.Errorf("workspace %q: unexpected error %v", ws, errs)
 			}
 		}
 	})
@@ -186,16 +175,7 @@ func TestValidateConfig_InvalidRole(t *testing.T) {
 		Workspace:   "ws",
 		Providers:   Providers{{Name: "default", Ref: "claude-prod", Role: "vision"}},
 	}
-	errs := cfg.validate()
-	found := false
-	for _, e := range errs {
-		if strings.Contains(e, "invalid role") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected an invalid role error, got %v", errs)
-	}
+	assertValidation(t, cfg.validate(), "invalid role")
 }
 
 func TestValidateConfig_EmptyRef(t *testing.T) {
@@ -372,22 +352,7 @@ func TestValidateConfig_Autoscaling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			errs := base(tt.as).validate()
-			if tt.wantError == "" {
-				if len(errs) != 0 {
-					t.Errorf("expected no errors, got %v", errs)
-				}
-				return
-			}
-			found := false
-			for _, e := range errs {
-				if strings.Contains(e, tt.wantError) {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("expected an error containing %q, got %v", tt.wantError, errs)
-			}
+			assertValidation(t, base(tt.as).validate(), tt.wantError)
 		})
 	}
 }
@@ -559,22 +524,7 @@ func TestValidateToolHandlers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			errs := toolValidationBaseConfig(tt.handlers).validate()
-			if tt.wantError == "" {
-				if len(errs) != 0 {
-					t.Errorf("expected no errors, got %v", errs)
-				}
-				return
-			}
-			found := false
-			for _, e := range errs {
-				if strings.Contains(e, tt.wantError) {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("expected an error containing %q, got %v", tt.wantError, errs)
-			}
+			assertValidation(t, toolValidationBaseConfig(tt.handlers).validate(), tt.wantError)
 		})
 	}
 }
@@ -633,22 +583,7 @@ func TestValidateToolHandlers_GRPCAndOpenAPI(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			errs := toolValidationBaseConfig(tt.handlers).validate()
-			if tt.wantError == "" {
-				if len(errs) != 0 {
-					t.Errorf("expected no errors, got %v", errs)
-				}
-				return
-			}
-			found := false
-			for _, e := range errs {
-				if strings.Contains(e, tt.wantError) {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("expected an error containing %q, got %v", tt.wantError, errs)
-			}
+			assertValidation(t, toolValidationBaseConfig(tt.handlers).validate(), tt.wantError)
 		})
 	}
 }
@@ -1217,5 +1152,30 @@ func TestValidateSkills(t *testing.T) {
 				t.Errorf("expected no errors, got %v", errs)
 			}
 		})
+	}
+}
+
+// hasErrorContaining reports whether any validation error mentions want.
+func hasErrorContaining(errs []string, want string) bool {
+	for _, e := range errs {
+		if strings.Contains(e, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// assertValidation checks a validate() result against a wanted error
+// substring. An empty want means the config must validate cleanly.
+func assertValidation(t *testing.T, errs []string, want string) {
+	t.Helper()
+	if want == "" {
+		if len(errs) != 0 {
+			t.Errorf("expected no errors, got %v", errs)
+		}
+		return
+	}
+	if !hasErrorContaining(errs, want) {
+		t.Errorf("expected an error containing %q, got %v", want, errs)
 	}
 }

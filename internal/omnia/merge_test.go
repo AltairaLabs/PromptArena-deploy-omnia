@@ -358,7 +358,7 @@ func TestApply_CreateMode_ExistingRegistryNotUpdated(t *testing.T) {
 		}
 	}
 	// The "left unchanged" advisory is reported through progress.
-	if got := countContaining(progressMessages(events), "left unchanged"); got == 0 {
+	if countContaining(progressMessages(events), "left unchanged") == 0 {
 		t.Errorf("want a left-unchanged progress message, got %v", progressMessages(events))
 	}
 	// The OTHER resources still update (they were adopted as prior).
@@ -497,7 +497,7 @@ func TestApply_CreateMode_AlreadyExistsIsNoOp(t *testing.T) {
 			t.Errorf("tool_registry status = %q, want %q on AlreadyExists no-op", r.Status, ResStatusUnchanged)
 		}
 	}
-	if got := countContaining(progressMessages(events), "left unchanged"); got == 0 {
+	if countContaining(progressMessages(events), "left unchanged") == 0 {
 		t.Errorf("want a left-unchanged progress message, got %v", progressMessages(events))
 	}
 }

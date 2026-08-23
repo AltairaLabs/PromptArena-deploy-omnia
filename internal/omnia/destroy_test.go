@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -57,48 +58,60 @@ func TestDestroy_AllResources(t *testing.T) {
 
 	// Adapter-owned resources (PromptPack + AgentRuntime) are deleted; the
 	// ToolRegistry is operator-owned and must be LEFT in place, with an advisory.
-	var deletedTypes []string
-	var registryLeft bool
-	for _, e := range *events {
-		if e.Type == "resource" && e.Resource != nil && e.Resource.Action == deploy.ActionDelete {
-			deletedTypes = append(deletedTypes, e.Resource.Type)
-		}
-		if e.Type == "progress" && strings.Contains(e.Message, "operator-owned") &&
-			strings.Contains(e.Message, ResTypeToolRegistry) {
-			registryLeft = true
-		}
-	}
+	deletedTypes := deletedResourceTypes(*events)
 	if len(deletedTypes) != 2 {
 		t.Errorf("expected 2 delete events (pack + runtime), got %d: %v", len(deletedTypes), deletedTypes)
 	}
-	for _, typ := range deletedTypes {
-		if typ == ResTypeToolRegistry {
-			t.Error("tool_registry is operator-owned and must NOT be deleted")
-		}
+	if slices.Contains(deletedTypes, ResTypeToolRegistry) {
+		t.Error("tool_registry is operator-owned and must NOT be deleted")
 	}
-	if !registryLeft {
+	if !hasProgressContaining(*events, "operator-owned", ResTypeToolRegistry) {
 		t.Error("expected a 'left ... (operator-owned)' advisory for the tool_registry")
 	}
 
 	// Verify destroy order via events: AgentRuntime delete before PromptPack
 	// delete (reverse dependency order; PromptPack is last).
-	runtimeIdx, promptPackIdx := -1, -1
-	idx := 0
-	for _, e := range *events {
-		if e.Type == "resource" && e.Resource != nil && e.Resource.Action == deploy.ActionDelete {
-			if e.Resource.Type == ResTypeAgentRuntime {
-				runtimeIdx = idx
-			}
-			if e.Resource.Type == ResTypePromptPack {
-				promptPackIdx = idx
-			}
-			idx++
-		}
-	}
+	runtimeIdx := slices.Index(deletedTypes, ResTypeAgentRuntime)
+	promptPackIdx := slices.Index(deletedTypes, ResTypePromptPack)
 	if runtimeIdx == -1 || promptPackIdx == -1 || runtimeIdx > promptPackIdx {
 		t.Errorf("expected agent_runtime to be deleted before prompt_pack (runtime=%d promptpack=%d)",
 			runtimeIdx, promptPackIdx)
 	}
+}
+
+// deletedResourceTypes returns the resource types destroy issued a delete for,
+// in the order the events arrived.
+func deletedResourceTypes(events []*deploy.DestroyEvent) []string {
+	var types []string
+	for _, e := range events {
+		if e.Type == "resource" && e.Resource != nil && e.Resource.Action == deploy.ActionDelete {
+			types = append(types, e.Resource.Type)
+		}
+	}
+	return types
+}
+
+// hasProgressContaining reports whether any progress event mentions every one
+// of the given substrings.
+func hasProgressContaining(events []*deploy.DestroyEvent, substrings ...string) bool {
+	for _, e := range events {
+		if e.Type != "progress" {
+			continue
+		}
+		if containsAll(e.Message, substrings) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAll(s string, substrings []string) bool {
+	for _, sub := range substrings {
+		if !strings.Contains(s, sub) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestDestroy_EmptyState(t *testing.T) {

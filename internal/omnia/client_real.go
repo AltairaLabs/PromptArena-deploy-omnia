@@ -290,6 +290,25 @@ func (c *httpClient) ValidateSkillSource(ctx context.Context, name string) error
 	return nil
 }
 
+// workspaceNamespaceRef is the {"name": ...} namespace reference carried by
+// both workspace response shapes.
+type workspaceNamespaceRef struct {
+	Name string `json:"name"`
+}
+
+// workspaceNamespaceHolder is the object that wraps that reference — the
+// projection nests it under "workspace", the raw CRD under "spec".
+type workspaceNamespaceHolder struct {
+	Namespace workspaceNamespaceRef `json:"namespace"`
+}
+
+// workspaceEnvelope decodes both shapes at once so the caller can take
+// whichever one the API actually sent.
+type workspaceEnvelope struct {
+	Workspace workspaceNamespaceHolder `json:"workspace"`
+	Spec      workspaceNamespaceHolder `json:"spec"`
+}
+
 //nolint:revive // interface implementation
 func (c *httpClient) GetWorkspace(ctx context.Context, name string) (*WorkspaceInfo, error) {
 	url := fmt.Sprintf("%s/api/workspaces/%s", c.endpoint, name)
@@ -311,18 +330,7 @@ func (c *httpClient) GetWorkspace(ctx context.Context, name string) (*WorkspaceI
 	// Decoding only the CRD shape silently yielded an empty namespace on every
 	// ordinary call, which made tool-credential provisioning degrade 100% of the
 	// time with a message blaming permissions.
-	var ws struct {
-		Workspace struct {
-			Namespace struct {
-				Name string `json:"name"`
-			} `json:"namespace"`
-		} `json:"workspace"`
-		Spec struct {
-			Namespace struct {
-				Name string `json:"name"`
-			} `json:"namespace"`
-		} `json:"spec"`
-	}
+	var ws workspaceEnvelope
 	if err := json.NewDecoder(resp.Body).Decode(&ws); err != nil {
 		return nil, fmt.Errorf("decode workspace: %w", err)
 	}
