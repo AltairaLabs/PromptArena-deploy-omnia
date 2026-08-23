@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AltairaLabs/PromptKit/runtime/deploy"
+	"github.com/AltairaLabs/promptarena/deploy"
 )
 
 func TestGetLoginURL(t *testing.T) {

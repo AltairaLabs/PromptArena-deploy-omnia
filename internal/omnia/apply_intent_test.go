@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AltairaLabs/PromptKit/runtime/deploy"
-	"github.com/AltairaLabs/PromptKit/runtime/deploy/adaptersdk"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
+	"github.com/AltairaLabs/promptarena/deploy"
+	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
 )
 
 // newTestReporter builds a ProgressReporter that records every emitted event.

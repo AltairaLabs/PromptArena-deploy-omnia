@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AltairaLabs/PromptKit/runtime/deploy"
+	"github.com/AltairaLabs/promptarena/deploy"
 )
 
 // These tests assert on the OBJECTS a deploy actually produces in the cluster,
