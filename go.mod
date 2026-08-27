@@ -3,7 +3,7 @@ module github.com/AltairaLabs/promptarena-deploy-omnia
 go 1.26.0
 
 require (
-	github.com/AltairaLabs/PromptKit/runtime v1.5.11
+	github.com/AltairaLabs/PromptKit/runtime v1.5.12
 	github.com/AltairaLabs/promptarena v1.5.9
 	k8s.io/apiextensions-apiserver v0.36.2
 	k8s.io/apimachinery v0.36.3
