@@ -4,13 +4,14 @@ import (
 	"context"
 	"testing"
 
+	"github.com/AltairaLabs/PromptKit/runtime/packspec"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 	"github.com/AltairaLabs/promptarena/deploy"
 	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
 )
 
 func ghAuthPack() (*prompt.Pack, *Config) {
-	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}}
 	cfg := &Config{Workspace: "ws", sourceTools: map[string]*httpToolSource{
 		"a": {URL: "https://x", HeadersFromEnv: []string{"Authorization=GITHUB_TOKEN"}}}}
 	return pack, cfg
@@ -68,7 +69,7 @@ func TestProvisionToolCredentials_MissingEnvValue(t *testing.T) {
 func TestProvisionToolCredentials_PartialEnvStillWritesWhatResolved(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghs_live") // auth resolves
 	// ACT_AS deliberately unset → only the header key is missing.
-	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}}
 	cfg := &Config{Workspace: "ws", sourceTools: map[string]*httpToolSource{
 		"a": {URL: "https://x", HeadersFromEnv: []string{
 			"Authorization=GITHUB_TOKEN", "X-Act-As-User=ACT_AS_UNSET_XYZ"}}}}
@@ -122,7 +123,7 @@ func TestReportCredentialProvisioning_StreamsWarnings(t *testing.T) {
 }
 
 func TestProvisionToolCredentials_NoCredentialsNoop(t *testing.T) {
-	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}}
 	cfg := &Config{Workspace: "ws", sourceTools: map[string]*httpToolSource{"a": {URL: "https://x"}}}
 	sim := newSimulatedClient()
 	ok, warnings := provisionToolCredentials(context.Background(), sim, pack, cfg)

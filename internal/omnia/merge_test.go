@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AltairaLabs/PromptKit/runtime/packspec"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 	"github.com/AltairaLabs/promptarena/deploy"
 )
@@ -46,10 +47,10 @@ const twoToolDeployConfig = `{
 }`
 
 // packWithTool builds a single-tool pack whose tool carries the given schema.
-func packWithTool(toolName string, schema interface{}) *prompt.Pack {
-	return &prompt.Pack{ID: "test-pack", Tools: map[string]*prompt.PackTool{
+func packWithTool(toolName string, schema *packspec.ToolParameters) *prompt.Pack {
+	return &prompt.Pack{Pack: packspec.Pack{ID: "test-pack", Tools: map[string]*prompt.PackTool{
 		toolName: {Name: toolName, Description: "desc-" + toolName, Parameters: schema},
-	}}
+	}}}
 }
 
 // handlerFor builds an existing-registry handler map for a tool, with an inline
@@ -70,7 +71,7 @@ func handlerFor(toolName, endpoint string, schema interface{}) map[string]interf
 
 func TestBuildCreateRegistryHandlers_ConfigOnly(t *testing.T) {
 	// The single pack tool IS configured → only config handlers, no extras.
-	pack := packWithTool("search", map[string]interface{}{"type": "object"})
+	pack := packWithTool("search", &packspec.ToolParameters{Type: "object"})
 	cfg := &Config{Tools: []ToolHandler{{
 		Name: "search", Type: handlerTypeHTTP,
 		Tool:       &HandlerTool{Name: "search", InputSchema: map[string]interface{}{"type": "object"}},
@@ -90,7 +91,7 @@ func TestBuildCreateRegistryHandlers_ConfigOnly(t *testing.T) {
 }
 
 func TestBuildCreateRegistryHandlers_PlaceholderForUnconfigured(t *testing.T) {
-	pack := packWithTool("lookup_order", map[string]interface{}{"type": "object"})
+	pack := packWithTool("lookup_order", &packspec.ToolParameters{Type: "object"})
 	cfg := &Config{} // no configured tools at all
 
 	handlers, warnings := buildCreateRegistryHandlers(pack, cfg, true)
@@ -124,9 +125,9 @@ func TestBuildCreateRegistryHandlers_PlaceholderForUnconfigured(t *testing.T) {
 func TestBuildCreateRegistryHandlers_SystemToolExcluded(t *testing.T) {
 	// A system __ tool needs no handler — it must be neither placeholdered nor
 	// counted, even with no config tools.
-	pack := &prompt.Pack{ID: "test-pack", Tools: map[string]*prompt.PackTool{
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "test-pack", Tools: map[string]*prompt.PackTool{
 		"image__generate": {Name: "image__generate"},
-	}}
+	}}}
 	handlers, warnings := buildCreateRegistryHandlers(pack, &Config{}, true)
 	if len(handlers) != 0 {
 		t.Errorf("system tool must not be synthesized, got %d handlers", len(handlers))
@@ -140,7 +141,7 @@ func TestBuildCreateRegistryHandlers_SystemToolExcluded(t *testing.T) {
 
 func TestRegistryExists_404(t *testing.T) {
 	sim := newSimulatedClient() // empty store → GetResource returns a typed 404
-	exists, err := registryExists(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
+	exists, err := registryExists(context.Background(), sim, &prompt.Pack{Pack: packspec.Pack{ID: "test-pack"}})
 	if err != nil {
 		t.Fatalf("404 must yield nil error, got %v", err)
 	}
@@ -155,7 +156,7 @@ func TestRegistryExists_Found(t *testing.T) {
 		handlerFor("lookup_order", "https://real.example.com/lookup",
 			map[string]interface{}{"type": "object"}),
 	})
-	exists, err := registryExists(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
+	exists, err := registryExists(context.Background(), sim, &prompt.Pack{Pack: packspec.Pack{ID: "test-pack"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestRegistryExists_OtherError(t *testing.T) {
 	sim.failOn[simKey(ResTypeToolRegistry, "test-pack-tools")] = &HTTPError{
 		StatusCode: httpStatusForbidden, Body: "forbidden", Category: ErrCategoryPermission,
 	}
-	_, err := registryExists(context.Background(), sim, &prompt.Pack{ID: "test-pack"})
+	_, err := registryExists(context.Background(), sim, &prompt.Pack{Pack: packspec.Pack{ID: "test-pack"}})
 	if err == nil {
 		t.Fatal("a non-404 error must propagate")
 	}

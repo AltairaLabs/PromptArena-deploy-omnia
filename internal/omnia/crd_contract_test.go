@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/AltairaLabs/PromptKit/runtime/packspec"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
@@ -243,20 +244,20 @@ func TestCRDContract_PromptPack(t *testing.T) {
 // real ToolRegistry CRD schema — locking the field NAMES to the schema so a future
 // drift (e.g. responseMapping -> some renamed field) becomes a red build.
 func TestCRDContract_ToolRegistry_EnrichedSynthesizedHandler(t *testing.T) {
-	pack := &prompt.Pack{
+	pack := &prompt.Pack{Pack: packspec.Pack{
 		ID:      "rich-pack",
 		Version: "1.0.0",
 		Tools: map[string]*prompt.PackTool{
 			"list_user_exercises": {
 				Name:        "list_user_exercises",
 				Description: "List the user's exercises",
-				Parameters: map[string]interface{}{
-					"type":       "object",
-					"properties": map[string]interface{}{"search": map[string]interface{}{"type": "string"}},
+				Parameters: &packspec.ToolParameters{
+					Type:       "object",
+					Properties: map[string]map[string]any{"search": {"type": "string"}},
 				},
 			},
 		},
-	}
+	}}
 	cfg := &Config{
 		APIEndpoint: "https://omnia.test.com", Workspace: "test-ws", APIToken: "test-token",
 		sourceTools: map[string]*httpToolSource{
@@ -290,13 +291,13 @@ func TestCRDContract_ToolRegistry_EnrichedSynthesizedHandler(t *testing.T) {
 // handler carrying a bearer auth stanza (secretRef) is admissible against the real
 // ToolRegistry CRD schema — locking the auth-stanza shape to the schema.
 func TestCRDContract_ToolRegistry_AuthStanzaHandler(t *testing.T) {
-	pack := &prompt.Pack{
+	pack := &prompt.Pack{Pack: packspec.Pack{
 		ID: "auth-pack", Version: "1.0.0",
 		Tools: map[string]*prompt.PackTool{
 			"github_rate_limit": {Name: "github_rate_limit", Description: "gh",
-				Parameters: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}},
+				Parameters: &packspec.ToolParameters{Type: "object", Properties: map[string]map[string]any{}}},
 		},
-	}
+	}}
 	cfg := &Config{
 		APIEndpoint: "https://omnia.test.com", Workspace: "test-ws", APIToken: "test-token",
 		sourceTools: map[string]*httpToolSource{

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/AltairaLabs/PromptKit/runtime/packspec"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
@@ -361,19 +362,18 @@ func resolveQueryParams(src *httpToolSource, method string, packTool *prompt.Pac
 }
 
 // inputSchemaPropertyNames extracts the sorted top-level property names from a
-// JSON-Schema document decoded as interface{} (map[string]interface{}). Returns
-// nil when there is no properties object.
-func inputSchemaPropertyNames(schema interface{}) []string {
-	m, ok := schema.(map[string]interface{})
-	if !ok {
+// pack tool's parameter schema. Returns nil when there is no properties object.
+//
+// This took a interface{} and type-asserted map[string]interface{} until
+// PromptKit v1.9.0 made PackTool.Parameters a *packspec.ToolParameters. That
+// assertion still compiled against the new type and simply never matched, so
+// every GET tool would have silently stopped inferring queryParams.
+func inputSchemaPropertyNames(schema *packspec.ToolParameters) []string {
+	if schema == nil || len(schema.Properties) == 0 {
 		return nil
 	}
-	props, ok := m["properties"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	names := make([]string, 0, len(props))
-	for name := range props {
+	names := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -652,15 +652,85 @@ func schemaDrifts(packTool *prompt.PackTool, registrySchema json.RawMessage) boo
 	if packTool == nil || packTool.Parameters == nil || len(registrySchema) == 0 {
 		return false
 	}
-	packNorm, err := normalizeJSON(packTool.Parameters)
+	packNorm, err := normalizeSchema(packTool.Parameters)
 	if err != nil {
 		return false
 	}
-	regNorm, err := normalizeRawJSON(registrySchema)
+	regNorm, err := normalizeRawSchema(registrySchema)
 	if err != nil {
 		return false
 	}
 	return packNorm != regNorm
+}
+
+// normalizeSchema canonicalizes a schema for comparison: marshal, round-trip
+// through interface{} so keys sort, and drop null-valued keys.
+//
+// Dropping empties is what makes the generated type comparable. PromptKit
+// v1.9.0 made PackTool.Parameters a *packspec.ToolParameters, whose MarshalJSON
+// always writes `properties`, so a tool that declares none now serializes as
+// {"properties":{},"type":"object"} where the authored map produced
+// {"type":"object"}. A registry schema that omits the key is the same schema:
+// an empty properties object declares nothing, an empty required array requires
+// nothing. Without this, every property-less tool would warn about drift on
+// every deploy.
+func normalizeSchema(v interface{}) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	var decoded interface{}
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		return "", err
+	}
+	return normalizeJSON(dropEmpty(decoded))
+}
+
+// normalizeRawSchema canonicalizes a registry schema the same way.
+func normalizeRawSchema(raw json.RawMessage) (string, error) {
+	var decoded interface{}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return "", err
+	}
+	return normalizeJSON(dropEmpty(decoded))
+}
+
+// dropEmpty removes keys that carry no information — null, an empty object or
+// an empty array — from every object in the document.
+func dropEmpty(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, val := range t {
+			if isEmptyValue(val) {
+				continue
+			}
+			out[k] = dropEmpty(val)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, 0, len(t))
+		for _, val := range t {
+			out = append(out, dropEmpty(val))
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// isEmptyValue reports whether a decoded JSON value carries no information.
+func isEmptyValue(v interface{}) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case map[string]interface{}:
+		return len(t) == 0
+	case []interface{}:
+		return len(t) == 0
+	default:
+		return false
+	}
 }
 
 // normalizeJSON marshals a value to canonical JSON (Go's encoder sorts map keys).
@@ -670,14 +740,4 @@ func normalizeJSON(v interface{}) (string, error) {
 		return "", err
 	}
 	return string(b), nil
-}
-
-// normalizeRawJSON round-trips raw JSON through interface{} so object keys are
-// re-sorted into the same canonical order normalizeJSON produces.
-func normalizeRawJSON(raw json.RawMessage) (string, error) {
-	var v interface{}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return "", err
-	}
-	return normalizeJSON(v)
 }

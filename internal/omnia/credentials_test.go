@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AltairaLabs/PromptKit/runtime/packspec"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
@@ -21,9 +22,9 @@ func TestParseAuthEnv(t *testing.T) {
 }
 
 func TestCollectToolCredentials(t *testing.T) {
-	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Tools: map[string]*prompt.PackTool{
 		"a": {Name: "a"}, "b": {Name: "b"}, "c": {Name: "c"},
-	}}
+	}}}
 	cfg := &Config{sourceTools: map[string]*httpToolSource{
 		"a": {URL: "https://x/a", HeadersFromEnv: []string{"Authorization=SPLITZ_AUTH"}},
 		"b": {URL: "https://x/b", HeadersFromEnv: []string{"Authorization=SPLITZ_AUTH"}}, // shared → one key
@@ -114,7 +115,7 @@ func TestSecretHeadersNeverCollideWithAuth(t *testing.T) {
 
 func TestHeaderEnvWarnings(t *testing.T) {
 	// NOT_SET_XYZ is unset → a warning naming the tool + header.
-	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"c": {Name: "c"}}}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"c": {Name: "c"}}}}
 	cfg := &Config{sourceTools: map[string]*httpToolSource{
 		"c": {URL: "https://x", HeadersFromEnv: []string{"X-Act-As-User=NOT_SET_XYZ"}}}}
 	warnings := headerEnvWarnings(pack, cfg)
