@@ -741,13 +741,3 @@ func normalizeJSON(v interface{}) (string, error) {
 	}
 	return string(b), nil
 }
-
-// normalizeRawJSON round-trips raw JSON through interface{} so object keys are
-// re-sorted into the same canonical order normalizeJSON produces.
-func normalizeRawJSON(raw json.RawMessage) (string, error) {
-	var v interface{}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return "", err
-	}
-	return normalizeJSON(v)
-}
