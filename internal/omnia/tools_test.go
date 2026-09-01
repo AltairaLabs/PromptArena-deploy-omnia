@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AltairaLabs/PromptKit/runtime/packspec"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 )
 
@@ -17,10 +18,10 @@ func resolverPack(names ...string) *prompt.Pack {
 	for _, n := range names {
 		tools[n] = &prompt.PackTool{
 			Name:       n,
-			Parameters: map[string]interface{}{"type": "object"},
+			Parameters: &packspec.ToolParameters{Type: "object"},
 		}
 	}
-	return &prompt.Pack{ID: "test-pack", Tools: tools}
+	return &prompt.Pack{Pack: packspec.Pack{ID: "test-pack", Tools: tools}}
 }
 
 func resolverProvider(sim *simulatedClient) *Provider {
@@ -414,7 +415,7 @@ func TestResolveToolBinding_Discover_ListErrorFallsBack(t *testing.T) {
 // --- No pack tools ---------------------------------------------------------
 
 func TestResolveToolBinding_NoPackTools_None(t *testing.T) {
-	pack := &prompt.Pack{ID: "test-pack"}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "test-pack"}}
 	binding, warnings, err := resolveToolBinding(
 		context.Background(), resolverProvider(newSimulatedClient()), pack, &Config{})
 	if err != nil {
@@ -428,9 +429,9 @@ func TestResolveToolBinding_NoPackTools_None(t *testing.T) {
 func TestResolveToolBinding_SystemToolsExcluded(t *testing.T) {
 	// A pack whose only tool is system-namespaced (image__generate) needs no
 	// handler and must resolve to none with no warning.
-	pack := &prompt.Pack{ID: "test-pack", Tools: map[string]*prompt.PackTool{
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "test-pack", Tools: map[string]*prompt.PackTool{
 		"image__generate": {Name: "image__generate"},
-	}}
+	}}}
 	binding, warnings, err := resolveToolBinding(
 		context.Background(), resolverProvider(newSimulatedClient()), pack, &Config{})
 	if err != nil {
@@ -444,8 +445,8 @@ func TestResolveToolBinding_SystemToolsExcluded(t *testing.T) {
 // --- Helpers ---------------------------------------------------------------
 
 func TestSchemaDrifts(t *testing.T) {
-	matching := &prompt.PackTool{Parameters: map[string]interface{}{
-		"type": "object", "properties": map[string]interface{}{"a": map[string]interface{}{"type": "string"}},
+	matching := &prompt.PackTool{Parameters: &packspec.ToolParameters{
+		Type: "object", Properties: map[string]map[string]any{"a": {"type": "string"}},
 	}}
 	// Same content, different key order in the raw form → must NOT drift.
 	sameDiffOrder := json.RawMessage(`{"properties":{"a":{"type":"string"}},"type":"object"}`)
@@ -596,7 +597,7 @@ func TestBuildCreateRegistryHandlers_AllConfiguredNoAdvisories(t *testing.T) {
 }
 
 func TestDryRunToolBinding(t *testing.T) {
-	pack := &prompt.Pack{ID: "test-pack"}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "test-pack"}}
 	if b := dryRunToolBinding(pack, &Config{Tools: []ToolHandler{{}}}); b.Mode != toolModeCreate ||
 		b.RegistryName != "test-pack-tools" {
 		t.Errorf("tools → create/test-pack-tools, got %+v", b)
@@ -638,9 +639,9 @@ func TestSynthesizeHandler_RichHTTPConfig(t *testing.T) {
 func TestSynthesizeHandler_GETQueryParamsInferred(t *testing.T) {
 	packTool := &prompt.PackTool{
 		Name: "list_user_exercises",
-		Parameters: map[string]interface{}{
-			"type":       "object",
-			"properties": map[string]interface{}{"search": map[string]interface{}{"type": "string"}},
+		Parameters: &packspec.ToolParameters{
+			Type:       "object",
+			Properties: map[string]map[string]any{"search": {"type": "string"}},
 		},
 	}
 	src := &httpToolSource{Mode: "live", Method: "GET", URL: "https://api.splitpantz.com/api/v1/exercises"}
@@ -653,8 +654,8 @@ func TestSynthesizeHandler_GETQueryParamsInferred(t *testing.T) {
 }
 
 func TestSynthesizeHandler_POSTNoQueryParams(t *testing.T) {
-	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
-		"properties": map[string]interface{}{"name": map[string]interface{}{"type": "string"}}}}
+	packTool := &prompt.PackTool{Parameters: &packspec.ToolParameters{
+		Properties: map[string]map[string]any{"name": {"type": "string"}}}}
 	src := &httpToolSource{Method: "POST", URL: "https://x/y"}
 	h := synthesizeHandler(packTool, "create_x", src, "", true)
 	if _, ok := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams]; ok {
@@ -663,8 +664,8 @@ func TestSynthesizeHandler_POSTNoQueryParams(t *testing.T) {
 }
 
 func TestSynthesizeHandler_GETExplicitQueryParamsWin(t *testing.T) {
-	packTool := &prompt.PackTool{Parameters: map[string]interface{}{
-		"properties": map[string]interface{}{"a": map[string]interface{}{}, "b": map[string]interface{}{}}}}
+	packTool := &prompt.PackTool{Parameters: &packspec.ToolParameters{
+		Properties: map[string]map[string]any{"a": {}, "b": {}}}}
 	src := &httpToolSource{Method: "GET", URL: "https://x", QueryParams: []string{"a"}}
 	h := synthesizeHandler(packTool, "t", src, "", true)
 	qp := h[keyHTTPConfig].(map[string]interface{})[keyQueryParams].([]string)
@@ -780,10 +781,10 @@ func TestDeployPathsUseDifferentHeaderVocabulary(t *testing.T) {
 // --- Mock-mode pack tools get a distinct plan-time warning ------------------
 
 func TestBuildCreateRegistryHandlers_MockToolWarning(t *testing.T) {
-	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Tools: map[string]*prompt.PackTool{
 		"search_shared_workouts": {Name: "search_shared_workouts", Description: "d",
-			Parameters: map[string]interface{}{}},
-	}}
+			Parameters: &packspec.ToolParameters{}},
+	}}}
 	cfg := &Config{sourceTools: map[string]*httpToolSource{
 		"search_shared_workouts": {Mode: "mock"}, // no URL, mock mode
 	}}
@@ -795,5 +796,30 @@ func TestBuildCreateRegistryHandlers_MockToolWarning(t *testing.T) {
 	joined := strings.Join(warnings, "\n")
 	if !strings.Contains(joined, "mock") || !strings.Contains(joined, "search_shared_workouts") {
 		t.Errorf("expected a mock-mode warning naming the tool, got %v", warnings)
+	}
+}
+
+// TestSchemaDrifts_GeneratedEmptyPropertiesIsNotDrift pins the normalization
+// that keeps the generated parameter type comparable with a registry schema.
+// packspec.ToolParameters always marshals `properties`, so a tool declaring
+// none produces {"properties":{},"type":"object"} while the registry holds
+// {"type":"object"}. Those are the same schema; before PromptKit v1.9.0 the
+// authored map simply omitted the key, and without normalization every
+// property-less tool warns about drift on every deploy.
+func TestSchemaDrifts_GeneratedEmptyPropertiesIsNotDrift(t *testing.T) {
+	tool := &prompt.PackTool{Parameters: &packspec.ToolParameters{Type: "object"}}
+	if schemaDrifts(tool, json.RawMessage(`{"type":"object"}`)) {
+		t.Error("an empty properties object must compare equal to an omitted one")
+	}
+	// A real difference must still be reported.
+	if !schemaDrifts(tool, json.RawMessage(`{"type":"string"}`)) {
+		t.Error("a genuinely different schema must still drift")
+	}
+	// So must a difference that only shows inside properties.
+	declared := &prompt.PackTool{Parameters: &packspec.ToolParameters{
+		Type: "object", Properties: map[string]map[string]any{"a": {"type": "string"}},
+	}}
+	if !schemaDrifts(declared, json.RawMessage(`{"type":"object","properties":{"a":{"type":"number"}}}`)) {
+		t.Error("differing property types must drift")
 	}
 }

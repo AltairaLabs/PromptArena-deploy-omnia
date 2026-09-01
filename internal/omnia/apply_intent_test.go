@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AltairaLabs/PromptKit/runtime/packspec"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 	"github.com/AltairaLabs/promptarena/deploy"
 	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
@@ -290,7 +291,7 @@ func TestApply_IntentReconcileFailureFailsDeploy(t *testing.T) {
 func TestIntentTools_CreateModeWithNoHandlers(t *testing.T) {
 	// Create mode with nothing to put in the registry emits no tools block at all,
 	// rather than an empty one the server would reject.
-	pack := &prompt.Pack{ID: "p", Prompts: map[string]*prompt.PackPrompt{"main": {}}}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Prompts: map[string]*prompt.PackPrompt{"main": {}}}}
 	got := intentTools(pack, &Config{}, ToolBinding{Mode: toolModeCreate, RegistryName: "p-tools"})
 	if got != nil {
 		t.Errorf("tools = %+v, want nil when there is nothing to create", got)
@@ -298,7 +299,7 @@ func TestIntentTools_CreateModeWithNoHandlers(t *testing.T) {
 }
 
 func TestIntentTools_BindModeWithoutName(t *testing.T) {
-	pack := &prompt.Pack{ID: "p"}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p"}}
 	if got := intentTools(pack, &Config{}, ToolBinding{Mode: toolModeBind}); got != nil {
 		t.Errorf("tools = %+v, want nil when bind mode names no registry", got)
 	}
@@ -636,7 +637,7 @@ func TestPlanDeployPath_DryRunSkipsProbe(t *testing.T) {
 		return nil, errors.New("unreachable")
 	}}
 	intentPath, warnings := p.planDeployPath(
-		context.Background(), &prompt.Pack{ID: "p"}, &Config{DryRun: true}, ToolBinding{})
+		context.Background(), &prompt.Pack{Pack: packspec.Pack{ID: "p"}}, &Config{DryRun: true}, ToolBinding{})
 	if intentPath || warnings != nil {
 		t.Errorf("dry-run = (%v, %v), want the per-resource preview with no advisories",
 			intentPath, warnings)
@@ -644,7 +645,7 @@ func TestPlanDeployPath_DryRunSkipsProbe(t *testing.T) {
 }
 
 func TestPlannedPackObjectName(t *testing.T) {
-	pack := &prompt.Pack{ID: "Test_Pack", Version: "1.0.0"}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "Test_Pack", Version: "1.0.0"}}
 	if got := plannedPackObjectName(pack, false); got != "test-pack" {
 		t.Errorf("per-resource name = %q, want test-pack", got)
 	}
@@ -835,7 +836,7 @@ func TestApply_IntentCarriesCredentialsAndWritesNoSecret(t *testing.T) {
 // points at.
 func TestIntentCredentials_OmittedInBindMode(t *testing.T) {
 	t.Setenv("SEARCH_TOKEN", "tok-live")
-	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}}
 	cfg := &Config{sourceTools: map[string]*httpToolSource{
 		"a": {URL: "https://x", HeadersFromEnv: []string{"Authorization=SEARCH_TOKEN"}}}}
 
@@ -854,7 +855,7 @@ func TestIntentCredentials_OmittedInBindMode(t *testing.T) {
 // rejects an empty data map.
 func TestIntentCredentials_UnsetEnvContributesNoKey(t *testing.T) {
 	t.Setenv("SET_TOKEN", "v")
-	pack := &prompt.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}
+	pack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Tools: map[string]*prompt.PackTool{"a": {Name: "a"}}}}
 	cfg := &Config{sourceTools: map[string]*httpToolSource{
 		"a": {URL: "https://x", HeadersFromEnv: []string{
 			"Authorization=SET_TOKEN", "X-Probe=UNSET_VAR_XYZ"}}}}

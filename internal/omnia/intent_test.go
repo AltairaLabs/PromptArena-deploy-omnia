@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AltairaLabs/PromptKit/runtime/packspec"
 	"github.com/AltairaLabs/PromptKit/runtime/prompt"
 	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
 )
@@ -460,12 +461,12 @@ func TestIntentSkills(t *testing.T) {
 }
 
 func TestIntentPolicy_RequiresRegistry(t *testing.T) {
-	pack := &prompt.Pack{
+	pack := &prompt.Pack{Pack: packspec.Pack{
 		ID: "p",
 		Prompts: map[string]*prompt.PackPrompt{
 			"main": {ToolPolicy: &prompt.ToolPolicyPack{Blocklist: []string{"danger"}}},
 		},
-	}
+	}}
 	if got := intentPolicy(pack, ToolBinding{Mode: toolModeNone}); got != nil {
 		t.Errorf("a blocklist with no registry must emit no policy, got %+v", got)
 	}
@@ -476,13 +477,13 @@ func TestIntentPolicy_RequiresRegistry(t *testing.T) {
 }
 
 func TestPreflightIntentV1(t *testing.T) {
-	packWithBlocklist := &prompt.Pack{
+	packWithBlocklist := &prompt.Pack{Pack: packspec.Pack{
 		ID: "p",
 		Prompts: map[string]*prompt.PackPrompt{
 			"main": {ToolPolicy: &prompt.ToolPolicyPack{Blocklist: []string{"danger"}}},
 		},
-	}
-	plainPack := &prompt.Pack{ID: "p", Prompts: map[string]*prompt.PackPrompt{"main": {}}}
+	}}
+	plainPack := &prompt.Pack{Pack: packspec.Pack{ID: "p", Prompts: map[string]*prompt.PackPrompt{"main": {}}}}
 	boundRegistry := ToolBinding{Mode: toolModeBind, RegistryName: "shared"}
 
 	tests := []struct {
