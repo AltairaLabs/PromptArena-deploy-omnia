@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/AltairaLabs/PromptKit/runtime/packspec"
-	"github.com/AltairaLabs/PromptKit/runtime/prompt"
+	"github.com/AltairaLabs/PromptKit/runtime/v2/packspec"
+	"github.com/AltairaLabs/PromptKit/runtime/v2/prompt"
 )
 
 // HTTP-handler config keys and the default method a handler uses when the

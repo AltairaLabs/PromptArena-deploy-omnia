@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/AltairaLabs/PromptKit/runtime/prompt"
+	"github.com/AltairaLabs/PromptKit/runtime/v2/prompt"
 )
 
 // intentAPIVersionV1 is the deploy-intent contract version this adapter emits.
