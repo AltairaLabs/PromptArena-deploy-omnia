@@ -154,7 +154,7 @@ SonarCloud runs on every PR and enforces quality on **new code only**:
 
 ## Dependencies: Sibling PromptKit Checkout
 
-This repo depends on `github.com/AltairaLabs/PromptKit/runtime` and `github.com/AltairaLabs/PromptKit/pkg` via `replace` directives in `go.mod` pointing to `../promptkit/runtime` and `../promptkit/pkg`. Ensure the sibling checkout exists:
+This repo depends on `github.com/AltairaLabs/PromptKit/runtime/v2` and `github.com/AltairaLabs/PromptKit/pkg/v2` via `replace` directives in `go.mod` pointing to `../promptkit/runtime` and `../promptkit/pkg`. Ensure the sibling checkout exists:
 
 ```bash
 git clone git@github.com:AltairaLabs/PromptKit.git ../promptkit

@@ -10,7 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/AltairaLabs/promptarena/deploy"
+	"github.com/AltairaLabs/promptarena/v2/deploy"
 )
 
 // cliAuthorizePath is the dashboard route that runs the workspace's OIDC login

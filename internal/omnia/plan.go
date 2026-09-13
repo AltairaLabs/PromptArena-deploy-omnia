@@ -8,9 +8,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/AltairaLabs/PromptKit/runtime/prompt"
-	"github.com/AltairaLabs/promptarena/deploy"
-	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
+	"github.com/AltairaLabs/PromptKit/runtime/v2/prompt"
+	"github.com/AltairaLabs/promptarena/v2/deploy"
+	"github.com/AltairaLabs/promptarena/v2/deploy/adaptersdk"
 )
 
 // describeRefValidationError renders a CRD-reference validation failure. A

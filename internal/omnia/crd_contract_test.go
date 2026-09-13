@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/AltairaLabs/PromptKit/runtime/packspec"
-	"github.com/AltairaLabs/PromptKit/runtime/prompt"
-	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
+	"github.com/AltairaLabs/PromptKit/runtime/v2/packspec"
+	"github.com/AltairaLabs/PromptKit/runtime/v2/prompt"
+	"github.com/AltairaLabs/promptarena/v2/deploy/adaptersdk"
 	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/validation"

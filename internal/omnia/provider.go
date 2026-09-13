@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/AltairaLabs/promptarena/deploy"
+	"github.com/AltairaLabs/promptarena/v2/deploy"
 )
 
 // Provider implements deploy.Provider for the Omnia Kubernetes platform.

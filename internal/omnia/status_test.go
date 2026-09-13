@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/AltairaLabs/promptarena/deploy"
+	"github.com/AltairaLabs/promptarena/v2/deploy"
 )
 
 func TestStatus_Deployed(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
+	"github.com/AltairaLabs/promptarena/v2/deploy/adaptersdk"
 )
 
 const testMultiAgentPackJSON = `{

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/AltairaLabs/PromptKit/runtime/prompt"
+	"github.com/AltairaLabs/PromptKit/runtime/v2/prompt"
 )
 
 const (

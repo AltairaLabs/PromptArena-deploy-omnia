@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/AltairaLabs/promptarena/deploy"
+	"github.com/AltairaLabs/promptarena/v2/deploy"
 )
 
 // Progress checkpoints for the single-POST intent path. Unlike the passthrough

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/AltairaLabs/PromptKit/runtime/prompt"
+	"github.com/AltairaLabs/PromptKit/runtime/v2/prompt"
 )
 
 // provisionToolCredentials best-effort-creates the Secret the pack's tool

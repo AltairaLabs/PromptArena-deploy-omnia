@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/AltairaLabs/promptarena/deploy"
-	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
+	"github.com/AltairaLabs/promptarena/v2/deploy"
+	"github.com/AltairaLabs/promptarena/v2/deploy/adaptersdk"
 )
 
 // Console links come from two places, and the split is deliberate.

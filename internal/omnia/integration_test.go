@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/AltairaLabs/promptarena/deploy"
+	"github.com/AltairaLabs/promptarena/v2/deploy"
 )
 
 // These tests hit a REAL Omnia workspace. They are gated behind the

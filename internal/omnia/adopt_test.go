@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/AltairaLabs/promptarena/deploy"
-	"github.com/AltairaLabs/promptarena/deploy/adaptersdk"
+	"github.com/AltairaLabs/promptarena/v2/deploy"
+	"github.com/AltairaLabs/promptarena/v2/deploy/adaptersdk"
 )
 
 // seedLabeledResource stores a resource in the simulated client with arbitrary
