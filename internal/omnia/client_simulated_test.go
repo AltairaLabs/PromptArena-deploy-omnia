@@ -145,7 +145,7 @@ func (s *simulatedClient) GetDeployProfile(_ context.Context) (*DeployProfile, e
 func simulatedIntentNotFound() error {
 	return &HTTPError{
 		StatusCode: httpStatusNotFound,
-		Body:       "Cannot POST /api/workspaces/test-ws/deployments",
+		Body:       "Cannot POST /api/v1/workspaces/test-ws/deployments",
 		Category:   ErrCategoryNotFound,
 	}
 }

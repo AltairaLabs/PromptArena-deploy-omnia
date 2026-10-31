@@ -63,7 +63,7 @@ Nothing here blocks a deploy. Keys are independent, so one unset optional header
 Every API call is scoped to a single workspace. The adapter constructs URLs in the form:
 
 ```
-<api_endpoint>/api/workspaces/<workspace>/<resource-type>
+<api_endpoint>/api/v1/workspaces/<workspace>/<resource-type>
 ```
 
 This means:

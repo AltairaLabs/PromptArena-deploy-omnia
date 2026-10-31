@@ -935,13 +935,13 @@ func TestBaseURL(t *testing.T) {
 			name:     "no trailing slash",
 			endpoint: "https://omnia.example.com",
 			ws:       "ws1",
-			want:     "https://omnia.example.com/api/workspaces/ws1",
+			want:     "https://omnia.example.com/api/v1/workspaces/ws1",
 		},
 		{
 			name:     "trailing slash",
 			endpoint: "https://omnia.example.com/",
 			ws:       "ws2",
-			want:     "https://omnia.example.com/api/workspaces/ws2",
+			want:     "https://omnia.example.com/api/v1/workspaces/ws2",
 		},
 	}
 

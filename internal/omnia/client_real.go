@@ -11,8 +11,8 @@ import (
 
 // httpClient is the real HTTP implementation of omniaClient.
 type httpClient struct {
-	baseURL    string // workspace-scoped: {endpoint}/api/workspaces/{ws}
-	endpoint   string // API root: {endpoint} (for non-workspace routes like /api/health)
+	baseURL    string // workspace-scoped: {endpoint}/api/v1/workspaces/{ws}
+	endpoint   string // API root: {endpoint} (for non-workspace routes like /api/v1/health)
 	token      string
 	httpClient *http.Client
 }
@@ -311,7 +311,7 @@ type workspaceEnvelope struct {
 
 //nolint:revive // interface implementation
 func (c *httpClient) GetWorkspace(ctx context.Context, name string) (*WorkspaceInfo, error) {
-	url := fmt.Sprintf("%s/api/workspaces/%s", c.endpoint, name)
+	url := fmt.Sprintf("%s/api/v1/workspaces/%s", c.endpoint, name)
 	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -324,7 +324,7 @@ func (c *httpClient) GetWorkspace(ctx context.Context, name string) (*WorkspaceI
 	if resp.StatusCode >= http.StatusBadRequest {
 		return nil, c.readError(resp)
 	}
-	// Two shapes, both real. GET /api/workspaces/{name} normally returns a
+	// Two shapes, both real. GET /api/v1/workspaces/{name} normally returns a
 	// projection — {workspace: {namespace: {...}}, access: {...}} — and only
 	// returns the raw CRD (with spec.namespace) for an owner asking ?view=full.
 	// Decoding only the CRD shape silently yielded an empty namespace on every
@@ -366,7 +366,7 @@ func (c *httpClient) CreateSecret(ctx context.Context, namespace, name string, d
 }
 
 func (c *httpClient) Health(ctx context.Context) error { //nolint:revive // interface implementation
-	url := fmt.Sprintf("%s/api/health", c.endpoint)
+	url := fmt.Sprintf("%s/api/v1/health", c.endpoint)
 	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err

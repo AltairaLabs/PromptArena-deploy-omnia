@@ -693,7 +693,7 @@ func TestHTTPClient_PostDeployment(t *testing.T) {
 func TestHTTPClient_PostDeployment_TypedError(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`Cannot POST /api/workspaces/ws/deployments`))
+		_, _ = w.Write([]byte(`Cannot POST /api/v1/workspaces/ws/deployments`))
 	})
 	hc := newTestHTTPClient(t, handler)
 

@@ -112,7 +112,7 @@ The adapter implements PromptKit's `deploy.Provider` interface and speaks JSON-R
 flowchart LR
     CFG["arena.yaml<br/>deploy.provider: omnia"] -.-> CLI["promptarena CLI"]
     CLI -->|"JSON-RPC 2.0 (stdio)"| ADP["promptarena-deploy-omnia<br/>(deploy.Provider)"]
-    ADP -->|"HTTPS + omnia_sk_ token"| API["Omnia workspace API<br/>/api/workspaces/&lt;ws&gt;"]
+    ADP -->|"HTTPS + omnia_sk_ token"| API["Omnia workspace API<br/>/api/v1/workspaces/&lt;ws&gt;"]
     API --> CRDS["Kubernetes CRDs<br/>PromptPack · AgentRuntime<br/>ToolRegistry · AgentPolicy"]
 ```
 

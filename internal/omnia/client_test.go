@@ -206,7 +206,7 @@ func TestHTTPClient_Health(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
-		if !strings.HasSuffix(r.URL.Path, "/api/health") {
+		if !strings.HasSuffix(r.URL.Path, "/api/v1/health") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
@@ -404,7 +404,7 @@ func TestNewHTTPClient(t *testing.T) {
 	if !ok {
 		t.Fatal("expected *httpClient")
 	}
-	if hc.baseURL != "https://omnia.example.com/api/workspaces/ws1" {
+	if hc.baseURL != "https://omnia.example.com/api/v1/workspaces/ws1" {
 		t.Errorf("unexpected baseURL: %q", hc.baseURL)
 	}
 	if hc.endpoint != "https://omnia.example.com" {
@@ -419,7 +419,7 @@ func TestNewHTTPClient(t *testing.T) {
 
 func TestHTTPClient_GetWorkspace(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/workspaces/my-ws" {
+		if r.URL.Path != "/api/v1/workspaces/my-ws" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")

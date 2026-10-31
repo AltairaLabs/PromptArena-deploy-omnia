@@ -175,7 +175,7 @@ a one-line remediation hint. The categories are:
 | Category | HTTP status | What it usually means | Remediation |
 |---|---|---|---|
 | `permission` | 401, 403 | The token is missing or lacks workspace access | Verify the `omnia_sk_` API token (config `api_token` or `OMNIA_API_TOKEN`) is valid and has permission for the workspace |
-| `not_found` | 404 | The workspace or a referenced resource does not exist | Check the workspace and resource name; the API path is `/api/workspaces/{workspace}` |
+| `not_found` | 404 | The workspace or a referenced resource does not exist | Check the workspace and resource name; the API path is `/api/v1/workspaces/{workspace}` |
 | `conflict` | 409 | The resource already exists, or the request body was rejected as invalid | Update the existing resource instead of creating it; check the deploy-config values against the Omnia API requirements |
 | `network` | 5xx | The Omnia API returned a server error | Retry after a short wait |
 | `network` (connection) | (no HTTP response) | The endpoint was unreachable — connection refused, timeout, or DNS failure | Verify `api_endpoint` is correct and reachable |
