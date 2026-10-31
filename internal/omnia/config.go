@@ -934,7 +934,7 @@ func (c *Config) consoleRoot() string {
 
 // baseURL returns the full base URL for the workspace API.
 func (c *Config) baseURL() string {
-	return fmt.Sprintf("%s/api/workspaces/%s", c.endpointRoot(), c.Workspace)
+	return fmt.Sprintf("%s/api/v1/workspaces/%s", c.endpointRoot(), c.Workspace)
 }
 
 // validate checks the config and returns any validation errors.

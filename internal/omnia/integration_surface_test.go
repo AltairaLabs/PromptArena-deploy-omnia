@@ -2134,7 +2134,7 @@ func rawAgentStatus(t *testing.T, deployConfig, agentName string) map[string]any
 		t.Fatalf("parseConfig: %v", err)
 	}
 
-	url := fmt.Sprintf("%s/api/workspaces/%s/agents/%s",
+	url := fmt.Sprintf("%s/api/v1/workspaces/%s/agents/%s",
 		cfg.endpointRoot(), cfg.Workspace, agentName)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {

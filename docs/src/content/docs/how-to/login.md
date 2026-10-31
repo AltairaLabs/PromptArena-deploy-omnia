@@ -27,10 +27,10 @@ promptarena deploy login --provider omnia
 
 The CLI:
 
-1. Builds the authorize URL from your `api_endpoint` (the dashboard's `/api/cli/authorize` route) and opens it in your browser.
+1. Builds the authorize URL from your `api_endpoint` (the dashboard's `/api/v1/cli/authorize` route) and opens it in your browser.
 2. You authenticate (OIDC) and **pick a workspace** in the dashboard.
 3. The dashboard redirects back to a local loopback callback with a one-time code.
-4. The CLI exchanges that code (back-channel, via `/api/cli/token`) for a **scoped token** and the **assembled deploy profile**.
+4. The CLI exchanges that code (back-channel, via `/api/v1/cli/token`) for a **scoped token** and the **assembled deploy profile**.
 
 ## What it writes, and where
 
@@ -45,7 +45,7 @@ If the returned profile lists providers but none is named `default`, the adapter
 
 ## Pointing at a different dashboard
 
-The login routes (`/api/cli/authorize`, `/api/cli/token`) live in the **dashboard**, which may be a different origin than the management-API `api_endpoint` — for example a local dev server. Set `OMNIA_DASHBOARD_URL` to override the base used for login:
+The login routes (`/api/v1/cli/authorize`, `/api/v1/cli/token`) live in the **dashboard**, which may be a different origin than the management-API `api_endpoint` — for example a local dev server. Set `OMNIA_DASHBOARD_URL` to override the base used for login:
 
 ```bash
 export OMNIA_DASHBOARD_URL="http://localhost:3000"

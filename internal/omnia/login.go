@@ -15,14 +15,14 @@ import (
 
 // cliAuthorizePath is the dashboard route that runs the workspace's OIDC login
 // and redirects back to the CLI loopback with a one-time code.
-const cliAuthorizePath = "/api/cli/authorize"
+const cliAuthorizePath = "/api/v1/cli/authorize"
 
 // cliTokenPath is the back-channel route that exchanges the one-time code for a
 // scoped token and the assembled deploy profile.
-const cliTokenPath = "/api/cli/token" //nolint:gosec // URL path, not a credential
+const cliTokenPath = "/api/v1/cli/token" //nolint:gosec // URL path, not a credential
 
-// envDashboardURL overrides the base used for the login routes (/api/cli/*).
-// The /api/cli/authorize + /api/cli/token routes live in the dashboard; this lets
+// envDashboardURL overrides the base used for the login routes (/api/v1/cli/*).
+// The /api/v1/cli/authorize + /api/v1/cli/token routes live in the dashboard; this lets
 // the dashboard be a different origin than the deploy config's api_endpoint
 // (e.g. http://localhost:3000 in local dev). When unset, api_endpoint is used.
 const envDashboardURL = "OMNIA_DASHBOARD_URL"

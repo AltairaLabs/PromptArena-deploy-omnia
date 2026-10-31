@@ -70,10 +70,10 @@ Always. Every deployment creates exactly one PromptPack.
 
 | Operation | HTTP method | URL |
 |---|---|---|
-| Create | `POST` | `/api/workspaces/<ws>/promptpacks` |
-| Update | `PUT` | `/api/workspaces/<ws>/promptpacks/<name>` |
-| Get | `GET` | `/api/workspaces/<ws>/promptpacks/<name>` |
-| Delete | `DELETE` | `/api/workspaces/<ws>/promptpacks/<name>` |
+| Create | `POST` | `/api/v1/workspaces/<ws>/promptpacks` |
+| Update | `PUT` | `/api/v1/workspaces/<ws>/promptpacks/<name>` |
+| Get | `GET` | `/api/v1/workspaces/<ws>/promptpacks/<name>` |
+| Delete | `DELETE` | `/api/v1/workspaces/<ws>/promptpacks/<name>` |
 
 ---
 
@@ -149,10 +149,10 @@ Optional blocks (`tool`, `selector`, the `*Config` blocks, `timeout`) are emitte
 
 | Operation | HTTP method | URL |
 |---|---|---|
-| Create | `POST` | `/api/workspaces/<ws>/toolregistries` |
-| Update | `PUT` | `/api/workspaces/<ws>/toolregistries/<name>` |
-| Get | `GET` | `/api/workspaces/<ws>/toolregistries/<name>` |
-| Delete | `DELETE` | `/api/workspaces/<ws>/toolregistries/<name>` |
+| Create | `POST` | `/api/v1/workspaces/<ws>/toolregistries` |
+| Update | `PUT` | `/api/v1/workspaces/<ws>/toolregistries/<name>` |
+| Get | `GET` | `/api/v1/workspaces/<ws>/toolregistries/<name>` |
+| Delete | `DELETE` | `/api/v1/workspaces/<ws>/toolregistries/<name>` |
 
 ---
 
@@ -198,10 +198,10 @@ The tool list is the deduplicated, sorted union of all blocklists across all pro
 
 | Operation | HTTP method | URL |
 |---|---|---|
-| Create | `POST` | `/api/workspaces/<ws>/agentpolicies` |
-| Update | `PUT` | `/api/workspaces/<ws>/agentpolicies/<name>` |
-| Get | `GET` | `/api/workspaces/<ws>/agentpolicies/<name>` |
-| Delete | `DELETE` | `/api/workspaces/<ws>/agentpolicies/<name>` |
+| Create | `POST` | `/api/v1/workspaces/<ws>/agentpolicies` |
+| Update | `PUT` | `/api/v1/workspaces/<ws>/agentpolicies/<name>` |
+| Get | `GET` | `/api/v1/workspaces/<ws>/agentpolicies/<name>` |
+| Delete | `DELETE` | `/api/v1/workspaces/<ws>/agentpolicies/<name>` |
 
 ---
 
@@ -284,10 +284,10 @@ Notes:
 
 | Operation | HTTP method | URL |
 |---|---|---|
-| Create | `POST` | `/api/workspaces/<ws>/agentruntimes` |
-| Update | `PUT` | `/api/workspaces/<ws>/agentruntimes/<name>` |
-| Get | `GET` | `/api/workspaces/<ws>/agentruntimes/<name>` |
-| Delete | `DELETE` | `/api/workspaces/<ws>/agentruntimes/<name>` |
+| Create | `POST` | `/api/v1/workspaces/<ws>/agentruntimes` |
+| Update | `PUT` | `/api/v1/workspaces/<ws>/agentruntimes/<name>` |
+| Get | `GET` | `/api/v1/workspaces/<ws>/agentruntimes/<name>` |
+| Delete | `DELETE` | `/api/v1/workspaces/<ws>/agentruntimes/<name>` |
 
 ## Name sanitization
 

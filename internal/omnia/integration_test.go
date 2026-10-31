@@ -1108,7 +1108,7 @@ func rawResourceSpec(t *testing.T, deployConfig, resPath, name string) map[strin
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
-	url := fmt.Sprintf("%s/api/workspaces/%s/%s/%s", cfg.endpointRoot(), cfg.Workspace, resPath, name)
+	url := fmt.Sprintf("%s/api/v1/workspaces/%s/%s/%s", cfg.endpointRoot(), cfg.Workspace, resPath, name)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
@@ -1208,12 +1208,12 @@ type toolTestResponse struct {
 	Warning string          `json:"warning,omitempty"`
 }
 
-// testTool calls POST /api/workspaces/{ws}/toolregistries/{registry}/test with the
+// testTool calls POST /api/v1/workspaces/{ws}/toolregistries/{registry}/test with the
 // given handler name and empty args, using the workspace bearer token. It returns
 // the decoded response; a transport/HTTP error is fatal.
 func testTool(t *testing.T, env itConfig, registry, handlerName string) toolTestResponse {
 	t.Helper()
-	url := fmt.Sprintf("%s/api/workspaces/%s/toolregistries/%s/test",
+	url := fmt.Sprintf("%s/api/v1/workspaces/%s/toolregistries/%s/test",
 		strings.TrimRight(env.Endpoint, "/"), env.Workspace, registry)
 	body, _ := json.Marshal(map[string]any{"handlerName": handlerName, "arguments": map[string]any{}})
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))

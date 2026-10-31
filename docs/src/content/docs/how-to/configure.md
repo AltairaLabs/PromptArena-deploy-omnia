@@ -106,7 +106,7 @@ deploy:
 
 ### `api_endpoint` (required)
 
-The base URL of the Omnia Management API. The adapter appends `/api/workspaces/<workspace>` to form the full API path.
+The base URL of the Omnia Management API. The adapter appends `/api/v1/workspaces/<workspace>` to form the full API path.
 
 ```yaml
 api_endpoint: "https://omnia.example.com"

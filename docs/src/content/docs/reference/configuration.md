@@ -308,7 +308,7 @@ The adapter validates configuration against the following JSON Schema:
 | **Required** | Yes |
 | **Example** | `"https://omnia.example.com"` |
 
-Base URL of the Omnia Management API. The adapter constructs the full workspace URL as `<api_endpoint>/api/workspaces/<workspace>`. Trailing slashes are stripped automatically.
+Base URL of the Omnia Management API. The adapter constructs the full workspace URL as `<api_endpoint>/api/v1/workspaces/<workspace>`. Trailing slashes are stripped automatically.
 
 ### `workspace`
 
