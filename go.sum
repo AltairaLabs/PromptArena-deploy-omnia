@@ -4,8 +4,8 @@ cloud.google.com/go/compute/metadata v0.9.0 h1:pDUj4QMoPejqq20dK0Pg2N4yG9zIkYGdB
 cloud.google.com/go/compute/metadata v0.9.0/go.mod h1:E0bWwX5wTnLPedCKqk3pJmVgCBSM6qQI1yTBdEb3C10=
 github.com/AltairaLabs/PromptKit/runtime/v2 v2.18.0 h1:CShKxM20wNub8mluwTw+Gyf2mu2J6k4k0AlPAFN4pnU=
 github.com/AltairaLabs/PromptKit/runtime/v2 v2.18.0/go.mod h1:HObfIZSkseItu9DPjj3gpFBwj92lBZQC6KBXFRL87ro=
-github.com/AltairaLabs/promptarena/v2 v2.4.0 h1:J0PHELyRVv94TSFA3dTSctOGF1aQE0rj4GfVH61eJKk=
-github.com/AltairaLabs/promptarena/v2 v2.4.0/go.mod h1:iIbbYzq61ziod5ezUWn0cR9gsO8NTnkoSljwRi0zAXA=
+github.com/AltairaLabs/promptarena/v2 v2.5.0 h1:weHTWFIGby0xR1ZjC7JQoF+xU8cr5r8dSHf1rFkXlcU=
+github.com/AltairaLabs/promptarena/v2 v2.5.0/go.mod h1:2SE2Yv1l2KZ47bqscbWFsFES4DMVnCn3rzltZddgBKw=
 github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3 h1:qgnWTiWs1G7AqcKZegFvkJD1bmXJcaDU3uC0ELSgZ5U=
 github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3/go.mod h1:XtxD48QPInqoj+GMlcRlXHEYsoOxFnP6w2JgIZ9rDS4=
 github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.15.0 h1:w3gDUJlJ0BfBsHH02DCBDwbkmMSXJqBj6nBOCo9iocY=
