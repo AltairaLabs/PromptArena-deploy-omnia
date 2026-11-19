@@ -95,6 +95,15 @@ func (p *Provider) Apply(
 	}
 
 	resources, applyErr := executeApply(ctx, ac)
+	if applyErr != nil {
+		// The CLI replaces its stored state with this one, so carry forward the
+		// prior resources this apply never reached.
+		stateJSON, merr := partialApplyState(req.PriorState, resources, pack.ID, pack.Version)
+		if merr != nil {
+			return "", errors.Join(applyErr, fmt.Errorf("omnia: failed to marshal state: %w", merr))
+		}
+		return stateJSON, applyErr
+	}
 
 	state := AdapterState{
 		Resources: resources,
@@ -106,7 +115,7 @@ func (p *Provider) Apply(
 		return "", fmt.Errorf("omnia: failed to marshal state: %w", err)
 	}
 
-	return string(stateJSON), applyErr
+	return string(stateJSON), nil
 }
 
 // executeApplyPhases runs all deploy phases in dependency order.

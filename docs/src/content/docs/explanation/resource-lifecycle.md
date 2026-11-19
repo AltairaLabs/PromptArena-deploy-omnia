@@ -162,6 +162,16 @@ Each resource in the state records:
 | `name` | Kubernetes resource name |
 | `uid` | Kubernetes UID returned by the API |
 | `resource_version` | Kubernetes resource version for optimistic concurrency |
-| `status` | Lifecycle status: `created`, `updated`, `unchanged`, `failed`, or `planned` |
+| `status` | Lifecycle status: `created`, `updated`, `unchanged`, or `planned` |
 
 The state also records the pack ID and version at the top level for quick reference.
+
+### State after a failed apply
+
+When an apply fails partway, the adapter still returns a state, and the PromptArena CLI saves it in place of the stored one (the adapter advertises the `partial_apply_state` capability). That state describes everything that exists after the failure:
+
+- A resource the apply created or updated is recorded as it now is.
+- A resource whose write failed keeps its entry from the prior state. It is left out when it had none, because its create never happened.
+- A prior resource the apply never reached is kept as it was.
+
+When the apply wrote nothing, it returns the prior state unchanged, and the CLI keeps what it has stored.

@@ -23,9 +23,12 @@ func NewProvider() *Provider {
 // GetProviderInfo returns metadata about the omnia adapter.
 func (p *Provider) GetProviderInfo(_ context.Context) (*deploy.ProviderInfo, error) {
 	return &deploy.ProviderInfo{
-		Name:         "omnia",
-		Version:      Version,
-		Capabilities: []string{"plan", "apply", "destroy", "status", deploy.LoginCapability},
+		Name:    "omnia",
+		Version: Version,
+		Capabilities: []string{
+			"plan", "apply", "destroy", "status", deploy.LoginCapability,
+			deploy.PartialApplyStateCapability,
+		},
 		ConfigSchema: configSchema,
 	}, nil
 }
