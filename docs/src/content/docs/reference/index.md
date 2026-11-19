@@ -22,4 +22,4 @@ The adapter reports the following metadata via the `GetProviderInfo` operation:
 
 The `import` capability is not yet supported.
 
-`partial_apply_state` means a failed apply returns a state the CLI can save in place of the stored one. That state keeps the prior resources the apply never reached, records what it created or updated, and leaves out any resource whose create failed. When the apply wrote nothing, it returns the prior state unchanged.
+`partial_apply_state` means a failed apply returns a state the CLI can save in place of the stored one. That state keeps the prior resources the apply never reached, records what it created or updated, and leaves out any resource whose create failed. When it learns nothing new, it returns the prior state unchanged. See [State after a failed apply](/explanation/resource-lifecycle/#state-after-a-failed-apply).

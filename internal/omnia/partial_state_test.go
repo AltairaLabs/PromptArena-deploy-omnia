@@ -62,11 +62,16 @@ func assertNoFailedResources(t *testing.T, state AdapterState) {
 // apply returns on the per-resource path: the CLI saves it in place of the
 // stored state, so the prior resources the apply never reached must survive,
 // a resource whose update failed keeps its prior entry, and what the apply
-// wrote is recorded.
+// wrote is recorded. The cluster holds what the prior state records, so the
+// apply updates rather than creates.
 func TestApply_PartialFailureKeepsUntouchedPriorResources(t *testing.T) {
 	fastReconcile(t)
 	sim := newSimulatedClient()
 	sim.agentRuntimeReadyOnGet = true
+	seedManagedResource(sim, ResTypePromptPack, "test-pack", "test-pack")
+	seedManagedResource(sim, ResTypeToolRegistry, "test-pack-tools", "test-pack")
+	seedManagedResource(sim, ResTypeAgentRuntime, "test-pack", "test-pack")
+	seedManagedResource(sim, ResTypeAgentRuntime, "retired-agent", "test-pack")
 	sim.failOn[resourceKey(ResTypeAgentRuntime, "test-pack")] = fmt.Errorf("simulated API failure")
 	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
 
@@ -83,6 +88,7 @@ func TestApply_PartialFailureKeepsUntouchedPriorResources(t *testing.T) {
 	assertNoFailedResources(t, state)
 	for _, want := range []struct{ resType, name, uid string }{
 		{ResTypePromptPack, "test-pack-v0-9-0", "old-pack-uid"},
+		{ResTypeToolRegistry, "test-pack-tools", "tools-uid"},
 		{ResTypeAgentRuntime, "test-pack", "agent-uid"},
 		{ResTypeAgentRuntime, "retired-agent", "retired-uid"},
 	} {
@@ -95,17 +101,70 @@ func TestApply_PartialFailureKeepsUntouchedPriorResources(t *testing.T) {
 			t.Errorf("%s %q UID = %q, want the prior entry's %q", want.resType, want.name, got.UID, want.uid)
 		}
 	}
-	for _, written := range []struct{ resType, name, priorUID string }{
-		{ResTypePromptPack, "test-pack", "pack-uid"},
-		{ResTypeToolRegistry, "test-pack-tools", "tools-uid"},
-	} {
-		got, ok := findResource(state, written.resType, written.name)
-		if !ok || got.Status != ResStatusCreated || got.UID == written.priorUID {
-			t.Errorf("the %s this apply wrote must replace its prior entry, got %+v", written.resType, got)
-		}
+	if got, _ := findResource(state, ResTypePromptPack, "test-pack"); got.Status != ResStatusUpdated || got.UID == "pack-uid" {
+		t.Errorf("the PromptPack this apply updated must replace its prior entry, got %+v", got)
 	}
 	if len(state.Resources) != 5 {
 		t.Errorf("want the 5 prior resources, got %+v", state.Resources)
+	}
+}
+
+// TestApply_FailedUpdateOfAnAdoptedResourceIsKept covers a stored state that
+// does not record a resource the cluster has: apply adopts it and updates it,
+// and when that update fails the resource still exists, so the state records
+// it rather than dropping it.
+func TestApply_FailedUpdateOfAnAdoptedResourceIsKept(t *testing.T) {
+	fastReconcile(t)
+	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
+	seedManagedResource(sim, ResTypeAgentRuntime, "test-pack", "test-pack")
+	sim.failOn[resourceKey(ResTypeAgentRuntime, "test-pack")] = fmt.Errorf("simulated API failure")
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON: testPackJSON, DeployConfig: testDeployConfig,
+	}, noopApplyCallback)
+	if err == nil {
+		t.Fatal("expected the AgentRuntime failure to fail the apply")
+	}
+
+	state := parseState(t, stateJSON)
+	assertNoFailedResources(t, state)
+	if got, ok := findResource(state, ResTypeAgentRuntime, "test-pack"); !ok || got.Status != ResStatusUnchanged {
+		t.Errorf("the adopted AgentRuntime whose update failed must be recorded as unchanged, got %+v", state.Resources)
+	}
+}
+
+// TestApply_FailedUpdateAfterAlreadyExistsIsKept covers a create that answers
+// AlreadyExists and an update that then fails: the answer proves the resource
+// exists, so the state records it.
+func TestApply_FailedUpdateAfterAlreadyExistsIsKept(t *testing.T) {
+	fastReconcile(t)
+	prevBackoff := updateConflictBackoff
+	updateConflictBackoff = 0
+	t.Cleanup(func() { updateConflictBackoff = prevBackoff })
+
+	sim := newSimulatedClient()
+	sim.agentRuntimeReadyOnGet = true
+	sim.createAlreadyExists = map[string]bool{simKey(ResTypePromptPack, "test-pack"): true}
+	// Every update attempt on the PromptPack, the first one made, conflicts.
+	sim.updateConflictsRemaining = updateConflictRetries + 1
+	p := &Provider{clientFunc: newSimulatedClientFactory(sim)}
+
+	stateJSON, err := p.Apply(context.Background(), &deploy.PlanRequest{
+		PackJSON: testPackJSON, DeployConfig: testDeployConfig,
+	}, noopApplyCallback)
+	if err == nil {
+		t.Fatal("expected the PromptPack update failure to fail the apply")
+	}
+
+	state := parseState(t, stateJSON)
+	assertNoFailedResources(t, state)
+	if got, ok := findResource(state, ResTypePromptPack, "test-pack"); !ok || got.Status != ResStatusUnchanged {
+		t.Errorf("the PromptPack that answered AlreadyExists must be recorded, got %+v", state.Resources)
+	}
+	if got, _ := findResource(state, ResTypeAgentRuntime, "test-pack"); got.Status != ResStatusCreated {
+		t.Errorf("the AgentRuntime created after it must be recorded, got %+v", state.Resources)
 	}
 }
 
@@ -230,6 +289,8 @@ func TestMergePartialResources(t *testing.T) {
 		{Type: ResTypeToolRegistry, Name: "r", UID: "r0"},
 		{Type: ResTypeAgentRuntime, Name: "a", UID: "a0"},
 		{Type: ResTypeAgentRuntime, Name: "a", UID: "duplicate"},
+		{Type: ResTypeAgentRuntime, Name: "dry-run", Status: ResStatusPlanned},
+		{Type: ResTypeAgentRuntime, Name: "old-failure", Status: ResStatusFailed},
 	}
 	touched := []ResourceState{
 		{Type: ResTypePromptPack, Name: "p", UID: "p1", Status: ResStatusUpdated},
@@ -239,11 +300,16 @@ func TestMergePartialResources(t *testing.T) {
 		{Type: ResTypeAgentPolicy, Name: "never-created", Status: ResStatusFailed},
 	}
 
-	merged, wrote := mergePartialResources(prior, touched)
-	if !wrote {
-		t.Error("an update and a create were reported; wrote must be true")
+	existing := map[string]ResourceState{
+		resourceKey(ResTypeAgentPolicy, "adopted"): {Type: ResTypeAgentPolicy, Name: "adopted"},
 	}
-	want := []string{"p1", "r0", "a0", "n1"}
+	touched = append(touched, ResourceState{Type: ResTypeAgentPolicy, Name: "adopted", Status: ResStatusFailed})
+
+	merged, changed := mergePartialResources(prior, existing, touched)
+	if !changed {
+		t.Error("an update and a create were reported; changed must be true")
+	}
+	want := []string{"p1", "r0", "a0", "n1", ""}
 	if len(merged) != len(want) {
 		t.Fatalf("merged = %+v, want UIDs %v", merged, want)
 	}
@@ -253,23 +319,31 @@ func TestMergePartialResources(t *testing.T) {
 		}
 	}
 
-	if _, wrote := mergePartialResources(prior, []ResourceState{
+	if last := merged[len(merged)-1]; last.Name != "adopted" || last.Status != ResStatusUnchanged {
+		t.Errorf("a failed write to an existing resource must be recorded as unchanged, got %+v", last)
+	}
+
+	if _, changed := mergePartialResources(prior, existing, []ResourceState{
 		{Type: ResTypePromptPack, Name: "p", Status: ResStatusUnchanged},
 		{Type: ResTypeAgentRuntime, Name: "a", Status: ResStatusFailed},
-	}); wrote {
-		t.Error("nothing was created or updated; wrote must be false")
+	}); changed {
+		t.Error("nothing new was learned; changed must be false")
+	}
+	if _, changed := mergePartialResources(prior, nil, []ResourceState{
+		{Type: ResTypeToolRegistry, Name: "adopted-registry", Status: ResStatusUnchanged},
+	}); !changed {
+		t.Error("an unchanged resource the prior state lacks is new; changed must be true")
 	}
 }
 
-func TestPartialApplyState_UnreadablePriorKeepsWhatTheApplyWrote(t *testing.T) {
-	stateJSON, err := partialApplyState("not json", []ResourceState{
+func TestPartialApplyState_UnreadablePriorIsReturnedUnchanged(t *testing.T) {
+	stateJSON, err := partialApplyState("not json", nil, []ResourceState{
 		{Type: ResTypePromptPack, Name: "p", UID: "p1", Status: ResStatusCreated},
 	}, "pack", "1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := parseState(t, stateJSON)
-	if len(state.Resources) != 1 || state.Resources[0].UID != "p1" {
-		t.Errorf("want the created PromptPack alone, got %+v", state.Resources)
+	if stateJSON != "not json" {
+		t.Errorf("state = %q, want the unreadable prior state unchanged, so the CLI keeps it", stateJSON)
 	}
 }

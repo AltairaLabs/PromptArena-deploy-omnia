@@ -171,7 +171,7 @@ The state also records the pack ID and version at the top level for quick refere
 When an apply fails partway, the adapter still returns a state, and the PromptArena CLI saves it in place of the stored one (the adapter advertises the `partial_apply_state` capability). That state describes everything that exists after the failure:
 
 - A resource the apply created or updated is recorded as it now is.
-- A resource whose write failed keeps its entry from the prior state. It is left out when it had none, because its create never happened.
+- A resource whose write failed keeps its entry from the prior state. Without one, it is recorded as `unchanged` when the apply knows it exists (adopted from the cluster, or its create answered AlreadyExists), and left out otherwise, because its create never happened.
 - A prior resource the apply never reached is kept as it was.
 
-When the apply wrote nothing, it returns the prior state unchanged, and the CLI keeps what it has stored.
+When the merge adds nothing to the prior state, or the prior state cannot be read, the adapter returns the prior state unchanged and the CLI keeps what it has stored. A deploy-intent call that fails with a server or transport error reports no per-resource outcome, so its state is the prior one even if the server applied some objects; the next plan or apply adopts them from the cluster.
