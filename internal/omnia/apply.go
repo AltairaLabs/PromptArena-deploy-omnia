@@ -95,6 +95,15 @@ func (p *Provider) Apply(
 	}
 
 	resources, applyErr := executeApply(ctx, ac)
+	if applyErr != nil {
+		// The CLI replaces its stored state with this one, so carry forward the
+		// prior resources this apply never reached.
+		stateJSON, merr := partialApplyState(req.PriorState, ac.priorMap, resources, pack.ID, pack.Version)
+		if merr != nil {
+			return "", errors.Join(applyErr, fmt.Errorf("omnia: failed to marshal state: %w", merr))
+		}
+		return stateJSON, applyErr
+	}
 
 	state := AdapterState{
 		Resources: resources,
@@ -106,7 +115,7 @@ func (p *Provider) Apply(
 		return "", fmt.Errorf("omnia: failed to marshal state: %w", err)
 	}
 
-	return string(stateJSON), applyErr
+	return string(stateJSON), nil
 }
 
 // executeApplyPhases runs all deploy phases in dependency order.
@@ -433,6 +442,9 @@ func applyResourcePhase(
 		// race between the adopt-list and this write created it), transparently
 		// switch to an update rather than failing the apply with a 409.
 		if err != nil && isAlreadyExists(err) {
+			// It exists whatever the update below does, and a failed apply's
+			// state must say so (partialApplyState).
+			recordExisting(ac, resType, name)
 			action, verb, status = deploy.ActionUpdate, verbUpdating, ResStatusUpdated
 			resp, err = updateWithRetry(ctx, ac.client, resType, name, body)
 		}
@@ -461,6 +473,18 @@ func applyResourcePhase(
 		ResourceVersion: resp.Metadata.ResourceVersion,
 		Status:          status,
 	}}, nil
+}
+
+// recordExisting notes in the prior-state map that a resource exists, for a
+// resource the apply learns about only when its create answers AlreadyExists.
+func recordExisting(ac *applyContext, resType, name string) {
+	if ac.priorMap == nil {
+		ac.priorMap = make(map[string]ResourceState)
+	}
+	key := resourceKey(resType, name)
+	if _, known := ac.priorMap[key]; !known {
+		ac.priorMap[key] = ResourceState{Type: resType, Name: name}
+	}
 }
 
 // applyDryRun generates a deployment preview without API calls.

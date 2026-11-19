@@ -21,7 +21,7 @@ func TestGetProviderInfo(t *testing.T) {
 	}
 	expectedCaps := map[string]bool{
 		"plan": true, "apply": true, "destroy": true, "status": true,
-		deploy.LoginCapability: true,
+		deploy.LoginCapability: true, deploy.PartialApplyStateCapability: true,
 	}
 	for _, cap := range info.Capabilities {
 		if !expectedCaps[cap] {

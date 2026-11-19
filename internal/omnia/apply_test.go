@@ -468,7 +468,8 @@ func TestApply_ResourceFailure(t *testing.T) {
 		t.Fatalf("failed to parse state: %v", err)
 	}
 
-	// Other resources should still have been created.
+	// Other resources should still have been created. The registry whose
+	// create failed does not exist, so it is not recorded in the state.
 	var failedCount, createdCount int
 	for _, r := range state.Resources {
 		switch r.Status {
@@ -477,9 +478,12 @@ func TestApply_ResourceFailure(t *testing.T) {
 		case ResStatusCreated:
 			createdCount++
 		}
+		if r.Type == ResTypeToolRegistry {
+			t.Errorf("the registry whose create failed must not be recorded: %+v", r)
+		}
 	}
-	if failedCount != 1 {
-		t.Errorf("expected 1 failed resource, got %d", failedCount)
+	if failedCount != 0 {
+		t.Errorf("expected no failed resource in state, got %d", failedCount)
 	}
 	if createdCount == 0 {
 		t.Error("expected other resources to be created despite failure")
