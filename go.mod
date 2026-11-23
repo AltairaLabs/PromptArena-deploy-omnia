@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/AltairaLabs/PromptKit/runtime/v2 v2.23.0
-	github.com/AltairaLabs/promptarena/v2 v2.7.1-0.20261119195004-0aefe5967ca0
+	github.com/AltairaLabs/promptarena/v2 v2.8.0
 	k8s.io/apiextensions-apiserver v0.37.2
 	k8s.io/apimachinery v0.37.2
 	sigs.k8s.io/yaml v1.6.0
